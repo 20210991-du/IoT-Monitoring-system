@@ -1,7 +1,9 @@
 # AI 기반 IoT 통합 관제 시스템
 
 ## 📌 Version
-v2026.03.22 (recent version)
+Current Version: v2026.03.22
+
+👉 자세한 변경 내역은 [CHANGELOG.md](./CHANGELOG.md) 참고
 
 ## 📌 프로젝트 개요
 본 프로젝트는 산업용 IoT 센서 데이터를 기반으로  
