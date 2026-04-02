@@ -103,15 +103,17 @@ npm run dev
 ```
 
 ### Backend (예정)
+```bash
 cd backend
 npm install
 node app.js
-
+```
 
 ### AI 모델 실행
+```bash
 cd ai/scripts
 python gas_common_model_v2.py
-
+```
 
 ---
 
