@@ -96,10 +96,11 @@ iot-integrated-dashboard/
 ## 🚀 실행 방법
 
 ### Frontend
+```bash
 cd frontend
 npm install
 npm run dev
-
+```
 
 ### Backend (예정)
 cd backend
