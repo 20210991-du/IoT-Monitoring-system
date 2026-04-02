@@ -46,14 +46,12 @@ AI를 활용한 이상 탐지 및 통합 관제 대시보드를 구축하는 것
 ---
 
 ## 🗂️ 프로젝트 구조
-```text
-frontend/   → React 기반 대시보드
-backend/    → API 서버 (DB 연동)
-ai/         → AI 모델 및 분석 코드
-data/       → 샘플 데이터
-docs/       → 프로젝트 문서
-
----
+iot-integrated-dashboard/
+├── frontend/   # React 기반 대시보드
+├── backend/    # API 서버 (DB 연동)
+├── ai/         # AI 모델 및 분석 코드
+├── data/       # 샘플 데이터
+└── docs/       # 프로젝트 문서
 
 ## ⚙️ 기술 스택
 
