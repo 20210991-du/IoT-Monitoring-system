@@ -18,6 +18,10 @@ AI를 활용한 이상 탐지 및 통합 관제 대시보드를 구축하는 것
 기존 시스템이 단순 모니터링 중심이었다면,  
 본 프로젝트는 **AI 기반 예지보전 및 통합 대시보드 제공**을 목표로 한다.
 
+## 🎨 UI 설계 (Figma)
+
+👉 [Figma 디자인 보기]([https://your-figma-link](https://www.figma.com/design/r1jlXaXkawhPn3qwDIJylV/%ED%86%B5%ED%99%A5%EA%B4%80%EC%A0%9C-%EB%8C%80%EC%8B%9C%EB%B3%B4%EB%93%9C?node-id=3-2&p=f))
+
 ---
 ## 🎯 주요 기능
 
