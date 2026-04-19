@@ -1,5 +1,38 @@
 # 📄 Changelog
 
+## v2026.04.19
+### Added
+-gas_common_model_predict.py 신규 분리
+-run_batch_prediction(): 전체 장비 일괄 이상 탐지 및 결과 CSV 저장
+-classify_risk_level(): 이상/관찰/정상 3단계 위험 등급 분류 함수 추가
+-OBSERVATION_RATIO 파라미터로 관찰 구간 기준 조정 가능
+-EarlyStopping 콜백 추가 (patience=5, restore_best_weights=True)
+-희생전류 분리 처리
+-SACRIFICIAL_DEVICES, SACRIFICIAL_FEATURES 상수 추가
+-get_sacrificial_device_data(): TB24-250406, 407 전용 데이터 분리 함수 추가
+-통신품질 룰 기반 필터 추가
+-apply_comm_quality_filter(): -115 dBm 이하 단절 판정, 연속 3회 이상 고장 판정
+-통신단절_플래그 / 통신고장_플래그 컬럼 자동 생성
+
+### Changed
+-단일 파일(gas_common_model_v3.py) → 학습(train) / 예측(predict) 두 파일로 분리
+-데이터 분할 방식 개선
+-기존: 전체 데이터로 scaler fit (데이터 leakage 발생)
+ 변경: train 70% / val 15% / test 15% 시간 순 분리, train 구간으로만 scaler fit
+-Threshold 계산 기준 변경
+-기존: 학습 데이터(prepared_df) 기반
+ 변경: test 구간(미관측 데이터) 기반 → 실제 운영 환경에 가까운 기준값 산출
+-LSTM activation 수정: relu → 제거(기본값 tanh) — relu 사용 시 gradient 폭발/소실 위험
+-학습 validation 방식 변경: validation_split=0.1 → validation_data=(X_val, X_val) 직접 전달
+-이상 판정 단계 확장: is_anomaly (True/False 2단계) → risk_level (이상/관찰/정상 3단계)
+-BASE_FEATURES에서 희생전류, 통신품질 제외 (각각 전용 처리로 분리)
+-min_points_per_device 기본값 상향: 72 → 200, 부족 시 자동 상향 로직 추가
+-학습 epochs 상향: 1 → 50
+
+👉 **결과**
+-모델 신뢰성 및 유지보수성 향상
+-이상 판정이 2단계 → 3단계로 세분화되어 운영 대응 기준 구체화
+
 ## v2026.04.06
 
 ### Added
