@@ -3,10 +3,8 @@
   "base_features": [
     "방식전위",
     "AC유입",
-    "희생전류",
     "온도",
-    "습도",
-    "통신품질"
+    "습도"
   ],
   "feature_columns": [
     "방식전위",
@@ -15,19 +13,23 @@
     "AC유입",
     "AC유입_diff1",
     "AC유입_dev24",
-    "희생전류",
-    "희생전류_diff1",
-    "희생전류_dev24",
     "온도",
     "온도_diff1",
     "온도_dev24",
     "습도",
     "습도_diff1",
-    "습도_dev24",
-    "통신품질",
-    "통신품질_diff1",
-    "통신품질_dev24"
+    "습도_dev24"
   ],
   "raw_sheet": "수집원본데이터",
-  "info_sheet": "설치 및 분석정보"
+  "info_sheet": "설치 및 분석정보",
+  "sacrificial_devices": [
+    "TB24-250406",
+    "TB24-250407"
+  ],
+  "sacrificial_features": [
+    "희생전류"
+  ],
+  "comm_quality_col": "통신품질",
+  "comm_quality_threshold_dbm": -115,
+  "comm_outage_consecutive_threshold": 3
 }
