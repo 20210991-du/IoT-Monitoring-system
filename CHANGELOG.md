@@ -17,11 +17,9 @@
 ### Changed
 - 단일 파일(gas_common_model_v3.py) → 학습(train) / 예측(predict) 두 파일로 분리
 - 데이터 분할 방식 개선
-- 기존: 전체 데이터로 scaler fit (데이터 leakage 발생)
-  변경: train 70% / val 15% / test 15% 시간 순 분리, train 구간으로만 scaler fit
+- 기존: 전체 데이터로 scaler fit (데이터 leakage 발생) -> 변경: train 70% / val 15% / test 15% 시간 순 분리, train 구간으로만 scaler fit
 - Threshold 계산 기준 변경
-- 기존: 학습 데이터(prepared_df) 기반
-  변경: test 구간(미관측 데이터) 기반 → 실제 운영 환경에 가까운 기준값 산출
+- 기존: 학습 데이터(prepared_df) 기반 -> 변경: test 구간(미관측 데이터) 기반 → 실제 운영 환경에 가까운 기준값 산출
 - LSTM activation 수정: relu → 제거(기본값 tanh) — relu 사용 시 gradient 폭발/소실 위험
 - 학습 validation 방식 변경: validation_split=0.1 → validation_data=(X_val, X_val) 직접 전달
 - 이상 판정 단계 확장: is_anomaly (True/False 2단계) → risk_level (이상/관찰/정상 3단계)
