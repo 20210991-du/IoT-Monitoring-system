@@ -1,7 +1,7 @@
 # AI 기반 IoT 통합 관제 시스템
 
 ## 📌 Version
-Current Version: v2026.04.06
+Current Version: v2026.04.19
 
 👉 자세한 변경 내역은 [CHANGELOG.md](./CHANGELOG.md) 참고
 
