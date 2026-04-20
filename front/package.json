@@ -1,0 +1,20 @@
+{
+  "name": "capstone-front",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "매설배관 AI 통합관제 시스템 — 졸업 프로젝트 프론트엔드",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11"
+  }
+}

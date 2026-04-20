@@ -1,0 +1,164 @@
+/* ── 매설배관 AI 통합관제 시스템 — 전역 스타일 ─────────────── */
+/* CSS variables, keyframes, typography utilities.                  */
+/* index.html <style> 블록에서 그대로 이식.                         */
+
+:root {
+  --bg: #f4f6fb;
+  --bg-elev: #ffffff;
+  --bg-sunk: #f8fafc;
+  --bg-code: #f8fafc;
+  --line: #e2e8f0;
+  --line-soft: #eef1f6;
+  --ink: #0f172a;
+  --ink-2: #334155;
+  --ink-3: #64748b;
+  --ink-4: #94a3b8;
+  --brand: #4f46e5;
+  --brand-2: #3525cd;
+  --brand-wash: rgba(79, 70, 229, 0.08);
+  --ok: #10b981;
+  --warn: #f59e0b;
+  --err: #ef4444;
+  --accent: #f97316;
+  --shadow-card: 0 2px 4px -2px rgba(0, 0, 0, 0.05),
+                 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 10px 40px -10px rgba(25, 28, 29, 0.14);
+  --shadow-glow: 0 0 0 1px rgba(79, 70, 229, 0.12),
+                 0 20px 60px -20px rgba(79, 70, 229, 0.35);
+}
+
+html[data-theme="dark"] {
+  --bg: #0b1220;
+  --bg-elev: #111a2e;
+  --bg-sunk: #0d1527;
+  --bg-code: #0a1020;
+  --line: #1e2a44;
+  --line-soft: #162036;
+  --ink: #e9eef9;
+  --ink-2: #c4cde0;
+  --ink-3: #8896b5;
+  --ink-4: #55648a;
+  --brand: #7c74ff;
+  --brand-2: #a79dff;
+  --brand-wash: rgba(124, 116, 255, 0.16);
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --err: #f87171;
+  --accent: #fb923c;
+  --shadow-card: 0 2px 6px -2px rgba(0, 0, 0, 0.5),
+                 0 10px 25px -10px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 20px 60px -20px rgba(0, 0, 0, 0.8);
+  --shadow-glow: 0 0 0 1px rgba(124, 116, 255, 0.25),
+                 0 20px 60px -20px rgba(124, 116, 255, 0.5);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  font-family: "Noto Sans KR", "Space Grotesk", system-ui, sans-serif;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+/* Fluid viewport canvas.
+ * 데스크톱 기준 최소 1280×720 을 보장하고 그 미만 뷰포트에서는 스크롤 허용.
+ * position: relative 로 유지해 내부 position:absolute 자식들의 참조점을 제공합니다.
+ */
+#stage {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+#canvas {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  min-width: 1280px;
+  min-height: 720px;
+  background: var(--bg);
+  overflow: hidden;
+  transition: background 220ms ease;
+}
+
+/* Typography defaults */
+.mono {
+  font-family: "JetBrains Mono", "Roboto Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.num {
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* Scrollbar */
+.scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.scroll::-webkit-scrollbar-thumb { background: var(--ink-4); border-radius: 4px; opacity: 0.4; }
+.scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* Animations */
+@keyframes pulse-ring {
+  0%   { transform: scale(0.6); opacity: 0.9; }
+  100% { transform: scale(2.6); opacity: 0; }
+}
+@keyframes pulse-dot {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.15); }
+}
+@keyframes blink {
+  0%, 70%   { opacity: 1; }
+  71%, 100% { opacity: 0.25; }
+}
+@keyframes slide-in-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes scan-line {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+/* Selection colors */
+::selection {
+  background: var(--brand-wash);
+  color: var(--ink);
+}
+
+/* Buttons reset */
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+input {
+  font: inherit;
+  color: inherit;
+}
+
+/* Avoid flash while mounting */
+#root:empty::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+}
