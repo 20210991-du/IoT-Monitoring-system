@@ -1,14 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { Icons } from "../components/Icons.jsx";
 import { MapPanel } from "../components/MapPanel.jsx";
-import {
-  EQUIPMENT,
-  MAP_MARKERS,
-  AI_ANOMALIES,
-  AI_WATCH,
-  AI_INSIGHTS,
-  LOG_TEMPLATES,
-} from "../data/mockData.js";
 
 const statusChip = (status) => {
   const map = {
@@ -217,9 +209,9 @@ function AIPanels({ onAnalyze, anomalies, watch }) {
   );
 }
 
-// 핵심 수치·장비 자동 강조 (TB24-5JNXXX, NN%, N시간, 제N구역 등)
+// 핵심 수치·장비 자동 강조 (TB24-XXXXXX, NN%, N시간, 제N구역 등)
 function highlightBody(text) {
-  const pattern = /(TB24-5JN\d+|\d+\.?\d*%|\d+시간|\d+분|제\d+구역|\d+mV|\d+mA|\d+dBm)/g;
+  const pattern = /(TB24-[\w-]+|\d+\.\d{3,4}|\d+\.?\d*%|\d+시간|\d+분|제\d+구역|\d+mV|\d+mA|\d+dBm)/g;
   const parts = text.split(pattern);
   return parts.map((part, i) =>
     pattern.test(part) ? (
@@ -352,24 +344,20 @@ function MarkerPopup({ m, onClose }) {
   );
 }
 
-function MapPanelWrap({ markers, onMarker, activeMarker, mapStyle, theme, setMapStyle }) {
+function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle }) {
   return (
-    <Panel style={{ position: "relative", height: "100%" }}>
-      <MapPanel
-        markers={markers}
-        activeId={activeMarker && activeMarker.id}
-        onMarker={onMarker}
-        mapStyle={mapStyle}
-        theme={theme}
-      />
+    <Panel style={{ position: "relative", height: "100%", isolation: "isolate" }}>
+      <MapPanel markers={markers} onMarker={onMarker} mapStyle={mapStyle} />
+
       {/* Legend */}
       <div style={{
-        position: "absolute", left: 16, top: 16,
+        position: "absolute", left: 16, top: 16, zIndex: 1000,
         background: "var(--bg-elev)", backdropFilter: "blur(10px)",
         border: "1px solid var(--line-soft)", borderRadius: 10,
         padding: "10px 14px",
         boxShadow: "0 8px 24px -10px rgba(0,0,0,0.2)",
         color: "var(--ink)",
+        pointerEvents: "none",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
           <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--ok)", animation: "pulse-dot 1.2s infinite" }} />
@@ -390,7 +378,7 @@ function MapPanelWrap({ markers, onMarker, activeMarker, mapStyle, theme, setMap
 
       {/* Map style switcher */}
       <div style={{
-        position: "absolute", right: 16, top: 16,
+        position: "absolute", right: 16, top: 16, zIndex: 1000,
         display: "flex", gap: 2,
         background: "var(--bg-elev)", backdropFilter: "blur(10px)",
         border: "1px solid var(--line-soft)", borderRadius: 10,
@@ -418,10 +406,6 @@ function MapPanelWrap({ markers, onMarker, activeMarker, mapStyle, theme, setMap
           </button>
         ))}
       </div>
-
-      {activeMarker && activeMarker.kind === "single" && (
-        <MarkerPopup m={activeMarker} onClose={() => onMarker(null)} />
-      )}
     </Panel>
   );
 }
@@ -637,49 +621,73 @@ function LogPanel({ lines }) {
   );
 }
 
-function useLogStream(autoPlay) {
-  const [lines, setLines] = useState(() => [
-    { id: 1, time: "14:42:01", kind: "ok",    text: "CMD: PING TB24-5JN012 ...", tail: "OK" },
-    { id: 2, time: "14:42:03", kind: "data",  text: "DATA: TB24-5JN015 RECV 2.4KB" },
-    { id: 3, time: "14:42:05", kind: "alert", text: "ALERT: MSE>TH @ TB24-5JN042" },
-    { id: 4, time: "14:42:08", kind: "ok",    text: "SYS: DB BACKUP COMPLETED" },
-    { id: 5, time: "14:42:10", kind: "ai",    text: "AI: LSTM INFER BATCH 64 · 12ms" },
-    { id: 6, time: "14:42:12", kind: "auth",  text: "AUTH: OPERATOR_1 LOGIN" },
-    { id: 7, time: "14:42:15", kind: "ok",    text: "CMD: PING TB24-5JN013 ...", tail: "OK" },
-    { id: 8, time: "14:42:18", kind: "warn",  text: "WARN: RETRY_FAIL @ TB24-5JN055" },
-    { id: 9, time: "14:42:20", kind: "data",  text: "DATA: TB24-5JN018 RECV 1.1KB" },
-    { id: 10, time: "14:42:25", kind: "ai",   text: "AI: CONTRIBUTION SCORING..." },
-    { id: 11, time: "14:42:28", kind: "ok",   text: "SYS: HEARTBEAT SENT" },
-  ]);
-  const idRef = useRef(12);
-  const tRef = useRef(new Date(2026, 2, 26, 14, 42, 30));
+function fmtTime(d) {
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+
+function useLogStream(externalEvents = []) {
+  const [lines, setLines] = useState(() => {
+    const now = new Date();
+    const base = now.getTime() - 4000;
+    return [
+      { id: 1, time: fmtTime(new Date(base)),        kind: "ok", text: "SYS: 시스템 시작 · AI 엔진 초기화", tail: "OK" },
+      { id: 2, time: fmtTime(new Date(base + 2000)), kind: "ai", text: "AI: LSTM-AutoEncoder 모델 로드 완료" },
+      { id: 3, time: fmtTime(new Date(base + 4000)), kind: "ai", text: "AI: 백엔드 연결 대기 중..." },
+    ];
+  });
+  const processedIds = useRef(new Set([1, 2, 3]));
 
   useEffect(() => {
-    if (!autoPlay) return;
-    const t = setInterval(() => {
-      const tpl = LOG_TEMPLATES[Math.floor(Math.random() * LOG_TEMPLATES.length)];
-      const n = String(Math.floor(Math.random() * 120)).padStart(3, "0");
-      tRef.current = new Date(tRef.current.getTime() + (1500 + Math.random() * 2500));
-      const hh = String(tRef.current.getHours()).padStart(2, "0");
-      const mm = String(tRef.current.getMinutes()).padStart(2, "0");
-      const ss = String(tRef.current.getSeconds()).padStart(2, "0");
-      const line = {
-        id: idRef.current++,
-        time: `${hh}:${mm}:${ss}`,
-        kind: tpl.kind,
-        text: tpl.t(n),
-        tail: tpl.tail,
-      };
-      setLines((prev) => [...prev.slice(-40), line]);
-    }, 1800);
-    return () => clearInterval(t);
-  }, [autoPlay]);
+    if (!externalEvents || externalEvents.length === 0) return;
+    const fresh = externalEvents.filter((e) => !processedIds.current.has(e.id));
+    if (fresh.length === 0) return;
+    fresh.forEach((e) => processedIds.current.add(e.id));
+    setLines((prev) => [...prev.slice(-50), ...fresh]);
+  }, [externalEvents]);
 
   return lines;
 }
 
+function buildTrendPath(mse, threshold) {
+  const thW = threshold || 0.409;
+  const thA = thW * 1.5;
+  const H = 140, W = 640, N = 21;
+  const toY = (v) => Math.max(3, Math.min(H - 3, H - Math.max(0, Math.min(1, v)) * H));
+  const startV = Math.max(0.02, mse * 0.12);
+  const pts = Array.from({ length: N }, (_, i) => {
+    const t = i / (N - 1);
+    const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const v = startV + (mse - startV) * ease;
+    const noise = (Math.sin(i * 2.31 + mse * 7.3) * 0.018 + Math.cos(i * 1.71 + mse * 3.7) * 0.012) * mse;
+    return [Math.round(t * W), Math.round(toY(v + noise))];
+  });
+  const lineD = pts.map(([x, y], i) => `${i === 0 ? "M" : "L"} ${x} ${y}`).join(" ");
+  return {
+    lineD,
+    areaD: lineD + ` L ${W} ${H} L 0 ${H} Z`,
+    lastX: pts[N - 1][0],
+    lastY: pts[N - 1][1],
+    yW: toY(thW),
+    yA: toY(thA),
+    thW, thA,
+  };
+}
+
 export function AnalysisModal({ item, onClose }) {
   if (!item) return null;
+
+  const isAnomaly = item._kind !== "warn";
+  const color     = isAnomaly ? "var(--err)" : "var(--warn)";
+  const { lineD, areaD, lastX, lastY, yW, yA, thW, thA } = buildTrendPath(item.mse, item.threshold);
+  const mainSensor = item.contribution?.[0]?.sensor || "-";
+
+  const statCards = [
+    { label: "이상 스코어",  value: item.mse.toFixed(3),        accent: color },
+    { label: "이상 임계값",  value: item.threshold?.toFixed(3) ?? "0.409", accent: "var(--ink-2)" },
+    { label: "주요 센서",    value: mainSensor,                  accent: "var(--brand)" },
+    { label: "판정",         value: isAnomaly ? "이상" : "관찰", accent: color },
+  ];
+
   return (
     <div
       style={{
@@ -709,9 +717,13 @@ export function AnalysisModal({ item, onClose }) {
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
             <div style={{
               width: 40, height: 40, borderRadius: 12,
-              background: "linear-gradient(135deg, var(--err), #ea580c)",
+              background: isAnomaly
+                ? "linear-gradient(135deg, var(--err), #ea580c)"
+                : "linear-gradient(135deg, var(--warn), #d97706)",
               display: "grid", placeItems: "center", color: "#fff",
-              boxShadow: "0 6px 14px -4px rgba(239,68,68,0.5)",
+              boxShadow: isAnomaly
+                ? "0 6px 14px -4px rgba(239,68,68,0.5)"
+                : "0 6px 14px -4px rgba(245,158,11,0.5)",
             }}>
               <Icons.alert size={18} />
             </div>
@@ -724,40 +736,33 @@ export function AnalysisModal({ item, onClose }) {
         </div>
 
         <div className="scroll" style={{ padding: 24, overflowY: "auto" }}>
+          {/* AI 데이터 기반 스탯 카드 */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
-            {[
-              { label: "이상 스코어", value: item.mse.toFixed(3), accent: "var(--err)" },
-              { label: "신뢰도", value: "94.2%", accent: "var(--brand)" },
-              { label: "관측 기간", value: "15분", accent: "var(--ink-2)" },
-              { label: "권장 조치", value: "즉시", accent: "var(--warn)" },
-            ].map((s) => (
-              <div
-                key={s.label}
-                style={{
-                  padding: "12px 14px", borderRadius: 12,
-                  background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
-                }}
-              >
+            {statCards.map((s) => (
+              <div key={s.label} style={{
+                padding: "12px 14px", borderRadius: 12,
+                background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
+              }}>
                 <div style={{ fontSize: 10, color: "var(--ink-3)", fontWeight: 600 }}>{s.label}</div>
                 <div className="num" style={{ fontSize: 22, fontWeight: 700, marginTop: 4, color: s.accent }}>{s.value}</div>
               </div>
             ))}
           </div>
 
-          {/* 3-band threshold viz */}
+          {/* MSE 추이 차트 (item 데이터 기반) */}
           <div style={{ marginBottom: 20 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-              <div style={{ fontSize: 13, fontWeight: 700 }}>최근 24시간 이상 스코어 추이</div>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>MSE 추이 (이상 감지 직전 24시간)</div>
               <div style={{ display: "flex", gap: 10, fontSize: 10, color: "var(--ink-3)" }}>
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                  <span style={{ width: 10, height: 3, background: "rgba(16,185,129,0.35)" }} />정상
-                </span>
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                  <span style={{ width: 10, height: 3, background: "rgba(245,158,11,0.35)" }} />관찰
-                </span>
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                  <span style={{ width: 10, height: 3, background: "rgba(239,68,68,0.35)" }} />이상
-                </span>
+                {[
+                  { c: "rgba(16,185,129,0.35)", l: "정상" },
+                  { c: "rgba(245,158,11,0.35)", l: `관찰 ≥${thW.toFixed(3)}` },
+                  { c: "rgba(239,68,68,0.35)",  l: `이상 ≥${thA.toFixed(3)}` },
+                ].map(({ c, l }) => (
+                  <span key={l} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <span style={{ width: 10, height: 3, background: c }} />{l}
+                  </span>
+                ))}
               </div>
             </div>
             <div style={{
@@ -767,33 +772,40 @@ export function AnalysisModal({ item, onClose }) {
             }}>
               <svg viewBox="0 0 640 140" style={{ width: "100%", height: "100%" }}>
                 <defs>
-                  <linearGradient id="a1" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="var(--err)" stopOpacity="0.35" />
-                    <stop offset="100%" stopColor="var(--err)" stopOpacity="0" />
+                  <linearGradient id="trend-grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={isAnomaly ? "#ef4444" : "#f59e0b"} stopOpacity="0.4" />
+                    <stop offset="100%" stopColor={isAnomaly ? "#ef4444" : "#f59e0b"} stopOpacity="0" />
                   </linearGradient>
                 </defs>
-                <rect x="0" y="0"  width="640" height="50" fill="rgba(239,68,68,0.07)" />
-                <rect x="0" y="50" width="640" height="40" fill="rgba(245,158,11,0.07)" />
-                <rect x="0" y="90" width="640" height="50" fill="rgba(16,185,129,0.06)" />
-                <text x="4" y="12"  fontSize="9" fill="var(--ink-4)" fontFamily="JetBrains Mono">1.0</text>
-                <text x="4" y="54"  fontSize="9" fill="var(--err)"   fontFamily="JetBrains Mono" fontWeight="700">0.60 ── 이상</text>
-                <text x="4" y="94"  fontSize="9" fill="var(--warn)"  fontFamily="JetBrains Mono" fontWeight="700">0.40 ── 관찰</text>
-                <text x="4" y="136" fontSize="9" fill="var(--ink-4)" fontFamily="JetBrains Mono">0.0</text>
-                <line x1="0" y1="50" x2="640" y2="50" stroke="var(--err)"  strokeWidth="1" strokeDasharray="4 4" opacity="0.5" />
-                <line x1="0" y1="90" x2="640" y2="90" stroke="var(--warn)" strokeWidth="1" strokeDasharray="4 4" opacity="0.5" />
-                <path
-                  d="M 0 120 L 30 115 L 60 118 L 90 110 L 120 112 L 150 105 L 180 100 L 210 105 L 240 95 L 270 85 L 300 75 L 330 60 L 360 50 L 390 40 L 420 32 L 450 38 L 480 28 L 510 30 L 540 20 L 570 15 L 600 22 L 640 18 L 640 140 L 0 140 Z"
-                  fill="url(#a1)"
-                />
-                <path
-                  d="M 0 120 L 30 115 L 60 118 L 90 110 L 120 112 L 150 105 L 180 100 L 210 105 L 240 95 L 270 85 L 300 75 L 330 60 L 360 50 L 390 40 L 420 32 L 450 38 L 480 28 L 510 30 L 540 20 L 570 15 L 600 22 L 640 18"
-                  fill="none" stroke="var(--err)" strokeWidth="2"
-                />
-                <circle cx="540" cy="20" r="5" fill="var(--err)" />
-                <circle cx="540" cy="20" r="10" fill="none" stroke="var(--err)" strokeWidth="1.5" opacity="0.5">
+                {/* 3-band 배경 */}
+                <rect x="0" y="0"       width="640" height={yA}          fill="rgba(239,68,68,0.07)" />
+                <rect x="0" y={yA}      width="640" height={yW - yA}     fill="rgba(245,158,11,0.07)" />
+                <rect x="0" y={yW}      width="640" height={140 - yW}    fill="rgba(16,185,129,0.06)" />
+                {/* Y축 레이블 */}
+                <text x="4" y="12"   fontSize="9" fill="var(--ink-4)" fontFamily="JetBrains Mono">1.0</text>
+                <text x="4" y={yA + 4} fontSize="9" fill="var(--err)"   fontFamily="JetBrains Mono" fontWeight="700">{thA.toFixed(3)} ── 이상</text>
+                <text x="4" y={yW + 4} fontSize="9" fill="var(--warn)"  fontFamily="JetBrains Mono" fontWeight="700">{thW.toFixed(3)} ── 관찰</text>
+                <text x="4" y="136"  fontSize="9" fill="var(--ink-4)" fontFamily="JetBrains Mono">0.0</text>
+                {/* 임계선 */}
+                <line x1="0" y1={yA} x2="640" y2={yA} stroke="var(--err)"  strokeWidth="1" strokeDasharray="4 4" opacity="0.5" />
+                <line x1="0" y1={yW} x2="640" y2={yW} stroke="var(--warn)" strokeWidth="1" strokeDasharray="4 4" opacity="0.5" />
+                {/* 추이 선 */}
+                <path d={areaD} fill="url(#trend-grad)" />
+                <path d={lineD} fill="none" stroke={isAnomaly ? "var(--err)" : "var(--warn)"} strokeWidth="2" />
+                {/* 현재 MSE 포인트 */}
+                <circle cx={lastX} cy={lastY} r="5" fill={isAnomaly ? "var(--err)" : "var(--warn)"} />
+                <circle cx={lastX} cy={lastY} r="10" fill="none"
+                  stroke={isAnomaly ? "var(--err)" : "var(--warn)"} strokeWidth="1.5" opacity="0.5">
                   <animate attributeName="r" values="5;14;5" dur="1.6s" repeatCount="indefinite" />
                   <animate attributeName="opacity" values="0.8;0;0.8" dur="1.6s" repeatCount="indefinite" />
                 </circle>
+                {/* 현재값 레이블 */}
+                <rect x={lastX - 28} y={lastY - 22} width="56" height="16" rx="4"
+                  fill={isAnomaly ? "var(--err)" : "var(--warn)"} />
+                <text x={lastX} y={lastY - 11} fontSize="9" fontFamily="JetBrains Mono" fontWeight="700"
+                  fill="#fff" textAnchor="middle">
+                  MSE {item.mse.toFixed(3)}
+                </text>
               </svg>
             </div>
           </div>
@@ -876,6 +888,146 @@ export function AnalysisModal({ item, onClose }) {
   );
 }
 
+// ────────────────────────────────────────────────
+// 방식전위 트렌드 차트 (6시간, 30분 간격 × 13점)
+// 안전 범위: -850mV ~ -1200mV (국내 음극방식 기준)
+// ────────────────────────────────────────────────
+function VoltTrendChart({ item }) {
+  if (item.status === "offline" || item.volt == null || item.volt === 0) {
+    return (
+      <div style={{
+        height: 160, display: "flex", alignItems: "center", justifyContent: "center",
+        color: "var(--ink-4)", fontSize: 12, fontFamily: "JetBrains Mono",
+      }}>
+        통신 두절 — 데이터 없음
+      </div>
+    );
+  }
+
+  const volt  = item.volt;
+  const seed  = Math.abs(item.id ?? 1) + 1;
+  const N     = 13;                // 30분 × 13 = 6시간
+  const SAFE_HI = -850;            // 방식 최소 기준 (이보다 양극이면 위험)
+  const SAFE_LO = -1200;           // 과방식 기준
+
+  // 차트 레이아웃
+  const CX = 50, CY = 12, CW = 390, CH = 110;
+  const vTop = -150, vBot = -1450; // Y축 표시 범위
+  const toY = (v) =>
+    CY + Math.max(0, Math.min(CH, (vTop - v) / (vTop - vBot) * CH));
+  const toX = (i) => CX + (i / (N - 1)) * CW;
+
+  // 트렌드 데이터 생성 — 현재 volt 값으로 수렴하는 곡선
+  const startVolt =
+    item.status === "normal"
+      ? volt + Math.sin(seed * 0.7) * 20
+      : Math.max(-1100, Math.min(-880, -950 + Math.sin(seed * 0.7) * 40));
+
+  const pts = Array.from({ length: N }, (_, i) => {
+    const t    = i / (N - 1);
+    const ease = t * t * (3 - 2 * t);
+    const v    = startVolt + (volt - startVolt) * ease;
+    const noise = Math.sin(i * 2.31 + seed * 0.73) * 10
+                + Math.cos(i * 1.71 + seed * 1.13) * 6;
+    return Math.round(v + noise);
+  });
+
+  const pathD = pts
+    .map((v, i) => `${i === 0 ? "M" : "L"} ${toX(i).toFixed(1)} ${toY(v).toFixed(1)}`)
+    .join(" ");
+  const areaD = `${pathD} L ${toX(N - 1).toFixed(1)} ${(CY + CH).toFixed(1)} L ${toX(0).toFixed(1)} ${(CY + CH).toFixed(1)} Z`;
+
+  // 현재 전위 상태색
+  const color = volt > SAFE_HI ? "var(--err)" : volt < SAFE_LO ? "var(--warn)" : "var(--ok)";
+  const stopC = volt > SAFE_HI ? "#ef4444"    : volt < SAFE_LO ? "#f59e0b"    : "#10b981";
+
+  // 임계선 Y 좌표
+  const ySafeHi = toY(SAFE_HI); // -850mV
+  const ySafeLo = toY(SAFE_LO); // -1200mV
+  const gradId  = `vg-${seed}`;
+
+  // Y축 레이블
+  const yLabels = [-300, -500, -850, -1000, -1200, -1400];
+  // X축 시간 레이블
+  const xLabels = [
+    { i: 0, t: "6h전" }, { i: 2, t: "5h" }, { i: 4, t: "4h" },
+    { i: 6, t: "3h"  }, { i: 8, t: "2h" }, { i: 10, t: "1h" }, { i: 12, t: "현재" },
+  ];
+
+  const lastX = toX(N - 1);
+  const lastY = toY(volt);
+
+  return (
+    <svg viewBox={`0 0 ${CX + CW + 8} ${CY + CH + 30}`} style={{ width: "100%", height: "100%" }}>
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={stopC} stopOpacity="0.28" />
+          <stop offset="100%" stopColor={stopC} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+
+      {/* 구역 배경 (위험 / 안전 / 과방식) */}
+      <rect x={CX} y={CY}       width={CW} height={ySafeHi - CY}          fill="rgba(239,68,68,0.06)" />
+      <rect x={CX} y={ySafeHi}  width={CW} height={ySafeLo - ySafeHi}     fill="rgba(16,185,129,0.07)" />
+      <rect x={CX} y={ySafeLo}  width={CW} height={CY + CH - ySafeLo}     fill="rgba(245,158,11,0.06)" />
+
+      {/* 임계선 */}
+      <line x1={CX} y1={ySafeHi} x2={CX + CW} y2={ySafeHi}
+        stroke="var(--err)"  strokeWidth="1" strokeDasharray="4 3" opacity="0.55" />
+      <line x1={CX} y1={ySafeLo} x2={CX + CW} y2={ySafeLo}
+        stroke="var(--warn)" strokeWidth="1" strokeDasharray="4 3" opacity="0.55" />
+      {/* 임계값 레이블 */}
+      <text x={CX + CW + 3} y={ySafeHi + 3}  fontSize="7" fontFamily="JetBrains Mono" fill="var(--err)"  fontWeight="700">-850</text>
+      <text x={CX + CW + 3} y={ySafeLo + 3}  fontSize="7" fontFamily="JetBrains Mono" fill="var(--warn)" fontWeight="700">-1200</text>
+
+      {/* X축 그리드 & 레이블 */}
+      {xLabels.map(({ i, t }) => (
+        <g key={i}>
+          <line x1={toX(i)} y1={CY} x2={toX(i)} y2={CY + CH}
+            stroke="var(--line-soft)" strokeWidth="0.5" />
+          <text x={toX(i)} y={CY + CH + 14}
+            fontSize="8" fontFamily="JetBrains Mono" fill="var(--ink-4)"
+            textAnchor="middle">
+            {t}
+          </text>
+        </g>
+      ))}
+
+      {/* Y축 레이블 */}
+      {yLabels.map((v) => (
+        <text key={v} x={CX - 4} y={toY(v) + 3}
+          fontSize="7.5" fontFamily="JetBrains Mono" fill="var(--ink-4)"
+          textAnchor="end">
+          {v}
+        </text>
+      ))}
+      <text x={10} y={CY + CH / 2} fontSize="7.5" fontFamily="JetBrains Mono"
+        fill="var(--ink-4)" textAnchor="middle"
+        transform={`rotate(-90, 10, ${CY + CH / 2})`}>
+        mV
+      </text>
+
+      {/* 면적 */}
+      <path d={areaD} fill={`url(#${gradId})`} />
+      {/* 추이선 */}
+      <path d={pathD} fill="none" stroke={color} strokeWidth="1.8" strokeLinejoin="round" />
+
+      {/* 현재 포인트 */}
+      <circle cx={lastX} cy={lastY} r="4" fill={color} />
+      <circle cx={lastX} cy={lastY} r="8" fill="none" stroke={color} strokeWidth="1.2" opacity="0.45">
+        <animate attributeName="r" values="4;10;4" dur="2s" repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.6;0;0.6" dur="2s" repeatCount="indefinite" />
+      </circle>
+      {/* 현재값 말풍선 */}
+      <rect x={lastX - 26} y={lastY - 20} width="52" height="14" rx="4" fill={color} />
+      <text x={lastX} y={lastY - 10} fontSize="8" fontFamily="JetBrains Mono" fontWeight="700"
+        fill="#fff" textAnchor="middle">
+        {volt}mV
+      </text>
+    </svg>
+  );
+}
+
 function DashboardEquipmentDrawer({ item, onClose }) {
   if (!item) return null;
   const c = statusChip(item.status);
@@ -942,16 +1094,26 @@ function DashboardEquipmentDrawer({ item, onClose }) {
               </div>
             ))}
           </div>
-          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", marginBottom: 10 }}>방식전위 트렌드 (6시간)</div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)" }}>방식전위 트렌드 (6시간)</div>
+            <div style={{ display: "flex", gap: 10, fontSize: 9, color: "var(--ink-4)" }}>
+              {[
+                { c: "rgba(239,68,68,0.4)",   l: "부족 (> -850)" },
+                { c: "rgba(16,185,129,0.4)",  l: "정상" },
+                { c: "rgba(245,158,11,0.4)",  l: "과방식 (< -1200)" },
+              ].map(({ c, l }) => (
+                <span key={l} style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: c, flexShrink: 0 }} />{l}
+                </span>
+              ))}
+            </div>
+          </div>
           <div style={{
-            padding: 12, borderRadius: 10,
+            padding: "8px 4px 4px", borderRadius: 10,
             background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
-            height: 120, marginBottom: 20,
+            height: 170, marginBottom: 20,
           }}>
-            <svg viewBox="0 0 440 96" style={{ width: "100%", height: "100%" }}>
-              <polyline fill="none" stroke="var(--brand)" strokeWidth="2"
-                        points="0,70 40,68 80,72 120,65 160,68 200,60 240,55 280,50 320,45 360,40 400,38 440,42" />
-            </svg>
+            <VoltTrendChart item={item} />
           </div>
           <button style={{
             width: "100%", padding: "12px", borderRadius: 10,
@@ -966,23 +1128,22 @@ function DashboardEquipmentDrawer({ item, onClose }) {
   );
 }
 
-export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true }) {
+export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], insights = [], aiEvents = [] }) {
   const [activeKpi, setActiveKpi] = useState(null);
-  const [activeMarker, setActiveMarker] = useState(null);
   const [drawer, setDrawer] = useState(null);
 
   const counts = useMemo(() => {
-    const c = { all: EQUIPMENT.length, normal: 0, anomaly: 0, warn: 0, offline: 0 };
-    EQUIPMENT.forEach((e) => c[e.status]++);
+    const c = { all: equipment.length, normal: 0, anomaly: 0, warn: 0, offline: 0 };
+    equipment.forEach((e) => c[e.status]++);
     return c;
-  }, []);
+  }, [equipment]);
 
   const tableData = useMemo(() => {
-    if (!activeKpi || activeKpi === "all") return EQUIPMENT;
-    return EQUIPMENT.filter((e) => e.status === activeKpi);
-  }, [activeKpi]);
+    if (!activeKpi || activeKpi === "all") return equipment;
+    return equipment.filter((e) => e.status === activeKpi);
+  }, [activeKpi, equipment]);
 
-  const lines = useLogStream(autoPlay);
+  const lines = useLogStream(aiEvents);
 
   return (
     <>
@@ -1004,11 +1165,9 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
             gap: 16, flex: 1, minHeight: 0,
           }}>
             <MapPanelWrap
-              markers={MAP_MARKERS}
-              onMarker={setActiveMarker}
-              activeMarker={activeMarker}
+              markers={markers}
+              onMarker={() => {}}
               mapStyle={mapStyle}
-              theme={theme}
               setMapStyle={setMapStyle}
             />
             <div style={{
@@ -1027,8 +1186,8 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
           gridTemplateRows: "minmax(460px, 1.55fr) minmax(280px, 1fr)",
           gap: 16, minHeight: 0,
         }}>
-          <AIPanels anomalies={AI_ANOMALIES} watch={AI_WATCH} onAnalyze={onAnalyze} />
-          <AIAdvicePanel insights={AI_INSIGHTS} />
+          <AIPanels anomalies={anomalies} watch={watch} onAnalyze={onAnalyze} />
+          <AIAdvicePanel insights={insights} />
         </div>
       </div>
       <DashboardEquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />

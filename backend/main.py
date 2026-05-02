@@ -25,6 +25,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
+# Windows에서 이모지·한글 출력 시 cp949 인코딩 오류 방지
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import numpy as np
 import pandas as pd
 import uvicorn
@@ -69,9 +75,11 @@ class AppState:
 
 state = AppState()
 
-# ── 아티팩트 경로 ─────────────────────────────────────────
-ARTIFACTS_DIR = AI_SCRIPTS_DIR / "common_model_artifacts"
-DEFAULT_EXCEL = AI_SCRIPTS_DIR / "01. 시설물 50개 샘플 데이터.xlsx"
+# ── 아티팩트 경로 (ai/models, ai/config, data 폴더 기준) ───
+_REPO_ROOT    = Path(__file__).resolve().parent.parent
+MODELS_DIR    = _REPO_ROOT / "ai" / "models"
+CONFIG_DIR    = _REPO_ROOT / "ai" / "config"
+DEFAULT_EXCEL = _REPO_ROOT / "data" / "01. 시설물 50개 샘플 데이터.xlsx"
 
 # ── 이상 라벨 한글 매핑 ──────────────────────────────────
 FEATURE_LABEL_MAP = {
@@ -118,19 +126,19 @@ def _load_artifacts():
     """학습된 모델/스케일러/threshold 로드."""
     from tensorflow.keras.models import load_model
 
-    model_path = ARTIFACTS_DIR / "common_lstm_autoencoder.keras"
+    model_path = MODELS_DIR / "common_lstm_autoencoder.keras"
     if not model_path.exists():
         raise FileNotFoundError(f"모델 파일 없음: {model_path}")
 
     state.model = load_model(str(model_path))
 
-    with open(ARTIFACTS_DIR / "group_scalers.pkl", "rb") as f:
+    with open(MODELS_DIR / "group_scalers.pkl", "rb") as f:
         state.scaler_map = pickle.load(f)
 
-    with open(ARTIFACTS_DIR / "device_thresholds.json", "r", encoding="utf-8") as f:
+    with open(CONFIG_DIR / "device_thresholds.json", "r", encoding="utf-8") as f:
         state.thresholds = json.load(f)
 
-    with open(ARTIFACTS_DIR / "model_config.json", "r", encoding="utf-8") as f:
+    with open(CONFIG_DIR / "model_config.json", "r", encoding="utf-8") as f:
         state.config = json.load(f)
 
     state.model_loaded = True

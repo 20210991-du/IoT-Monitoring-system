@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Node
+node_modules/
+front/dist/
+
+# 환경 변수 (실제 값 노출 방지)
+.env
+.env.local
+.env.*.local
+# .env.example 은 포함 (템플릿이므로)
+
+# Claude Code 내부 파일
+.claude/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Header,
   SubNav,
@@ -9,9 +9,17 @@ import { Icons } from "./components/Icons.jsx";
 import { Login } from "./pages/Login.jsx";
 import { Dashboard, AnalysisModal } from "./pages/Dashboard.jsx";
 import { Equipment } from "./pages/Equipment.jsx";
-import { AI_ANOMALIES } from "./data/mockData.js";
+import {
+  EQUIPMENT  as MOCK_EQUIPMENT,
+  MAP_MARKERS as MOCK_MARKERS,
+  AI_ANOMALIES as MOCK_ANOMALIES,
+  AI_WATCH    as MOCK_WATCH,
+  AI_INSIGHTS as MOCK_INSIGHTS,
+} from "./data/mockData.js";
+import { fetchDevices, fetchAnomalies, fetchInsights, devicesToMarkers } from "./api/client.js";
 
 const TWEAK_DEFAULTS = { theme: "light", mapStyle: "light", autoPlay: true };
+const POLL_MS = 60_000;
 
 // Drawer (used by the equipment tab)
 function EquipmentDrawer({ item, onClose }) {
@@ -109,10 +117,8 @@ function EquipmentDrawer({ item, onClose }) {
 }
 
 export function App() {
-  // Read tweak defaults from optional JSON block in index.html (design-edit protocol).
-  // When not present we fall back to the hard-coded defaults.
   const [screen, setScreen] = useState(() => localStorage.getItem("screen") || "login");
-  const [tab, setTab] = useState(() => localStorage.getItem("tab") || "dashboard");
+  const [tab, setTab]       = useState(() => localStorage.getItem("tab") || "dashboard");
   const [tweakState, setTweakState] = useState(() => {
     const el = typeof document !== "undefined" && document.getElementById("tweaks-defaults");
     if (!el) return TWEAK_DEFAULTS;
@@ -125,42 +131,116 @@ export function App() {
       return TWEAK_DEFAULTS;
     }
   });
-  const [tweaksOn, setTweaksOn] = useState(false);
+  const [tweaksOn,   setTweaksOn]   = useState(false);
   const [bannerOpen, setBannerOpen] = useState(true);
-  const [analysis, setAnalysis] = useState(null);
-  const [drawer, setDrawer] = useState(null);
+  const [analysis,   setAnalysis]   = useState(null);
+  const [drawer,     setDrawer]     = useState(null);
+
+  // ── API 데이터 상태 (초기값 = 목업) ──────────────────────────
+  const [equipment, setEquipment] = useState(MOCK_EQUIPMENT);
+  const [markers,   setMarkers]   = useState(() => devicesToMarkers(MOCK_EQUIPMENT));
+  const [anomalies, setAnomalies] = useState(MOCK_ANOMALIES);
+  const [watch,     setWatch]     = useState(MOCK_WATCH);
+  const [insights,  setInsights]  = useState(MOCK_INSIGHTS);
+  const [apiStatus, setApiStatus] = useState("mock"); // "mock" | "loading" | "ok" | "error"
+  const [aiEvents,  setAiEvents]  = useState([]);     // 실시간 로그로 전달되는 AI 이벤트
+
+  // ── AI 이벤트 생성 헬퍼 ────────────────────────────────────
+  function makeAiLogEvents(devRes, anoRes) {
+    const now = new Date();
+    const t   = now.toTimeString().slice(0, 8); // HH:MM:SS
+    const base = now.getTime();
+    const events = [];
+
+    events.push({
+      id: base, kind: "ai", time: t,
+      text: `AI: LSTM 배치 추론 완료 · ${devRes.devices.length}개 장비 분석 (${devRes.last_updated || t})`,
+    });
+
+    anoRes.anomalies.slice(0, 5).forEach((a, i) => {
+      events.push({
+        id: base + 1 + i, kind: "alert", time: t,
+        text: `ALERT: MSE ${a.mse.toFixed(4)} > TH ${a.threshold.toFixed(4)} @ ${a.node} [${a.label}]`,
+      });
+    });
+
+    anoRes.watch.slice(0, 3).forEach((w, i) => {
+      events.push({
+        id: base + 10 + i, kind: "warn", time: t,
+        text: `WARN: 관찰 대상 ${w.node} · MSE=${w.mse.toFixed(4)} [${w.label}]`,
+      });
+    });
+
+    const offline = devRes.devices.filter((d) => d.status === "offline");
+    if (offline.length > 0) {
+      events.push({
+        id: base + 20, kind: "warn", time: t,
+        text: `WARN: 통신고장 ${offline.length}건 · ${offline.slice(0, 2).map((d) => d.deviceId).join(", ")}`,
+      });
+    }
+
+    const normal = devRes.devices.filter((d) => d.status === "normal").length;
+    events.push({
+      id: base + 30, kind: "ok", time: t,
+      text: `SYS: 정상 ${normal}건 · 이상 ${anoRes.anomalies.length}건 · 관찰 ${anoRes.watch.length}건`,
+      tail: "OK",
+    });
+
+    return events;
+  }
+
+  // ── 백엔드에서 데이터 로드 ─────────────────────────────────
+  const loadData = useCallback(async () => {
+    setApiStatus((s) => s === "mock" ? "loading" : s);
+    try {
+      const [devRes, anoRes, insRes] = await Promise.all([
+        fetchDevices(),
+        fetchAnomalies(),
+        fetchInsights(),
+      ]);
+      setEquipment(devRes.devices);
+      setMarkers(devicesToMarkers(devRes.devices));
+      setAnomalies(anoRes.anomalies);
+      setWatch(anoRes.watch);
+      setInsights(insRes.insights);
+      setAiEvents(makeAiLogEvents(devRes, anoRes));
+      setApiStatus("ok");
+    } catch (err) {
+      console.warn("[API] 백엔드 연결 실패 — 목업 데이터로 동작합니다.", err.message);
+      setApiStatus((s) => s === "loading" ? "error" : s);
+    }
+  }, []);
+
+  // 마운트 시 1회 + 60초 폴링
+  useEffect(() => {
+    loadData();
+    const id = setInterval(loadData, POLL_MS);
+    return () => clearInterval(id);
+  }, [loadData]);
 
   useEffect(() => { localStorage.setItem("screen", screen); }, [screen]);
-  useEffect(() => { localStorage.setItem("tab", tab); }, [tab]);
+  useEffect(() => { localStorage.setItem("tab",    tab);    }, [tab]);
 
-  // Apply theme
+  // 테마 적용
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", tweakState.theme || "light");
   }, [tweakState.theme]);
 
-  // Design-mode protocol: let the claude.ai/design parent frame toggle Tweaks on/off.
+  // Design-mode protocol (claude.ai/design iframe 연동)
   useEffect(() => {
     const onMsg = (e) => {
       if (!e.data || !e.data.type) return;
-      if (e.data.type === "__activate_edit_mode") setTweaksOn(true);
+      if (e.data.type === "__activate_edit_mode")   setTweaksOn(true);
       if (e.data.type === "__deactivate_edit_mode") setTweaksOn(false);
     };
     window.addEventListener("message", onMsg);
-    try {
-      window.parent.postMessage({ type: "__edit_mode_available" }, "*");
-    } catch {
-      // noop when not in an iframe
-    }
+    try { window.parent.postMessage({ type: "__edit_mode_available" }, "*"); } catch { }
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
   const setMapStyle = (mapStyle) => {
     setTweakState((s) => ({ ...s, mapStyle }));
-    try {
-      window.parent.postMessage({ type: "__edit_mode_set_keys", edits: { mapStyle } }, "*");
-    } catch {
-      // noop
-    }
+    try { window.parent.postMessage({ type: "__edit_mode_set_keys", edits: { mapStyle } }, "*"); } catch { }
   };
 
   if (screen === "login") {
@@ -169,12 +249,12 @@ export function App() {
 
   return (
     <>
-      <Header onLogout={() => setScreen("login")} />
-      <SubNav tab={tab} setTab={setTab} />
+      <Header onLogout={() => setScreen("login")} apiStatus={apiStatus} />
+      <SubNav tab={tab} setTab={setTab} apiStatus={apiStatus} />
       {bannerOpen && tab === "dashboard" && (
         <EmergencyBanner
           onDismiss={() => setBannerOpen(false)}
-          onOpen={() => setAnalysis(AI_ANOMALIES[0])}
+          onOpen={() => setAnalysis(anomalies[0] || null)}
         />
       )}
       <div style={{
@@ -190,9 +270,15 @@ export function App() {
             setMapStyle={setMapStyle}
             theme={tweakState.theme}
             autoPlay={tweakState.autoPlay}
+            equipment={equipment}
+            markers={markers}
+            anomalies={anomalies}
+            watch={watch}
+            insights={insights}
+            aiEvents={aiEvents}
           />
         )}
-        {tab === "equipment" && <Equipment onOpen={setDrawer} />}
+        {tab === "equipment" && <Equipment onOpen={setDrawer} equipment={equipment} />}
       </div>
       <AnalysisModal item={analysis} onClose={() => setAnalysis(null)} />
       <EquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />

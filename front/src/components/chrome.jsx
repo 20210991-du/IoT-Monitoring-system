@@ -3,9 +3,9 @@ import { useState, useEffect } from "react";
 import { Icons } from "./Icons.jsx";
 
 export function useClock() {
-  const [now, setNow] = useState(() => new Date(2026, 2, 26, 14, 42, 5));
+  const [now, setNow] = useState(() => new Date());
   useEffect(() => {
-    const t = setInterval(() => setNow((n) => new Date(n.getTime() + 1000)), 1000);
+    const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
   return now;
@@ -96,11 +96,19 @@ export function Header({ onLogout }) {
   );
 }
 
-export function SubNav({ tab, setTab }) {
+const API_STATUS_STYLE = {
+  mock:    { dot: "var(--ink-4)", text: "MOCK",      textColor: "var(--ink-4)" },
+  loading: { dot: "var(--warn)", text: "연결 중…",   textColor: "var(--warn)"  },
+  ok:      { dot: "var(--ok)",   text: "AI 연동됨",  textColor: "var(--ok)"    },
+  error:   { dot: "var(--err)",  text: "오프라인",   textColor: "var(--err)"   },
+};
+
+export function SubNav({ tab, setTab, apiStatus = "mock" }) {
   const tabs = [
     { k: "dashboard", ko: "대시보드" },
     { k: "equipment", ko: "전체 장비 현황" },
   ];
+  const st = API_STATUS_STYLE[apiStatus] || API_STATUS_STYLE.mock;
   return (
     <div style={{
       position: "absolute", left: 0, right: 0, top: 56, height: 48,
@@ -127,6 +135,18 @@ export function SubNav({ tab, setTab }) {
         );
       })}
       <div style={{ flex: 1 }} />
+      <span style={{
+        display: "flex", alignItems: "center", gap: 6,
+        fontSize: 11, fontWeight: 700, color: st.textColor,
+        fontFamily: "JetBrains Mono, monospace",
+        marginRight: 16,
+      }}>
+        <span style={{
+          width: 6, height: 6, borderRadius: "50%", background: st.dot,
+          animation: apiStatus === "ok" ? "pulse-dot 2s infinite" : "none",
+        }} />
+        {st.text}
+      </span>
       <span style={{
         display: "flex", alignItems: "center", gap: 6,
         fontSize: 13, fontWeight: 600, color: "var(--ink-2)",

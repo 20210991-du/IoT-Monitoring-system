@@ -1,6 +1,5 @@
 import { useState, useMemo } from "react";
 import { Icons } from "../components/Icons.jsx";
-import { EQUIPMENT } from "../data/mockData.js";
 
 const statusChip = (status) => {
   const map = {
@@ -49,7 +48,7 @@ const pageBtn = (disabled) => ({
   cursor: disabled ? "not-allowed" : "pointer",
 });
 
-export function Equipment({ onOpen }) {
+export function Equipment({ onOpen, equipment = [] }) {
   const [filter, setFilter] = useState("all");
   const [zone, setZone] = useState("all");
   const [query, setQuery] = useState("");
@@ -58,18 +57,18 @@ export function Equipment({ onOpen }) {
   const pageSize = 14;
 
   const counts = useMemo(() => {
-    const c = { all: EQUIPMENT.length, normal: 0, anomaly: 0, warn: 0, offline: 0 };
-    EQUIPMENT.forEach((e) => c[e.status]++);
+    const c = { all: equipment.length, normal: 0, anomaly: 0, warn: 0, offline: 0 };
+    equipment.forEach((e) => c[e.status]++);
     return c;
-  }, []);
+  }, [equipment]);
 
   const zones = useMemo(() => {
-    const s = new Set(EQUIPMENT.map((e) => e.zone));
+    const s = new Set(equipment.map((e) => e.zone));
     return ["all", ...Array.from(s)];
-  }, []);
+  }, [equipment]);
 
   const filtered = useMemo(() => {
-    let list = EQUIPMENT.slice();
+    let list = equipment.slice();
     if (filter !== "all") list = list.filter((e) => e.status === filter);
     if (zone !== "all") list = list.filter((e) => e.zone === zone);
     if (query) {
@@ -88,7 +87,7 @@ export function Equipment({ onOpen }) {
       return sort.dir === "asc" ? r : -r;
     });
     return list;
-  }, [filter, zone, query, sort]);
+  }, [filter, zone, query, sort, equipment]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const pageData = filtered.slice((page - 1) * pageSize, page * pageSize);
@@ -121,7 +120,7 @@ export function Equipment({ onOpen }) {
       <div>
         <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em" }}>전체 장비 현황</div>
         <div style={{ fontSize: 13, color: "var(--ink-3)", marginTop: 4 }}>
-          전국 {EQUIPMENT.length}개 감시 노드 · 1시간 주기 수집
+          전국 {equipment.length}개 감시 노드 · 1시간 주기 수집
         </div>
       </div>
 
