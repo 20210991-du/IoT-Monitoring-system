@@ -7,8 +7,11 @@ import {
 import { TweaksPanel } from "./components/TweaksPanel.jsx";
 import { Icons } from "./components/Icons.jsx";
 import { Login } from "./pages/Login.jsx";
+import { SignUp } from "./pages/SignUp.jsx";
 import { Dashboard, AnalysisModal } from "./pages/Dashboard.jsx";
 import { Equipment } from "./pages/Equipment.jsx";
+import { Admin } from "./pages/Admin.jsx";
+import { currentSession, signOut, listPending } from "./lib/authMock.js";
 import {
   EQUIPMENT  as MOCK_EQUIPMENT,
   MAP_MARKERS as MOCK_MARKERS,
@@ -117,7 +120,14 @@ function EquipmentDrawer({ item, onClose }) {
 }
 
 export function App() {
-  const [screen, setScreen] = useState(() => localStorage.getItem("screen") || "login");
+  const [screen, setScreen] = useState(() => {
+    // 세션이 살아있으면 바로 app, 아니면 login
+    const saved = localStorage.getItem("screen");
+    if (saved === "signup") return saved;
+    return currentSession() ? "app" : "login";
+  });
+  const [user, setUser]     = useState(() => currentSession());
+  const [pendingId, setPendingId] = useState("");  // 가입 직후 로그인 화면에 prefill
   const [tab, setTab]       = useState(() => localStorage.getItem("tab") || "dashboard");
   const [tweakState, setTweakState] = useState(() => {
     const el = typeof document !== "undefined" && document.getElementById("tweaks-defaults");
@@ -221,6 +231,11 @@ export function App() {
   useEffect(() => { localStorage.setItem("screen", screen); }, [screen]);
   useEffect(() => { localStorage.setItem("tab",    tab);    }, [tab]);
 
+  // admin 권한 사라지면 users 탭에서 자동 빠져나감 (탭 보호)
+  useEffect(() => {
+    if (tab === "users" && user?.role !== "admin") setTab("dashboard");
+  }, [tab, user]);
+
   // 테마 적용
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", tweakState.theme || "light");
@@ -244,13 +259,46 @@ export function App() {
   };
 
   if (screen === "login") {
-    return <Login onLogin={() => setScreen("app")} />;
+    return (
+      <Login
+        prefillId={pendingId}
+        onLogin={(u) => { setUser(u); setPendingId(""); setScreen("app"); }}
+        onSignUp={() => setScreen("signup")}
+      />
+    );
+  }
+  if (screen === "signup") {
+    return (
+      <SignUp
+        onSuccess={(newId) => { setPendingId(newId); setScreen("login"); }}
+        onBackToLogin={() => setScreen("login")}
+      />
+    );
   }
 
   return (
     <>
-      <Header onLogout={() => setScreen("login")} apiStatus={apiStatus} />
-      <SubNav tab={tab} setTab={setTab} apiStatus={apiStatus} />
+      <Header
+        onLogout={() => { signOut(); setUser(null); setScreen("login"); }}
+        apiStatus={apiStatus}
+        user={user}
+        setUser={setUser}
+        theme={tweakState.theme}
+        setTheme={(t) => setTweakState((s) => ({ ...s, theme: t }))}
+        mapStyle={tweakState.mapStyle}
+        setMapStyle={setMapStyle}
+      />
+      <SubNav
+        tab={tab}
+        setTab={(k) => {
+          // 비-admin 이 users 탭 진입 차단 (URL/state 보호)
+          if (k === "users" && user?.role !== "admin") return;
+          setTab(k);
+        }}
+        apiStatus={apiStatus}
+        user={user}
+        pendingCount={user?.role === "admin" ? (listPending(user).users?.length || 0) : 0}
+      />
       {bannerOpen && tab === "dashboard" && (
         <EmergencyBanner
           onDismiss={() => setBannerOpen(false)}
@@ -279,6 +327,15 @@ export function App() {
           />
         )}
         {tab === "equipment" && <Equipment onOpen={setDrawer} equipment={equipment} />}
+        {tab === "users" && (
+          <Admin
+            user={user}
+            equipment={equipment}
+            anomalies={anomalies}
+            watch={watch}
+            apiStatus={apiStatus}
+          />
+        )}
       </div>
       <AnalysisModal item={analysis} onClose={() => setAnalysis(null)} />
       <EquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />

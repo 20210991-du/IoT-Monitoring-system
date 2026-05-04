@@ -132,4 +132,19 @@ export const Icons = {
     <path d="M3 12a9 3 0 0 0 18 0" />
   </>),
   dot: ic(<circle cx="12" cy="12" r="5" fill="currentColor" stroke="none" />),
+  mail: ic(<>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="M3 7l9 6 9-6" />
+  </>),
+  briefcase: ic(<>
+    <rect x="3" y="7" width="18" height="13" rx="2" />
+    <path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+    <path d="M3 13h18" />
+  </>),
+  id_card: ic(<>
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <circle cx="9" cy="12" r="2.2" />
+    <path d="M14 11h5" />
+    <path d="M14 14h4" />
+  </>),
 };

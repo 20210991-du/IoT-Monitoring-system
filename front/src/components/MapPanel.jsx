@@ -65,11 +65,12 @@ function popupHtml(m) {
   </div>`;
 }
 
-export function MapPanel({ markers, onMarker, mapStyle }) {
+export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger }) {
   const containerRef    = useRef(null);
   const mapRef          = useRef(null);
   const tileRef         = useRef(null);
   const leafletMarkers  = useRef([]);
+  const markerByNode    = useRef(new Map());
   const mapStyleRef     = useRef(mapStyle);
 
   // 맵 초기화 (한 번만)
@@ -112,6 +113,7 @@ export function MapPanel({ markers, onMarker, mapStyle }) {
 
     leafletMarkers.current.forEach((lm) => lm.remove());
     leafletMarkers.current = [];
+    markerByNode.current.clear();
 
     markers.forEach((m) => {
       const pos  = toLatLng(m);
@@ -120,10 +122,44 @@ export function MapPanel({ markers, onMarker, mapStyle }) {
       if (m.kind === "single") {
         lm.bindPopup(popupHtml(m));
         lm.on("click", () => onMarker && onMarker(m));
+        if (m.node) markerByNode.current.set(m.node, lm);
       }
       leafletMarkers.current.push(lm);
     });
   }, [markers, onMarker]);
+
+  // 외부 focus 요청 → flyTo + 매칭 single 마커 popup
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !focus || focus.lat == null || focus.lng == null) return;
+    map.flyTo([focus.lat, focus.lng], 15, { duration: 0.8 });
+    if (focus.node) {
+      const lm = markerByNode.current.get(focus.node);
+      if (lm) {
+        // flyTo 끝난 뒤 팝업 열기 (대략 800ms 후)
+        const id = setTimeout(() => lm.openPopup(), 820);
+        return () => clearTimeout(id);
+      }
+    }
+  }, [focus]);
+
+  // 외부 fit 요청 → 모든 마커가 보이도록 flyToBounds
+  useEffect(() => {
+    if (!fitTrigger) return;
+    const map = mapRef.current;
+    if (!map) return;
+    map.closePopup();
+    if (markers.length === 0) return;
+    if (markers.length === 1) {
+      const [lat, lng] = toLatLng(markers[0]);
+      map.flyTo([lat, lng], 14, { duration: 0.8 });
+      return;
+    }
+    const bounds = L.latLngBounds(markers.map((m) => toLatLng(m)));
+    if (bounds.isValid()) {
+      map.flyToBounds(bounds, { padding: [50, 50], duration: 0.8, maxZoom: 13 });
+    }
+  }, [fitTrigger, markers]);
 
   return (
     <div

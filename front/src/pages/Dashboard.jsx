@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { Icons } from "../components/Icons.jsx";
 import { MapPanel } from "../components/MapPanel.jsx";
+import { devicesToMarkers } from "../api/client.js";
 
 const statusChip = (status) => {
   const map = {
@@ -222,7 +223,7 @@ function highlightBody(text) {
   );
 }
 
-function AIAdvicePanel({ insights }) {
+function AIAdvicePanel({ insights, onClickInsight }) {
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       <PanelHeader
@@ -243,41 +244,59 @@ function AIAdvicePanel({ insights }) {
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Icons.sparkle size={16} color="var(--brand)" />
-          <div style={{ fontSize: 14, fontWeight: 700 }}>AI 조언</div>
+          <div style={{ fontSize: 14, fontWeight: 700 }}>AI 조치 권고</div>
         </div>
       </PanelHeader>
       <div className="scroll" style={{ padding: 12, overflowY: "auto", flex: 1 }}>
-        {insights.map((it, i) => (
-          <div
-            key={i}
-            style={{
-              display: "flex", gap: 12,
-              padding: "12px 14px", marginBottom: 6,
-              background: "var(--bg-sunk)",
-              border: "1px solid var(--line-soft)",
-              borderRadius: 10,
-              alignItems: "flex-start",
-            }}
-          >
-            <div style={{
-              flexShrink: 0,
-              width: 24, height: 24, borderRadius: "50%",
-              background: "var(--brand-wash)", color: "var(--brand)",
-              display: "grid", placeItems: "center",
-              fontSize: 12, fontWeight: 800,
-              fontFamily: "Space Grotesk, system-ui, sans-serif",
-              marginTop: 1,
-            }}>
-              {i + 1}
+        {insights.map((it, i) => {
+          // body 에서 첫 번째 노드 ID 추출 (TB24-5JN001 형식)
+          const m = (it.body || "").match(/TB24-5JN\d+/);
+          const node = m ? m[0] : null;
+          const clickable = !!node && !!onClickInsight;
+          return (
+            <div
+              key={i}
+              onClick={clickable ? () => onClickInsight(node) : undefined}
+              role={clickable ? "button" : undefined}
+              tabIndex={clickable ? 0 : undefined}
+              title={clickable ? `지도에서 ${node} 위치로 이동` : undefined}
+              style={{
+                display: "flex", gap: 12,
+                padding: "12px 14px", marginBottom: 6,
+                background: "var(--bg-sunk)",
+                border: "1px solid var(--line-soft)",
+                borderRadius: 10,
+                alignItems: "flex-start",
+                cursor: clickable ? "pointer" : "default",
+                transition: "border-color 140ms ease, background 140ms ease",
+              }}
+              onMouseEnter={(e) => {
+                if (clickable) e.currentTarget.style.borderColor = "var(--brand)";
+              }}
+              onMouseLeave={(e) => {
+                if (clickable) e.currentTarget.style.borderColor = "var(--line-soft)";
+              }}
+            >
+              <div style={{
+                flexShrink: 0,
+                width: 24, height: 24, borderRadius: "50%",
+                background: "var(--brand-wash)", color: "var(--brand)",
+                display: "grid", placeItems: "center",
+                fontSize: 12, fontWeight: 800,
+                fontFamily: "Space Grotesk, system-ui, sans-serif",
+                marginTop: 1,
+              }}>
+                {i + 1}
+              </div>
+              <div style={{
+                fontSize: 13, color: "var(--ink-2)", lineHeight: 1.6, flex: 1,
+                letterSpacing: "-0.01em",
+              }}>
+                {highlightBody(it.body)}
+              </div>
             </div>
-            <div style={{
-              fontSize: 13, color: "var(--ink-2)", lineHeight: 1.6, flex: 1,
-              letterSpacing: "-0.01em",
-            }}>
-              {highlightBody(it.body)}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </Panel>
   );
@@ -344,10 +363,10 @@ function MarkerPopup({ m, onClose }) {
   );
 }
 
-function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle }) {
+function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrigger }) {
   return (
     <Panel style={{ position: "relative", height: "100%", isolation: "isolate" }}>
-      <MapPanel markers={markers} onMarker={onMarker} mapStyle={mapStyle} />
+      <MapPanel markers={markers} onMarker={onMarker} mapStyle={mapStyle} focus={focus} fitTrigger={fitTrigger} />
 
       {/* Legend */}
       <div style={{
@@ -376,36 +395,7 @@ function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle }) {
         </div>
       </div>
 
-      {/* Map style switcher */}
-      <div style={{
-        position: "absolute", right: 16, top: 16, zIndex: 1000,
-        display: "flex", gap: 2,
-        background: "var(--bg-elev)", backdropFilter: "blur(10px)",
-        border: "1px solid var(--line-soft)", borderRadius: 10,
-        padding: 2,
-        boxShadow: "0 8px 24px -10px rgba(0,0,0,0.2)",
-        color: "var(--ink)",
-      }}>
-        {[
-          { k: "light", icon: <Icons.sun size={14} />, label: "밝게" },
-          { k: "dark", icon: <Icons.moon size={14} />, label: "어둡게" },
-          { k: "satellite", icon: <Icons.satellite size={14} />, label: "위성" },
-        ].map((m) => (
-          <button
-            key={m.k}
-            onClick={() => setMapStyle(m.k)}
-            style={{
-              padding: "6px 10px", borderRadius: 8,
-              display: "flex", alignItems: "center", gap: 4,
-              fontSize: 11, fontWeight: 700,
-              background: mapStyle === m.k ? "var(--brand-wash)" : "transparent",
-              color: mapStyle === m.k ? "var(--brand)" : "var(--ink-3)",
-            }}
-          >
-            {m.icon}{m.label}
-          </button>
-        ))}
-      </div>
+      {/* 지도 스타일 스위처는 Header 설정 아이콘 드롭다운으로 이동 (2026-05-04) */}
     </Panel>
   );
 }
@@ -1131,6 +1121,8 @@ function DashboardEquipmentDrawer({ item, onClose }) {
 export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], insights = [], aiEvents = [] }) {
   const [activeKpi, setActiveKpi] = useState(null);
   const [drawer, setDrawer] = useState(null);
+  const [focused, setFocused] = useState(null); // {lat, lng, node, ts}
+  const [fitTrigger, setFitTrigger] = useState(0); // 카운터: 변할 때마다 지도 fit
 
   const counts = useMemo(() => {
     const c = { all: equipment.length, normal: 0, anomaly: 0, warn: 0, offline: 0 };
@@ -1142,6 +1134,49 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
     if (!activeKpi || activeKpi === "all") return equipment;
     return equipment.filter((e) => e.status === activeKpi);
   }, [activeKpi, equipment]);
+
+  const filteredMarkers = useMemo(() => {
+    if (!activeKpi || activeKpi === "all") return markers;
+    const filtered = equipment.filter((e) => e.status === activeKpi);
+    return devicesToMarkers(filtered);
+  }, [activeKpi, equipment, markers]);
+
+  // 노드 ID 로 지도 포커싱 (장비 lat/lng 우선, markers fallback)
+  const focusByNode = (node) => {
+    if (!node) return;
+    const eq = equipment.find((e) => e.deviceId === node);
+    if (eq && eq.lat != null && eq.lng != null) {
+      setFocused({ lat: eq.lat, lng: eq.lng, node, ts: Date.now() });
+      return;
+    }
+    const mk = markers.find((m) => m.node === node);
+    if (mk && mk.lat != null && mk.lng != null) {
+      setFocused({ lat: mk.lat, lng: mk.lng, node, ts: Date.now() });
+      return;
+    }
+    // 둘 다 없으면 콘솔 경고 (개발 편의)
+    console.warn(`[focusByNode] 노드 위치를 찾을 수 없습니다: ${node}`);
+  };
+
+  // 표 row 클릭: 드로어 열기 + 지도 포커스
+  const handleRowClick = (eq) => {
+    setDrawer(eq);
+    if (eq && eq.lat != null && eq.lng != null) {
+      setFocused({ lat: eq.lat, lng: eq.lng, node: eq.deviceId, ts: Date.now() });
+    }
+  };
+
+  // AI 탐지 카드 클릭: 분석 모달 + 지도 포커스
+  const handleAnalyze = (item) => {
+    onAnalyze && onAnalyze(item);
+    if (item && item.node) focusByNode(item.node);
+  };
+
+  // KPI 카드 클릭: 활성 토글 + 지도 fit (필터된 마커 모두 보이게)
+  const handleKpiClick = (newActive) => {
+    setActiveKpi(newActive);
+    setFitTrigger(Date.now());
+  };
 
   const lines = useLogStream(aiEvents);
 
@@ -1158,36 +1193,38 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
         <div style={{
           display: "flex", flexDirection: "column", gap: 16, minHeight: 0,
         }}>
-          <KPIRow active={activeKpi} setActive={setActiveKpi} counts={counts} />
+          <KPIRow active={activeKpi} setActive={handleKpiClick} counts={counts} />
           <div style={{
             display: "grid",
             gridTemplateRows: "minmax(360px, 1.2fr) minmax(280px, 1fr)",
             gap: 16, flex: 1, minHeight: 0,
           }}>
             <MapPanelWrap
-              markers={markers}
+              markers={filteredMarkers}
               onMarker={() => {}}
               mapStyle={mapStyle}
               setMapStyle={setMapStyle}
+              focus={focused}
+              fitTrigger={fitTrigger}
             />
             <div style={{
               display: "grid",
               gridTemplateColumns: "minmax(520px, 1fr) minmax(360px, 0.65fr)",
               gap: 16, minHeight: 0,
             }}>
-              <TableSummary data={tableData} onRowClick={setDrawer} />
+              <TableSummary data={tableData} onRowClick={handleRowClick} />
               <LogPanel lines={lines} />
             </div>
           </div>
         </div>
-        {/* 우측 col: AI 탐지 (위까지 확장) + AI 조언 */}
+        {/* 우측 col: AI 탐지 (위까지 확장) + AI 조치 권고 */}
         <div style={{
           display: "grid",
           gridTemplateRows: "minmax(460px, 1.55fr) minmax(280px, 1fr)",
           gap: 16, minHeight: 0,
         }}>
-          <AIPanels anomalies={anomalies} watch={watch} onAnalyze={onAnalyze} />
-          <AIAdvicePanel insights={insights} />
+          <AIPanels anomalies={anomalies} watch={watch} onAnalyze={handleAnalyze} />
+          <AIAdvicePanel insights={insights} onClickInsight={focusByNode} />
         </div>
       </div>
       <DashboardEquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />

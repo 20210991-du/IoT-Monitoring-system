@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Icons } from "../components/Icons.jsx";
+import { signIn } from "../lib/authMock.js";
 
 /* ── AI 기반 지능형 통합관제 시스템 · 로그인 ───────────────────
  *  Modern dark · glass morphism · 한글 우선 copy
@@ -18,6 +19,7 @@ const COLORS = {
   brand: "#8b83ff",
   brand2: "#c084fc",
   ok: "#34d399",
+  err: "#fb7185",
   glassBg: "rgba(18, 22, 48, 0.55)",
   glassBorder: "rgba(139,131,255,0.22)",
 };
@@ -74,17 +76,35 @@ const inputStyle = {
   fontFamily: "inherit",
 };
 
-export function Login({ onLogin }) {
-  const [id, setId] = useState("admin.siwon");
-  const [pw, setPw] = useState("siwonpass!");
+export function Login({ onLogin, onSignUp, prefillId }) {
+  const [id, setId] = useState(prefillId || "admin");
+  const [pw, setPw] = useState(prefillId ? "" : "11111111");
   const [remember, setRemember] = useState(true);
   const [loading, setLoading] = useState(false);
   const [focus, setFocus] = useState(null);
+  const [error, setError] = useState("");
+  const [errStatus, setErrStatus] = useState(null);   // null | "pending" | "rejected"
+  const [failCount, setFailCount] = useState(0);      // ID 없음 / 비번 틀림 누적 (pending/rejected 제외)
 
   const submit = (e) => {
     e && e.preventDefault();
     setLoading(true);
-    setTimeout(() => onLogin(), 1000);
+    setError("");
+    setErrStatus(null);
+    setTimeout(() => {
+      const res = signIn({ id, pw, remember });
+      if (!res.ok) {
+        setLoading(false);
+        setError(res.error);
+        setErrStatus(res.status || null);
+        // pending/rejected 는 시스템 상태 문제 → 카운트 X
+        // 비번 까먹은 사람을 위한 hint 발동만 카운트
+        if (!res.status) setFailCount((c) => c + 1);
+        return;
+      }
+      setFailCount(0);
+      onLogin && onLogin(res.user);
+    }, 600);
   };
 
   return (
@@ -268,7 +288,7 @@ export function Login({ onLogin }) {
                 onFocus={() => setFocus("id")}
                 onBlur={() => setFocus(null)}
                 style={inputStyle}
-                placeholder="admin.id"
+                placeholder="ID 를 입력하세요"
                 autoComplete="username"
               />
             </Field>
@@ -284,7 +304,7 @@ export function Login({ onLogin }) {
                 onFocus={() => setFocus("pw")}
                 onBlur={() => setFocus(null)}
                 style={inputStyle}
-                placeholder="••••••••"
+                placeholder="비밀번호를 입력하세요"
                 autoComplete="current-password"
               />
             </Field>
@@ -292,7 +312,6 @@ export function Login({ onLogin }) {
             <div
               style={{
                 display: "flex",
-                justifyContent: "space-between",
                 alignItems: "center",
                 marginBottom: 22,
                 marginTop: 4,
@@ -326,14 +345,39 @@ export function Login({ onLogin }) {
                 </span>
                 로그인 상태 유지
               </label>
-              <a
-                style={{ fontSize: 13, color: COLORS.brand, cursor: "pointer", fontWeight: 500 }}
-                onClick={(e) => e.preventDefault()}
-                href="#"
-              >
-                비밀번호 찾기
-              </a>
             </div>
+
+            {error && (() => {
+              const isPending  = errStatus === "pending";
+              const isRejected = errStatus === "rejected";
+              const tone = isPending
+                ? { bg: "rgba(245,158,11,0.10)", bd: "rgba(245,158,11,0.30)", fg: "#fbbf24", label: "승인 대기" }
+                : isRejected
+                  ? { bg: "rgba(100,116,139,0.10)", bd: "rgba(100,116,139,0.30)", fg: "#94a3b8", label: "반려" }
+                  : { bg: "rgba(251,113,133,0.08)", bd: "rgba(251,113,133,0.22)", fg: COLORS.err, label: null };
+              return (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: tone.fg,
+                    marginBottom: 14,
+                    padding: tone.label ? "10px 12px" : "8px 12px",
+                    borderRadius: 8,
+                    background: tone.bg,
+                    border: `1px solid ${tone.bd}`,
+                    lineHeight: 1.55,
+                  }}
+                >
+                  {tone.label && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: tone.fg }} />
+                      <span style={{ fontWeight: 700, letterSpacing: "0.02em" }}>{tone.label}</span>
+                    </div>
+                  )}
+                  {error}
+                </div>
+              );
+            })()}
 
             <button
               type="submit"
@@ -381,6 +425,37 @@ export function Login({ onLogin }) {
                 </>
               )}
             </button>
+
+            <div
+              style={{
+                marginTop: 18,
+                paddingTop: 18,
+                borderTop: `1px solid ${COLORS.inkFaint}`,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: 13,
+                color: COLORS.inkSoft,
+              }}
+            >
+              <span style={{
+                fontSize: 12,
+                color: failCount >= 3 ? "#fbbf24" : "transparent",
+                fontWeight: failCount >= 3 ? 600 : 400,
+                transition: "color 240ms ease",
+                pointerEvents: "none",
+                userSelect: "none",
+              }}>
+                {failCount >= 3 ? "비밀번호는 관리자에게 문의" : "·"}
+              </span>
+              <a
+                onClick={(e) => { e.preventDefault(); onSignUp && onSignUp(); }}
+                href="#"
+                style={{ color: COLORS.brand, fontWeight: 600, cursor: "pointer" }}
+              >
+                회원가입
+              </a>
+            </div>
           </form>
         </div>
       </main>
