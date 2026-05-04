@@ -5,36 +5,48 @@ import { devicesToMarkers } from "../api/client.js";
 
 const statusChip = (status) => {
   const map = {
-    normal:  { ko: "정상", fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
-    anomaly: { ko: "이상", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    warn:    { ko: "관찰", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
-    offline: { ko: "장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
+    normal:   { ko: "정상", fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
+    critical: { ko: "위험", fg: "#fff",     bg: "#dc2626",                bd: "#991b1b" },
+    anomaly:  { ko: "이상", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
+    warn:     { ko: "관찰", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
+    offline:  { ko: "장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
   };
   return map[status] || map.normal;
 };
 
-function Kpi({ label, value, accent, icon, delta, active, onClick }) {
+function Kpi({ label, value, accent, icon, delta, active, onClick, danger }) {
+  // 위험(danger=true) 카드는 0건이 아닐 때만 강조 (배경/펄스).
+  const alarming = danger && value > 0;
+  const cardBg   = alarming ? "linear-gradient(135deg, #dc2626, #991b1b)" : "var(--bg-elev)";
+  const labelFg  = alarming ? "rgba(255,255,255,0.95)" : "var(--ink-3)";
+  const valueFg  = alarming ? "#fff" : "var(--ink)";
+  const subFg    = alarming ? "rgba(255,255,255,0.85)" : "var(--ink-3)";
+  const iconCol  = alarming ? "rgba(255,255,255,0.95)" : accent;
+  const stroke   = alarming ? "rgba(255,255,255,0.55)" : accent;
   return (
     <button
       onClick={onClick}
       style={{
         position: "relative", flex: 1, minWidth: 0, height: 112, textAlign: "left",
-        background: "var(--bg-elev)", borderRadius: 16,
-        border: `1px solid ${active ? accent : "var(--line)"}`,
+        background: cardBg, borderRadius: 16,
+        border: `1px solid ${alarming ? "#7f1d1d" : (active ? accent : "var(--line)")}`,
         padding: "18px 20px",
-        boxShadow: active ? `0 0 0 3px ${accent}22, var(--shadow-card)` : "var(--shadow-card)",
+        boxShadow: alarming
+          ? `0 0 0 3px rgba(220,38,38,0.25), 0 12px 28px -10px rgba(220,38,38,0.55), var(--shadow-card)`
+          : (active ? `0 0 0 3px ${accent}22, var(--shadow-card)` : "var(--shadow-card)"),
         cursor: "pointer", transition: "all 180ms",
         overflow: "hidden",
+        animation: alarming ? "danger-pulse 1.6s ease-in-out infinite" : "none",
       }}
     >
-      <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 4, background: accent }} />
+      <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 4, background: alarming ? "rgba(255,255,255,0.9)" : accent }} />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", letterSpacing: "0.02em" }}>{label}</div>
-        <div style={{ color: accent, opacity: 0.9 }}>{icon}</div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: labelFg, letterSpacing: "0.02em" }}>{label}</div>
+        <div style={{ color: iconCol, opacity: 0.95 }}>{icon}</div>
       </div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-        <div className="num" style={{ fontSize: 44, fontWeight: 700, lineHeight: 1, color: "var(--ink)" }}>{value}</div>
-        <div style={{ fontSize: 13, color: "var(--ink-3)", fontWeight: 500 }}>대</div>
+        <div className="num" style={{ fontSize: 44, fontWeight: 700, lineHeight: 1, color: valueFg }}>{value}</div>
+        <div style={{ fontSize: 13, color: subFg, fontWeight: 500 }}>대</div>
         {delta && (
           <div className="mono" style={{
             marginLeft: "auto", fontSize: 11, fontWeight: 700,
@@ -42,10 +54,10 @@ function Kpi({ label, value, accent, icon, delta, active, onClick }) {
           }}>{delta}</div>
         )}
       </div>
-      <svg viewBox="0 0 200 30" style={{ position: "absolute", right: 14, bottom: 10, width: 130, height: 26, opacity: 0.5 }}>
+      <svg viewBox="0 0 200 30" style={{ position: "absolute", right: 14, bottom: 10, width: 130, height: 26, opacity: alarming ? 0.4 : 0.5 }}>
         <polyline
           fill="none"
-          stroke={accent}
+          stroke={stroke}
           strokeWidth="1.5"
           points="0,20 20,18 40,22 60,12 80,16 100,8 120,14 140,6 160,10 180,4 200,12"
         />
@@ -56,14 +68,15 @@ function Kpi({ label, value, accent, icon, delta, active, onClick }) {
 
 function KPIRow({ active, setActive, counts }) {
   const items = [
-    { k: "all",     label: "총 장비",   value: counts.all,     accent: "var(--brand)", icon: <Icons.box size={18} /> },
-    { k: "normal",  label: "정상",      value: counts.normal,  accent: "var(--ok)",    icon: <Icons.check size={18} /> },
-    { k: "anomaly", label: "이상 의심", value: counts.anomaly, accent: "var(--err)",   icon: <Icons.alert size={18} /> },
-    { k: "warn",    label: "관찰 필요", value: counts.warn,    accent: "var(--warn)",  icon: <Icons.eye size={18} /> },
-    { k: "offline", label: "통신 장애", value: counts.offline, accent: "var(--ink-3)", icon: <Icons.wifi_off size={18} /> },
+    { k: "all",      label: "총 장비",   value: counts.all,      accent: "var(--brand)", icon: <Icons.box size={18} /> },
+    { k: "normal",   label: "정상",      value: counts.normal,   accent: "var(--ok)",    icon: <Icons.check size={18} /> },
+    { k: "critical", label: "위험",      value: counts.critical, accent: "#dc2626",      icon: <Icons.alert size={18} />, danger: true },
+    { k: "anomaly",  label: "이상 의심", value: counts.anomaly,  accent: "var(--err)",   icon: <Icons.alert size={18} /> },
+    { k: "warn",     label: "관찰 필요", value: counts.warn,     accent: "var(--warn)",  icon: <Icons.eye size={18} /> },
+    { k: "offline",  label: "통신 장애", value: counts.offline,  accent: "var(--ink-3)", icon: <Icons.wifi_off size={18} /> },
   ];
   return (
-    <div style={{ display: "flex", gap: 16 }}>
+    <div style={{ display: "flex", gap: 12 }}>
       {items.map((i) => (
         <Kpi key={i.k} {...i} active={active === i.k} onClick={() => setActive(i.k === active ? null : i.k)} />
       ))}
@@ -611,6 +624,274 @@ function LogPanel({ lines }) {
   );
 }
 
+// ── AI 분석 어시스턴트 (mock 챗봇) ───────────────────────────
+//   현재 LLM 미연동 — 키워드/노드 ID 매칭 기반 응답.
+//   실제 백엔드 연결 시 mockAIResponse → fetch("/api/chat") 으로 교체 예정.
+
+const STATUS_KO_BY_KEY = { normal: "정상", critical: "위험", anomaly: "이상 의심", warn: "관찰 필요", offline: "통신 장애" };
+
+function mockAIResponse(input, ctx = {}) {
+  const equipment = ctx.equipment || [];
+  const text = (input || "").trim();
+  const lower = text.toLowerCase();
+
+  // 1) 노드 ID 직접 조회
+  const nodeMatch = text.match(/TB24-5JN\d+/i);
+  if (nodeMatch) {
+    const node = nodeMatch[0].toUpperCase();
+    const eq = equipment.find((e) => e.deviceId === node);
+    if (!eq) return `${node} 는 등록된 장비가 아닙니다.`;
+    const lines = [
+      `📍 ${node} (${eq.zone || "-"})`,
+      `• 상태: ${STATUS_KO_BY_KEY[eq.status] || eq.status}`,
+      `• MSE: ${eq.mse != null ? eq.mse.toFixed(3) : "—"} (임계 ${eq.threshold ?? 0.409})`,
+      `• 최근 라벨: ${eq.label || "정상"}`,
+      eq.contribution?.length ? `• 기여도 1순위: ${eq.contribution[0].sensor} ${eq.contribution[0].pct}%` : null,
+      `• 마지막 갱신: ${eq.updatedAt || "—"}`,
+    ].filter(Boolean);
+    return lines.join("\n");
+  }
+
+  // 2) 위험/이상/관찰 키워드 → 현재 목록
+  if (/위험|critical/.test(lower)) {
+    const c = equipment.filter((e) => e.status === "critical");
+    if (c.length === 0) return "현재 위험 단계 장비가 없습니다.";
+    return `🚨 위험 ${c.length}건:\n${c.map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
+  }
+  if (/이상|의심|anomaly/.test(lower)) {
+    const a = equipment.filter((e) => e.status === "anomaly");
+    if (a.length === 0) return "현재 이상 의심 장비가 없습니다.";
+    return `⚠️ 이상 의심 ${a.length}건:\n${a.slice(0, 6).map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
+  }
+  if (/관찰|watch|warn/.test(lower)) {
+    const w = equipment.filter((e) => e.status === "warn");
+    if (w.length === 0) return "현재 관찰 필요 장비가 없습니다.";
+    return `👁 관찰 필요 ${w.length}건:\n${w.slice(0, 6).map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
+  }
+  if (/장애|offline|통신/.test(lower)) {
+    const o = equipment.filter((e) => e.status === "offline");
+    if (o.length === 0) return "현재 통신 장애 장비가 없습니다.";
+    return `📵 통신 장애 ${o.length}건:\n${o.map((e) => `• ${e.deviceId} · ${e.zone}`).join("\n")}`;
+  }
+  if (/요약|상태|summary|현황/.test(lower)) {
+    const c = { critical: 0, anomaly: 0, warn: 0, normal: 0, offline: 0 };
+    equipment.forEach((e) => { if (c[e.status] !== undefined) c[e.status]++; });
+    return `📊 전체 ${equipment.length}대\n• 위험 ${c.critical}대 · 이상 의심 ${c.anomaly}대\n• 관찰 ${c.warn}대 · 통신장애 ${c.offline}대\n• 정상 ${c.normal}대`;
+  }
+
+  // 3) 도메인 용어 설명
+  if (/방식전위|방식 전위|cathodic/.test(lower)) {
+    return "방식전위(P/S Potential)는 매설배관의 전기방식 효율 지표입니다. 일반 기준 -850 mV 이하면 양호, 초과하면 부식 진행 가능. 본 시스템은 일교차·AC 유입과 함께 추세 분석.";
+  }
+  if (/희생전류|희생양극|sacrificial/.test(lower)) {
+    return "희생양극은 배관 대신 부식되어 본 배관을 보호합니다. 희생전류가 점차 감소하면 양극 소모 또는 접속부 불량 가능성. 1mA 이하면 교체 검토 필요.";
+  }
+  if (/ac\s*유입|ac\b/.test(lower)) {
+    return "AC 유입은 인접 송전선·전철 등에서 유도되는 교류 전압. 200 mV 이상은 가속 부식 위험, 500 mV 이상은 즉각 차폐 또는 배수장치 점검 필요.";
+  }
+  if (/통신품질|dbm|rssi/.test(lower)) {
+    return "통신 품질은 노드 신호 세기(dBm). -65 이상 양호, -75 이하 주의, -85 이하 통신 두절 임박. 게이트웨이 위치·안테나 점검.";
+  }
+  if (/임계|threshold|mse/.test(lower)) {
+    return "MSE 임계값(현재 0.409) 초과 시 이상으로 분류. 0.85 이상은 위험, 0.42~0.85 이상 의심, 0.28~0.42 관찰. 임계는 모델 학습 시 결정.";
+  }
+
+  // 4) 도움말
+  if (/도움|help|\?$|메뉴/.test(lower)) {
+    return "사용 예시:\n• 'TB24-5JN042' 특정 장비 조회\n• '위험' / '이상' / '관찰' / '장애' 현재 목록\n• '요약' 전체 상태\n• '방식전위' / '희생전류' / 'AC유입' 도메인 설명";
+  }
+
+  // 5) fallback
+  return `"${text}" — 아직 LLM 미연동 상태라 일반 응답이 어렵습니다.\n노드 ID(예: TB24-5JN042) 또는 도메인 키워드로 질문해 주세요. '도움'을 입력하면 사용법을 안내합니다.`;
+}
+
+function ChatPanel({ equipment = [] }) {
+  const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
+  const [messages, setMessages] = useState([
+    { role: "ai", text: "안녕하세요. AI 분석 어시스턴트입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime },
+  ]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const listRef = useRef(null);
+
+  useEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+  }, [messages, sending]);
+
+  const send = (e) => {
+    e && e.preventDefault();
+    const trimmed = input.trim();
+    if (!trimmed || sending) return;
+    const now = new Date();
+    const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    setMessages((m) => [...m, { role: "user", text: trimmed, time }]);
+    setInput("");
+    setSending(true);
+    setTimeout(() => {
+      const reply = mockAIResponse(trimmed, { equipment });
+      const r = new Date();
+      const rtime = `${String(r.getHours()).padStart(2, "0")}:${String(r.getMinutes()).padStart(2, "0")}`;
+      setMessages((m) => [...m, { role: "ai", text: reply, time: rtime }]);
+      setSending(false);
+    }, 500 + Math.random() * 500);
+  };
+
+  return (
+    <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+      <PanelHeader
+        right={
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6,
+            padding: "2px 10px", borderRadius: 999,
+            background: "rgba(79,70,229,0.10)", color: "var(--brand)",
+            fontSize: 10, fontWeight: 700,
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--brand)", animation: "pulse-dot 1.2s infinite" }} />
+            mock 모드
+          </div>
+        }
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Icons.sparkle size={16} color="var(--brand)" />
+          <div style={{ fontSize: 13, fontWeight: 700 }}>AI 분석 어시스턴트</div>
+        </div>
+      </PanelHeader>
+
+      <div ref={listRef} className="scroll" style={{
+        flex: 1, overflow: "auto",
+        padding: "12px 12px 6px",
+        background: "var(--bg-sunk)",
+        display: "flex", flexDirection: "column", gap: 8,
+      }}>
+        {messages.map((m, i) => <ChatMessage key={i} message={m} />)}
+        {sending && <ChatTyping />}
+      </div>
+
+      <form onSubmit={send} style={{
+        display: "flex", gap: 6,
+        padding: 10,
+        borderTop: "1px solid var(--line)",
+        background: "var(--bg-elev)",
+      }}>
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="질문을 입력하세요…"
+          disabled={sending}
+          style={{
+            flex: 1,
+            padding: "0 12px",
+            height: 36,
+            background: "var(--bg-sunk)",
+            border: "1px solid var(--line)",
+            borderRadius: 9,
+            fontSize: 13,
+            color: "var(--ink)",
+            outline: "none",
+            fontFamily: "inherit",
+          }}
+        />
+        <button
+          type="submit"
+          disabled={!input.trim() || sending}
+          style={{
+            padding: "0 16px",
+            height: 36,
+            background: !input.trim() || sending ? "var(--bg-sunk)" : "linear-gradient(135deg, #4f46e5, #8b83ff)",
+            color: !input.trim() || sending ? "var(--ink-3)" : "#fff",
+            fontSize: 12, fontWeight: 700,
+            border: "none",
+            borderRadius: 9,
+            cursor: !input.trim() || sending ? "not-allowed" : "pointer",
+            boxShadow: !input.trim() || sending ? "none" : "0 6px 14px -4px rgba(79,70,229,0.45)",
+          }}
+        >
+          전송
+        </button>
+      </form>
+    </Panel>
+  );
+}
+
+function ChatMessage({ message }) {
+  const isAi = message.role === "ai";
+  return (
+    <div style={{
+      display: "flex",
+      flexDirection: isAi ? "row" : "row-reverse",
+      gap: 8,
+      alignItems: "flex-end",
+    }}>
+      {isAi && (
+        <div style={{
+          width: 24, height: 24, borderRadius: "50%",
+          background: "linear-gradient(135deg, #4f46e5, #8b83ff)",
+          color: "#fff",
+          display: "grid", placeItems: "center",
+          flexShrink: 0,
+          marginBottom: 14,
+        }}>
+          <Icons.sparkle size={12} />
+        </div>
+      )}
+      <div style={{ maxWidth: "78%", display: "flex", flexDirection: "column", gap: 3 }}>
+        <div style={{
+          padding: "8px 11px",
+          background: isAi ? "var(--bg-elev)" : "linear-gradient(135deg, #4f46e5, #8b83ff)",
+          color: isAi ? "var(--ink)" : "#fff",
+          border: isAi ? "1px solid var(--line)" : "none",
+          borderRadius: 12,
+          borderBottomLeftRadius: isAi ? 4 : 12,
+          borderBottomRightRadius: isAi ? 12 : 4,
+          fontSize: 12.5,
+          lineHeight: 1.55,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          boxShadow: isAi ? "none" : "0 4px 10px -4px rgba(79,70,229,0.4)",
+        }}>
+          {message.text}
+        </div>
+        <div style={{
+          fontSize: 9, color: "var(--ink-4)",
+          textAlign: isAi ? "left" : "right",
+          paddingLeft: isAi ? 4 : 0,
+          paddingRight: isAi ? 0 : 4,
+        }}>
+          {message.time}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChatTyping() {
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+      <div style={{
+        width: 24, height: 24, borderRadius: "50%",
+        background: "linear-gradient(135deg, #4f46e5, #8b83ff)",
+        color: "#fff",
+        display: "grid", placeItems: "center",
+        flexShrink: 0,
+      }}>
+        <Icons.sparkle size={12} />
+      </div>
+      <div style={{
+        padding: "10px 14px",
+        background: "var(--bg-elev)",
+        border: "1px solid var(--line)",
+        borderRadius: 12,
+        borderBottomLeftRadius: 4,
+        display: "flex", gap: 4, alignItems: "center",
+      }}>
+        <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--ink-3)", animation: "pulse-dot 1.2s 0s infinite" }} />
+        <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--ink-3)", animation: "pulse-dot 1.2s 0.2s infinite" }} />
+        <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--ink-3)", animation: "pulse-dot 1.2s 0.4s infinite" }} />
+      </div>
+    </div>
+  );
+}
+
 function fmtTime(d) {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
 }
@@ -1125,8 +1406,8 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
   const [fitTrigger, setFitTrigger] = useState(0); // 카운터: 변할 때마다 지도 fit
 
   const counts = useMemo(() => {
-    const c = { all: equipment.length, normal: 0, anomaly: 0, warn: 0, offline: 0 };
-    equipment.forEach((e) => c[e.status]++);
+    const c = { all: equipment.length, normal: 0, critical: 0, anomaly: 0, warn: 0, offline: 0 };
+    equipment.forEach((e) => { if (c[e.status] !== undefined) c[e.status]++; });
     return c;
   }, [equipment]);
 
@@ -1228,7 +1509,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
           gap: 16, minHeight: 0,
         }}>
           <TableSummary data={tableData} onRowClick={handleRowClick} />
-          <LogPanel lines={lines} />
+          <ChatPanel equipment={equipment} />
         </div>
 
         {/* (col 2, row 3) — AI 조치 권고 */}

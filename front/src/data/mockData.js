@@ -70,12 +70,18 @@ const DOMINANT_BY_LABEL = {
 const ANOMALY_LABELS = ["위상차 급변", "방식전위 이탈", "AC 유입 과다", "희생전류 저하", "통신 품질 저하"];
 const WARN_LABELS = ["성능 저하 트렌드", "간헐적 통신 지연", "습도 상승", "온도 급변"];
 
-// 55 devices: 42 normal, 6 anomaly, 4 warn, 3 offline
+// 55 devices: 42 normal, 2 critical, 4 anomaly, 4 warn, 3 offline
+//   critical (위험)   — 99%+ 즉각 조치 필요 (MSE 0.85+)
+//   anomaly  (이상의심)— 추세 상승, 중간 단계 (MSE 0.5~0.85)
+//   warn     (관찰)   — 가스 외 애매 신호 (MSE 0.28~0.5)
+//   normal   (정상)
+//   offline  (통신장애)
 export const EQUIPMENT = (() => {
   const out = [];
   const statuses = [
     ...Array(42).fill("normal"),
-    ...Array(6).fill("anomaly"),
+    ...Array(2).fill("critical"),
+    ...Array(4).fill("anomaly"),
     ...Array(4).fill("warn"),
     ...Array(3).fill("offline"),
   ];
@@ -92,7 +98,19 @@ export const EQUIPMENT = (() => {
     let volt, sacrificial, ac, temp, hum, commDbm, commOk, mse;
     let label, dominant;
 
-    if (status === "anomaly") {
+    if (status === "critical") {
+      // 위험 — 즉각 조치 필요. anomaly 패턴 + MSE 더 높음
+      label = pick(ANOMALY_LABELS);
+      dominant = DOMINANT_BY_LABEL[label];
+      volt = -300 - Math.floor(rand() * 300);
+      sacrificial = +(rand() * 1.5).toFixed(2);
+      ac = Math.floor(rand() * 250) + 580;
+      temp = +(24 + rand() * 8).toFixed(1);
+      hum = +(65 + rand() * 25).toFixed(1);
+      commDbm = -72 - Math.floor(rand() * 15);
+      commOk = true;
+      mse = +(0.85 + rand() * 0.13).toFixed(3);
+    } else if (status === "anomaly") {
       label = pick(ANOMALY_LABELS);
       dominant = DOMINANT_BY_LABEL[label];
       volt = -400 - Math.floor(rand() * 400);
@@ -102,7 +120,7 @@ export const EQUIPMENT = (() => {
       hum = +(60 + rand() * 25).toFixed(1);
       commDbm = -70 - Math.floor(rand() * 15);
       commOk = true;
-      mse = +(0.42 + rand() * 0.55).toFixed(3);
+      mse = +(0.42 + rand() * 0.43).toFixed(3);  // 0.42~0.85 (재정의: 추세 상승)
     } else if (status === "warn") {
       label = pick(WARN_LABELS);
       dominant = DOMINANT_BY_LABEL[label];
@@ -150,7 +168,7 @@ export const EQUIPMENT = (() => {
       commDbm,
       commOk,
       mse,
-      contribution: status === "normal" || status === "offline" ? [] : makeContribution(status, dominant),
+      contribution: (status === "normal" || status === "offline") ? [] : makeContribution(status === "critical" ? "anomaly" : status, dominant),
       threshold: 0.409,
       updatedAt,
       nextCollectMin: 60 - minAgo,

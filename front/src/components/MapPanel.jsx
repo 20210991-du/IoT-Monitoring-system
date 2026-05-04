@@ -25,23 +25,66 @@ function toLatLng(m) {
   ];
 }
 
+// 핀 안에 들어갈 status 별 흰색 아이콘 (24×24 viewBox 기준 path)
+const PIN_INNER_ICON = {
+  // 위험: alert + 굵게 강조 (anomaly 와 같은 path, 색만 다름)
+  critical: `<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><circle cx="12" cy="17" r="1.1" fill="white" stroke="none"/>`,
+  // 이상 의심: alert (삼각형 + ! )
+  anomaly: `<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><circle cx="12" cy="17" r="0.9" fill="white" stroke="none"/>`,
+  // 관찰 필요: eye
+  warn:    `<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>`,
+  // 정상: check
+  normal:  `<path d="M5 12.5 10 17l9-11"/>`,
+  // 통신 장애: wifi_off (사선)
+  offline: `<path d="M2 2l20 20"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M2 8.8A17 17 0 0 1 7 6"/><path d="M22 8.8A17 17 0 0 0 16 5.8"/><circle cx="12" cy="20" r="1.2" fill="white" stroke="none"/>`,
+};
+
 function makeIcon(status) {
   const color =
-    status === "anomaly" ? "#ef4444" :
-    status === "warn"    ? "#f59e0b" : "#4f46e5";
-  const dot = status === "anomaly"
-    ? `<circle cx="16" cy="14" r="2.2" fill="${color}"/>`
-    : "";
-  const svg = `<svg width="32" height="40" viewBox="0 0 32 40" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 3px 4px rgba(0,0,0,0.35))"><path d="M16 0 C 8 0 2 6 2 14 C 2 24 16 40 16 40 C 16 40 30 24 30 14 C 30 6 24 0 16 0 Z" fill="${color}" stroke="rgba(255,255,255,0.85)" stroke-width="1.5"/><circle cx="16" cy="14" r="5" fill="rgba(255,255,255,0.92)"/>${dot}</svg>`;
+    status === "critical" ? "#991b1b" :
+    status === "anomaly"  ? "#ef4444" :
+    status === "warn"     ? "#f59e0b" : "#4f46e5";
+  const iconPaths = PIN_INNER_ICON[status] || "";
+  const inner = iconPaths
+    ? `<g transform="translate(9 7) scale(0.583)" stroke="white" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round">${iconPaths}</g>`
+    : `<circle cx="16" cy="14" r="5" fill="rgba(255,255,255,0.92)"/>`;
+  const svg = `<svg width="32" height="40" viewBox="0 0 32 40" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 3px 4px rgba(0,0,0,0.35))"><path d="M16 0 C 8 0 2 6 2 14 C 2 24 16 40 16 40 C 16 40 30 24 30 14 C 30 6 24 0 16 0 Z" fill="${color}" stroke="rgba(255,255,255,0.85)" stroke-width="1.5"/>${inner}</svg>`;
   return L.divIcon({ html: svg, className: "", iconSize: [32, 40], iconAnchor: [16, 40], popupAnchor: [0, -44] });
 }
 
-function makeClusterIcon(count) {
+// 클러스터 색상 — status 별
+const CLUSTER_COLOR = {
+  normal:  "#10b981",  // 정상 → 초록
+  offline: "#64748b",  // 통신장애 → 회색
+  mixed:   "#4f46e5",  // 혼합 (정상+장애) → 보라
+};
+
+function makeClusterIcon(count, status = "mixed") {
+  const color = CLUSTER_COLOR[status] || CLUSTER_COLOR.mixed;
+  const iconPaths = PIN_INNER_ICON[status] || "";
+  // normal: 카운트 배지 X → 핀 head 중심(20, 16)에 정확히 정렬
+  // offline: 카운트 배지 O → 배지와 겹치지 않게 좌하 offset
+  const tx = status === "normal" ? 13 : 10;
+  const ty = status === "normal" ? 10 : 9;
+  // mixed (정상+장애 혼합) 는 3 dots 유지, normal/offline 은 해당 아이콘
+  const inner = iconPaths
+    ? `<g transform="translate(${tx} ${ty}) scale(0.583)" stroke="white" stroke-width="2.8" fill="none" stroke-linecap="round" stroke-linejoin="round">${iconPaths}</g>`
+    : `<circle cx="20" cy="13" r="2.2" fill="rgba(255,255,255,0.95)"/><circle cx="14" cy="21" r="2.2" fill="rgba(255,255,255,0.95)"/><circle cx="26" cy="21" r="2.2" fill="rgba(255,255,255,0.95)"/>`;
+  // 핀 모양 + 상태 아이콘 (+ 카운트 배지 — 정상 클러스터는 생략)
+  const badge = status === "normal"
+    ? ""
+    : `<circle cx="32" cy="6" r="7" fill="white" stroke="${color}" stroke-width="1.5"/><text x="32" y="9.5" font-family="-apple-system,system-ui,sans-serif" font-weight="800" font-size="9" text-anchor="middle" fill="${color}">${count}</text>`;
+  const svg = `<svg width="40" height="48" viewBox="0 0 40 48" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 3px 5px rgba(0,0,0,0.35))">
+    <path d="M20 0 C 11 0 4 7 4 16 C 4 27 20 48 20 48 C 20 48 36 27 36 16 C 36 7 29 0 20 0 Z" fill="${color}" stroke="rgba(255,255,255,0.85)" stroke-width="1.5"/>
+    ${inner}
+    ${badge}
+  </svg>`;
   return L.divIcon({
-    html: `<div style="width:44px;height:44px;border-radius:50%;background:#4f46e5;color:#fff;display:grid;place-items:center;font-weight:800;font-size:16px;font-family:Space Grotesk,sans-serif;border:2px solid rgba(255,255,255,0.8);box-shadow:0 0 0 6px rgba(79,70,229,0.22),0 8px 24px -6px rgba(79,70,229,0.5)">${count}</div>`,
+    html: svg,
     className: "",
-    iconSize: [44, 44],
-    iconAnchor: [22, 22],
+    iconSize: [40, 48],
+    iconAnchor: [20, 48],
+    popupAnchor: [0, -48],
   });
 }
 
@@ -117,7 +160,7 @@ export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger }) {
 
     markers.forEach((m) => {
       const pos  = toLatLng(m);
-      const icon = m.kind === "cluster" ? makeClusterIcon(m.count) : makeIcon(m.status);
+      const icon = m.kind === "cluster" ? makeClusterIcon(m.count, m.status) : makeIcon(m.status);
       const lm   = L.marker(pos, { icon }).addTo(map);
       if (m.kind === "single") {
         lm.bindPopup(popupHtml(m));

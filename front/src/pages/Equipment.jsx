@@ -3,10 +3,11 @@ import { Icons } from "../components/Icons.jsx";
 
 const statusChip = (status) => {
   const map = {
-    normal:  { ko: "정상",   fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
-    anomaly: { ko: "이상",   fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    warn:    { ko: "관찰",   fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
-    offline: { ko: "통신장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
+    normal:   { ko: "정상",     fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
+    critical: { ko: "위험",     fg: "#fff",     bg: "#dc2626",                bd: "#991b1b" },
+    anomaly:  { ko: "이상",     fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
+    warn:     { ko: "관찰",     fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
+    offline:  { ko: "통신장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
   };
   return map[status] || map.normal;
 };
@@ -57,8 +58,8 @@ export function Equipment({ onOpen, equipment = [] }) {
   const pageSize = 14;
 
   const counts = useMemo(() => {
-    const c = { all: equipment.length, normal: 0, anomaly: 0, warn: 0, offline: 0 };
-    equipment.forEach((e) => c[e.status]++);
+    const c = { all: equipment.length, normal: 0, critical: 0, anomaly: 0, warn: 0, offline: 0 };
+    equipment.forEach((e) => { if (c[e.status] !== undefined) c[e.status]++; });
     return c;
   }, [equipment]);
 
@@ -129,6 +130,9 @@ export function Equipment({ onOpen, equipment = [] }) {
         <FilterPill active={filter === "all"} onClick={() => { setFilter("all"); setPage(1); }} color="var(--brand)" count={counts.all}>전체</FilterPill>
         <FilterPill active={filter === "normal"} onClick={() => { setFilter("normal"); setPage(1); }} color="var(--ok)" count={counts.normal}>
           <Icons.check size={12} /> 정상
+        </FilterPill>
+        <FilterPill active={filter === "critical"} onClick={() => { setFilter("critical"); setPage(1); }} color="#dc2626" count={counts.critical}>
+          <Icons.alert size={12} /> 위험
         </FilterPill>
         <FilterPill active={filter === "anomaly"} onClick={() => { setFilter("anomaly"); setPage(1); }} color="var(--err)" count={counts.anomaly}>
           <Icons.alert size={12} /> 이상

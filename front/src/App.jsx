@@ -299,18 +299,26 @@ export function App() {
         user={user}
         pendingCount={user?.role === "admin" ? (listPending(user).users?.length || 0) : 0}
       />
-      {bannerOpen && tab === "dashboard" && (
-        <EmergencyBanner
-          onDismiss={() => setBannerOpen(false)}
-          onOpen={() => setAnalysis(anomalies[0] || null)}
-        />
-      )}
-      <div style={{
-        position: "absolute", left: 0, right: 0,
-        top: bannerOpen && tab === "dashboard" ? 144 : 104,
-        bottom: 0,
-        transition: "top 220ms",
-      }}>
+      {bannerOpen && tab === "dashboard" && (() => {
+        const criticalDevices = (equipment || []).filter((e) => e.status === "critical");
+        if (criticalDevices.length === 0) return null;
+        return (
+          <EmergencyBanner
+            criticalDevices={criticalDevices}
+            onDismiss={() => setBannerOpen(false)}
+            onOpen={() => setAnalysis(anomalies.find((a) => a.node === criticalDevices[0].deviceId) || anomalies[0] || null)}
+          />
+        );
+      })()}
+      {(() => {
+        const hasCritical = tab === "dashboard" && bannerOpen && (equipment || []).some((e) => e.status === "critical");
+        return (
+          <div style={{
+            position: "absolute", left: 0, right: 0,
+            top: hasCritical ? 144 : 104,
+            bottom: 0,
+            transition: "top 220ms",
+          }}>
         {tab === "dashboard" && (
           <Dashboard
             onAnalyze={setAnalysis}
@@ -337,6 +345,8 @@ export function App() {
           />
         )}
       </div>
+        );
+      })()}
       <AnalysisModal item={analysis} onClose={() => setAnalysis(null)} />
       <EquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
       <TweaksPanel state={tweakState} setState={setTweakState} show={tweaksOn} />
