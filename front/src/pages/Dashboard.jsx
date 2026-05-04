@@ -1509,12 +1509,12 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
           gap: 16, minHeight: 0,
         }}>
           <TableSummary data={tableData} onRowClick={handleRowClick} />
-          <ChatPanel equipment={equipment} />
+          <LogPanel lines={lines} />
         </div>
 
-        {/* (col 2, row 3) — AI 조치 권고 */}
+        {/* (col 2, row 3) — AI 분석 어시스턴트 (채팅) */}
         <div style={{ gridColumn: 2, gridRow: 3, minHeight: 0 }}>
-          <AIAdvicePanel insights={insights} onClickInsight={focusByNode} />
+          <ChatPanel equipment={equipment} />
         </div>
       </div>
       <DashboardEquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
