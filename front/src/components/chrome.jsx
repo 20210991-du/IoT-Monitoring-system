@@ -569,43 +569,60 @@ export function SubNav({ tab, setTab, apiStatus = "mock", user, pendingCount = 0
   );
 }
 
-export function EmergencyBanner({ onDismiss, onOpen }) {
+export function EmergencyBanner({ onDismiss, onOpen, criticalDevices = [] }) {
+  // criticalDevices: equipment 중 status === "critical" 인 항목 배열
+  const count = criticalDevices.length;
+  if (count === 0) return null;
+  const first = criticalDevices[0] || {};
+  const time  = (first.updatedAt || "").trim();
+  const head  = count === 1
+    ? `[위험] ${first.zone || ""} ${first.deviceId || ""} — ${first.label || "이상 감지"} · 즉각 현장 점검`
+    : `[위험] ${count}건 동시 발생 — ${first.zone || ""} ${first.deviceId || ""} 외 ${count - 1}건. 즉각 현장 점검`;
+
   return (
     <div style={{
       position: "absolute", left: 0, right: 0, top: 104, height: 40,
-      background: "linear-gradient(90deg, #f59e0b 0%, #f97316 100%)",
-      boxShadow: "0 4px 12px -4px rgba(245,158,11,0.5)",
+      // 위험 톤 — 강한 빨강 그라디언트
+      background: "linear-gradient(90deg, #dc2626 0%, #991b1b 100%)",
+      boxShadow: "0 4px 14px -4px rgba(220,38,38,0.65)",
       display: "flex", alignItems: "center", justifyContent: "space-between",
       padding: "0 32px", color: "#fff", zIndex: 35,
       overflow: "hidden",
+      animation: "danger-pulse 1.6s ease-in-out infinite",
     }}>
       <div style={{
         position: "absolute", inset: 0,
-        background: "repeating-linear-gradient(45deg, transparent, transparent 20px, rgba(255,255,255,0.04) 20px, rgba(255,255,255,0.04) 40px)",
+        background: "repeating-linear-gradient(45deg, transparent, transparent 20px, rgba(255,255,255,0.06) 20px, rgba(255,255,255,0.06) 40px)",
         pointerEvents: "none",
       }} />
-      <div style={{ display: "flex", alignItems: "center", gap: 12, zIndex: 1 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, zIndex: 1, minWidth: 0 }}>
         <div style={{
           width: 22, height: 22,
-          animation: "pulse-dot 1.4s infinite",
+          animation: "pulse-dot 1.0s infinite",
         }}>
           <Icons.alert size={22} />
         </div>
-        <div style={{ fontSize: 14, fontWeight: 700 }}>
-          2026-03-26 [경고] 제2구역 매설배관 방식전위 급격한 변동 감지 — 즉각적인 현장 점검이 필요합니다.
+        <div style={{
+          fontSize: 14, fontWeight: 700,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {head}
         </div>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 16, zIndex: 1 }}>
-        <div className="mono" style={{ fontSize: 11, opacity: 0.9, letterSpacing: "0.04em" }}>
-          발생 시각 14:22:05
-        </div>
+        {time && (
+          <div className="mono" style={{ fontSize: 11, opacity: 0.9, letterSpacing: "0.04em" }}>
+            발생 시각 {time}
+          </div>
+        )}
         <button onClick={onOpen} style={{
           padding: "4px 14px", borderRadius: 999,
           background: "rgba(255,255,255,0.22)", color: "#fff",
           fontSize: 12, fontWeight: 700,
           border: "1px solid rgba(255,255,255,0.4)",
+          cursor: "pointer",
         }}>자세히 보기</button>
-        <button onClick={onDismiss} title="닫기" style={{ color: "#fff", opacity: 0.85 }}>
+        <button onClick={onDismiss} title="닫기" style={{ color: "#fff", opacity: 0.85, background: "transparent", border: "none", cursor: "pointer" }}>
           <Icons.close size={16} />
         </button>
       </div>
