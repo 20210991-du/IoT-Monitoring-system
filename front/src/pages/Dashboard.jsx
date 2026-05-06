@@ -8,7 +8,7 @@ const statusChip = (status) => {
     normal:   { ko: "정상", fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
     critical: { ko: "위험", fg: "#fff",     bg: "#dc2626",                bd: "#991b1b" },
     anomaly:  { ko: "이상", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    warn:     { ko: "관찰", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
+    warn:     { ko: "이상", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
     offline:  { ko: "장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
   };
   return map[status] || map.normal;
@@ -71,7 +71,7 @@ function KPIRow({ active, setActive, counts }) {
     { k: "all",      label: "총 장비",   value: counts.all,      accent: "var(--brand)", icon: <Icons.box size={18} /> },
     { k: "normal",   label: "정상",      value: counts.normal,   accent: "var(--ok)",    icon: <Icons.check size={18} /> },
     { k: "critical", label: "위험",      value: counts.critical, accent: "#dc2626",      icon: <Icons.alert size={18} />, danger: true },
-    { k: "warn",     label: "관찰 필요", value: counts.warn,     accent: "var(--warn)",  icon: <Icons.eye size={18} /> },
+    { k: "warn",     label: "이상 의심", value: counts.warn,     accent: "var(--warn)",  icon: <Icons.eye size={18} /> },
     { k: "offline",  label: "통신 장애", value: counts.offline,  accent: "var(--ink-3)", icon: <Icons.wifi_off size={18} /> },
   ];
   return (
@@ -200,7 +200,7 @@ function AIPanels({ onAnalyze, anomalies, watch }) {
               background: "rgba(245,158,11,0.12)", color: "var(--warn)",
               borderRadius: 999,
             }}>
-              관찰 {watch.length}건
+              이상 의심 {watch.length}건
             </span>
           </div>
         }
@@ -354,7 +354,7 @@ function MarkerPopup({ m, onClose }) {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 8 }}>
         <Metric label="MSE" value={m.mse.toFixed(3)} color={color} />
         <Metric label="구역" value={m.zone} />
-        <Metric label="상태" value={m.status === "anomaly" ? "이상" : "관찰"} color={color} />
+        <Metric label="상태" value={m.status === "critical" ? "위험" : "이상 의심"} color={color} />
       </div>
       <div style={{
         marginTop: 10, padding: "8px 10px", borderRadius: 8,
@@ -396,13 +396,16 @@ function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrig
         </div>
         <div style={{ display: "flex", gap: 12, fontSize: 10, color: "var(--ink-3)" }}>
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--brand)" }} />정상
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#10b981" }} />정상
           </span>
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--err)" }} />이상
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#991b1b" }} />위험
           </span>
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--warn)" }} />관찰
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--warn)" }} />이상 의심
+          </span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#64748b" }} />통신 장애
           </span>
         </div>
       </div>
@@ -627,7 +630,7 @@ function LogPanel({ lines }) {
 //   현재 LLM 미연동 — 키워드/노드 ID 매칭 기반 응답.
 //   실제 백엔드 연결 시 mockAIResponse → fetch("/api/chat") 으로 교체 예정.
 
-const STATUS_KO_BY_KEY = { normal: "정상", critical: "위험", warn: "관찰 필요", offline: "통신 장애" };
+const STATUS_KO_BY_KEY = { normal: "정상", critical: "위험", warn: "이상 의심", offline: "통신 장애" };
 
 function mockAIResponse(input, ctx = {}) {
   const equipment = ctx.equipment || [];
@@ -651,20 +654,16 @@ function mockAIResponse(input, ctx = {}) {
     return lines.join("\n");
   }
 
-  // 2) 위험/이상/관찰 키워드 → 현재 목록
+  // 2) 위험/이상 의심 키워드 → 현재 목록
   if (/위험|critical/.test(lower)) {
     const c = equipment.filter((e) => e.status === "critical");
     if (c.length === 0) return "현재 위험 단계 장비가 없습니다.";
     return `🚨 위험 ${c.length}건:\n${c.map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
   }
-  if (/이상|의심|anomaly/.test(lower)) {
-    // 5단계 분류로 단순화 — 이상 의심 단계 제거됨
-    return "위험도는 5단계로 단순화되었습니다 (정상/위험/관찰/통신장애).\n'위험' 또는 '관찰' 로 질문해 주세요.";
-  }
-  if (/관찰|watch|warn/.test(lower)) {
+  if (/이상|의심|관찰|anomaly|watch|warn/.test(lower)) {
     const w = equipment.filter((e) => e.status === "warn");
-    if (w.length === 0) return "현재 관찰 필요 장비가 없습니다.";
-    return `👁 관찰 필요 ${w.length}건:\n${w.slice(0, 6).map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
+    if (w.length === 0) return "현재 이상 의심 장비가 없습니다.";
+    return `⚠️ 이상 의심 ${w.length}건:\n${w.slice(0, 6).map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
   }
   if (/장애|offline|통신/.test(lower)) {
     const o = equipment.filter((e) => e.status === "offline");
@@ -674,7 +673,7 @@ function mockAIResponse(input, ctx = {}) {
   if (/요약|상태|summary|현황/.test(lower)) {
     const c = { critical: 0, warn: 0, normal: 0, offline: 0 };
     equipment.forEach((e) => { if (c[e.status] !== undefined) c[e.status]++; });
-    return `📊 전체 ${equipment.length}대\n• 위험 ${c.critical}대 · 관찰 ${c.warn}대\n• 통신장애 ${c.offline}대 · 정상 ${c.normal}대`;
+    return `📊 전체 ${equipment.length}대\n• 위험 ${c.critical}대 · 이상 의심 ${c.warn}대\n• 통신장애 ${c.offline}대 · 정상 ${c.normal}대`;
   }
 
   // 3) 도메인 용어 설명
@@ -691,12 +690,12 @@ function mockAIResponse(input, ctx = {}) {
     return "통신 품질은 노드 신호 세기(dBm). -65 이상 양호, -75 이하 주의, -85 이하 통신 두절 임박. 게이트웨이 위치·안테나 점검.";
   }
   if (/임계|threshold|mse/.test(lower)) {
-    return "MSE 임계값(현재 0.409) 초과 시 이상으로 분류. 0.85 이상은 위험, 0.28~0.85 관찰. 임계는 모델 학습 시 결정.";
+    return "MSE 임계값(현재 0.409) 초과 시 이상으로 분류. 0.85 이상은 위험, 0.28~0.85 이상 의심. 임계는 모델 학습 시 결정.";
   }
 
   // 4) 도움말
   if (/도움|help|\?$|메뉴/.test(lower)) {
-    return "사용 예시:\n• 'TB24-5JN042' 특정 장비 조회\n• '위험' / '관찰' / '장애' 현재 목록\n• '요약' 전체 상태\n• '방식전위' / '희생전류' / 'AC유입' 도메인 설명";
+    return "사용 예시:\n• 'TB24-5JN042' 특정 장비 조회\n• '위험' / '이상 의심' / '장애' 현재 목록\n• '요약' 전체 상태\n• '방식전위' / '희생전류' / 'AC유입' 도메인 설명";
   }
 
   // 5) fallback
@@ -954,7 +953,7 @@ export function AnalysisModal({ item, onClose }) {
     { label: "이상 스코어",  value: item.mse.toFixed(3),        accent: color },
     { label: "이상 임계값",  value: item.threshold?.toFixed(3) ?? "0.409", accent: "var(--ink-2)" },
     { label: "주요 센서",    value: mainSensor,                  accent: "var(--brand)" },
-    { label: "판정",         value: isAnomaly ? "이상" : "관찰", accent: color },
+    { label: "판정",         value: isAnomaly ? "위험" : "이상 의심", accent: color },
   ];
 
   return (
@@ -1025,8 +1024,8 @@ export function AnalysisModal({ item, onClose }) {
               <div style={{ display: "flex", gap: 10, fontSize: 10, color: "var(--ink-3)" }}>
                 {[
                   { c: "rgba(16,185,129,0.35)", l: "정상" },
-                  { c: "rgba(245,158,11,0.35)", l: `관찰 ≥${thW.toFixed(3)}` },
-                  { c: "rgba(239,68,68,0.35)",  l: `이상 ≥${thA.toFixed(3)}` },
+                  { c: "rgba(245,158,11,0.35)", l: `이상 의심 ≥${thW.toFixed(3)}` },
+                  { c: "rgba(239,68,68,0.35)",  l: `위험 ≥${thA.toFixed(3)}` },
                 ].map(({ c, l }) => (
                   <span key={l} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                     <span style={{ width: 10, height: 3, background: c }} />{l}
@@ -1052,8 +1051,8 @@ export function AnalysisModal({ item, onClose }) {
                 <rect x="0" y={yW}      width="640" height={140 - yW}    fill="rgba(16,185,129,0.06)" />
                 {/* Y축 레이블 */}
                 <text x="4" y="12"   fontSize="9" fill="var(--ink-4)" fontFamily="JetBrains Mono">1.0</text>
-                <text x="4" y={yA + 4} fontSize="9" fill="var(--err)"   fontFamily="JetBrains Mono" fontWeight="700">{thA.toFixed(3)} ── 이상</text>
-                <text x="4" y={yW + 4} fontSize="9" fill="var(--warn)"  fontFamily="JetBrains Mono" fontWeight="700">{thW.toFixed(3)} ── 관찰</text>
+                <text x="4" y={yA + 4} fontSize="9" fill="var(--err)"   fontFamily="JetBrains Mono" fontWeight="700">{thA.toFixed(3)} ── 위험</text>
+                <text x="4" y={yW + 4} fontSize="9" fill="var(--warn)"  fontFamily="JetBrains Mono" fontWeight="700">{thW.toFixed(3)} ── 이상 의심</text>
                 <text x="4" y="136"  fontSize="9" fill="var(--ink-4)" fontFamily="JetBrains Mono">0.0</text>
                 {/* 임계선 */}
                 <line x1="0" y1={yA} x2="640" y2={yA} stroke="var(--err)"  strokeWidth="1" strokeDasharray="4 4" opacity="0.5" />

@@ -30,7 +30,7 @@ function EquipmentDrawer({ item, onClose }) {
   const statusMap = {
     normal:  { ko: "정상", fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
     anomaly: { ko: "이상", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    warn:    { ko: "관찰", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
+    warn:    { ko: "이상", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
     offline: { ko: "장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
   };
   const c = statusMap[item.status] || statusMap.normal;
@@ -177,7 +177,7 @@ export function App() {
     anoRes.watch.slice(0, 3).forEach((w, i) => {
       events.push({
         id: base + 10 + i, kind: "warn", time: t,
-        text: `WARN: 관찰 대상 ${w.node} · MSE=${w.mse.toFixed(4)} [${w.label}]`,
+        text: `WARN: 이상 의심 ${w.node} · MSE=${w.mse.toFixed(4)} [${w.label}]`,
       });
     });
 
@@ -192,7 +192,7 @@ export function App() {
     const normal = devRes.devices.filter((d) => d.status === "normal").length;
     events.push({
       id: base + 30, kind: "ok", time: t,
-      text: `SYS: 정상 ${normal}건 · 이상 ${anoRes.anomalies.length}건 · 관찰 ${anoRes.watch.length}건`,
+      text: `SYS: 정상 ${normal}건 · 위험 ${anoRes.anomalies.length}건 · 이상 의심 ${anoRes.watch.length}건`,
       tail: "OK",
     });
 
