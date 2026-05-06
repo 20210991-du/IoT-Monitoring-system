@@ -376,7 +376,7 @@ function MarkerPopup({ m, onClose }) {
   );
 }
 
-function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrigger, boundsRequest }) {
+function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrigger, boundsRequest, showNormal, setShowNormal }) {
   return (
     <Panel style={{ position: "relative", height: "100%", isolation: "isolate" }}>
       <MapPanel markers={markers} onMarker={onMarker} mapStyle={mapStyle} focus={focus} fitTrigger={fitTrigger} boundsRequest={boundsRequest} />
@@ -410,6 +410,33 @@ function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrig
           </span>
         </div>
       </div>
+
+      {/* 정상 핀 토글 (우상단) */}
+      <button
+        onClick={() => setShowNormal && setShowNormal(!showNormal)}
+        title={showNormal ? "정상 핀 숨기기" : "정상 핀 표시"}
+        style={{
+          position: "absolute", right: 16, top: 16, zIndex: 1000,
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "7px 14px",
+          borderRadius: 999,
+          background: showNormal ? "rgba(16,185,129,0.12)" : "var(--bg-elev)",
+          border: `1px solid ${showNormal ? "rgba(16,185,129,0.4)" : "var(--line)"}`,
+          boxShadow: "0 8px 24px -10px rgba(0,0,0,0.2)",
+          fontSize: 11, fontWeight: 700,
+          color: showNormal ? "#047857" : "var(--ink-3)",
+          cursor: "pointer",
+          transition: "all 160ms ease",
+          backdropFilter: "blur(10px)",
+        }}
+      >
+        <span style={{
+          width: 8, height: 8, borderRadius: "50%",
+          background: showNormal ? "#10b981" : "var(--ink-4)",
+          transition: "background 160ms ease",
+        }} />
+        정상 {showNormal ? "표시" : "숨김"}
+      </button>
 
       {/* 지도 스타일 스위처는 Header 설정 아이콘 드롭다운으로 이동 (2026-05-04) */}
     </Panel>
@@ -1423,6 +1450,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
   const [focused, setFocused] = useState(null); // {lat, lng, node, ts}
   const [fitTrigger, setFitTrigger] = useState(0); // 카운터: 변할 때마다 지도 fit
   const [boundsRequest, setBoundsRequest] = useState(null); // { coords, ts } — 챗봇이 여러 노드 언급 시
+  const [showNormal, setShowNormal] = useState(true);        // 지도 위 정상 핀 토글
 
   const counts = useMemo(() => {
     const c = { all: equipment.length, normal: 0, critical: 0, anomaly: 0, warn: 0, offline: 0 };
@@ -1436,10 +1464,16 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
   }, [activeKpi, equipment]);
 
   const filteredMarkers = useMemo(() => {
-    if (!activeKpi || activeKpi === "all") return markers;
-    const filtered = equipment.filter((e) => e.status === activeKpi);
-    return devicesToMarkers(filtered);
-  }, [activeKpi, equipment, markers]);
+    let base = markers;
+    if (activeKpi && activeKpi !== "all") {
+      base = devicesToMarkers(equipment.filter((e) => e.status === activeKpi));
+    }
+    // 정상 핀 토글 (활성 KPI 가 'normal' 일 때는 토글 무시 — 명시적 선택)
+    if (!showNormal && activeKpi !== "normal") {
+      base = base.filter((m) => m.status !== "normal");
+    }
+    return base;
+  }, [activeKpi, equipment, markers, showNormal]);
 
   // 노드 ID 로 지도 포커싱 (장비 lat/lng 우선, markers fallback)
   const focusByNode = (node) => {
@@ -1535,6 +1569,8 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
             focus={focused}
             fitTrigger={fitTrigger}
             boundsRequest={boundsRequest}
+            showNormal={showNormal}
+            setShowNormal={setShowNormal}
           />
         </div>
 
