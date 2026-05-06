@@ -376,10 +376,10 @@ function MarkerPopup({ m, onClose }) {
   );
 }
 
-function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrigger }) {
+function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrigger, boundsRequest }) {
   return (
     <Panel style={{ position: "relative", height: "100%", isolation: "isolate" }}>
-      <MapPanel markers={markers} onMarker={onMarker} mapStyle={mapStyle} focus={focus} fitTrigger={fitTrigger} />
+      <MapPanel markers={markers} onMarker={onMarker} mapStyle={mapStyle} focus={focus} fitTrigger={fitTrigger} boundsRequest={boundsRequest} />
 
       {/* Legend */}
       <div style={{
@@ -719,7 +719,7 @@ function mockAIResponse(input, ctx = {}) {
   return `"${text}" — 아직 LLM 미연동 상태라 일반 응답이 어렵습니다.\n노드 ID(예: TB24-5JN042) 또는 도메인 키워드로 질문해 주세요. '도움'을 입력하면 사용법을 안내합니다.`;
 }
 
-function ChatPanel({ equipment = [] }) {
+function ChatPanel({ equipment = [], onBotReply }) {
   const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
   const [messages, setMessages] = useState([
     { role: "ai", text: "안녕하세요. AI 챗봇입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime },
@@ -747,6 +747,10 @@ function ChatPanel({ equipment = [] }) {
       const rtime = `${String(r.getHours()).padStart(2, "0")}:${String(r.getMinutes()).padStart(2, "0")}`;
       setMessages((m) => [...m, { role: "ai", text: reply, time: rtime }]);
       setSending(false);
+      // 응답 안의 노드 ID 추출 → 지도 자동 zoom (1개=flyTo, 2개+=fitBounds)
+      const matches = reply.match(/TB24-5JN\d+/g) || [];
+      const nodes = [...new Set(matches)];
+      if (nodes.length > 0 && onBotReply) onBotReply(nodes);
     }, 500 + Math.random() * 500);
   };
 
@@ -1418,6 +1422,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
   const [drawer, setDrawer] = useState(null);
   const [focused, setFocused] = useState(null); // {lat, lng, node, ts}
   const [fitTrigger, setFitTrigger] = useState(0); // 카운터: 변할 때마다 지도 fit
+  const [boundsRequest, setBoundsRequest] = useState(null); // { coords, ts } — 챗봇이 여러 노드 언급 시
 
   const counts = useMemo(() => {
     const c = { all: equipment.length, normal: 0, critical: 0, anomaly: 0, warn: 0, offline: 0 };
@@ -1472,6 +1477,23 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
     setFitTrigger(Date.now());
   };
 
+  // 챗봇 응답에서 노드 ID 들이 언급되면 지도 자동 zoom
+  //  - 1개: flyTo + 팝업
+  //  - 2개+: fitBounds (모두 한 화면에)
+  const fitToNodes = (nodes) => {
+    if (!nodes || nodes.length === 0) return;
+    const coords = nodes
+      .map((n) => equipment.find((e) => e.deviceId === n))
+      .filter((eq) => eq && eq.lat != null && eq.lng != null)
+      .map((eq) => [eq.lat, eq.lng, eq.deviceId]);
+    if (coords.length === 0) return;
+    if (coords.length === 1) {
+      setFocused({ lat: coords[0][0], lng: coords[0][1], node: coords[0][2], ts: Date.now() });
+    } else {
+      setBoundsRequest({ coords: coords.map(([lat, lng]) => [lat, lng]), ts: Date.now() });
+    }
+  };
+
   const lines = useLogStream(aiEvents);
 
   return (
@@ -1512,6 +1534,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
             setMapStyle={setMapStyle}
             focus={focused}
             fitTrigger={fitTrigger}
+            boundsRequest={boundsRequest}
           />
         </div>
 
@@ -1528,7 +1551,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
 
         {/* (col 2, row 3) — AI 챗봇 */}
         <div style={{ gridColumn: 2, gridRow: 3, minHeight: 0 }}>
-          <ChatPanel equipment={equipment} />
+          <ChatPanel equipment={equipment} onBotReply={fitToNodes} />
         </div>
       </div>
       <DashboardEquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
