@@ -1472,9 +1472,10 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
         padding: 24,
         display: "grid",
         gridTemplateColumns: "1fr 520px",
-        gridTemplateRows: "auto minmax(360px, 1.2fr) minmax(280px, 1fr)",
+        gridTemplateRows: "auto minmax(300px, 1.2fr) minmax(240px, 1fr)",
         gap: 16,
         minHeight: 0,
+        overflow: "auto",
       }}>
         {/* (col 1, row 1) — KPI */}
         <div style={{ gridColumn: 1, gridRow: 1, minHeight: 0 }}>
