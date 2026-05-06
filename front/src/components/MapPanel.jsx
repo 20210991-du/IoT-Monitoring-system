@@ -48,7 +48,18 @@ function makeIcon(status) {
   const inner = iconPaths
     ? `<g transform="translate(9 7) scale(0.583)" stroke="white" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round">${iconPaths}</g>`
     : `<circle cx="16" cy="14" r="5" fill="rgba(255,255,255,0.92)"/>`;
-  const svg = `<svg width="32" height="40" viewBox="0 0 32 40" xmlns="http://www.w3.org/2000/svg" style="filter:drop-shadow(0 3px 4px rgba(0,0,0,0.35))"><path d="M16 0 C 8 0 2 6 2 14 C 2 24 16 40 16 40 C 16 40 30 24 30 14 C 30 6 24 0 16 0 Z" fill="${color}" stroke="rgba(255,255,255,0.85)" stroke-width="1.5"/>${inner}</svg>`;
+  // 위험(critical) 마커: radar 펄스 ring 2개 (staggered) — pin 뒤에 배치
+  const ripple = status === "critical"
+    ? `<circle cx="16" cy="14" r="6" fill="none" stroke="#dc2626" stroke-width="2">
+         <animate attributeName="r" values="7;22" dur="1.6s" repeatCount="indefinite"/>
+         <animate attributeName="opacity" values="0.9;0" dur="1.6s" repeatCount="indefinite"/>
+       </circle>
+       <circle cx="16" cy="14" r="6" fill="none" stroke="#dc2626" stroke-width="2">
+         <animate attributeName="r" values="7;22" dur="1.6s" begin="0.8s" repeatCount="indefinite"/>
+         <animate attributeName="opacity" values="0.9;0" dur="1.6s" begin="0.8s" repeatCount="indefinite"/>
+       </circle>`
+    : "";
+  const svg = `<svg width="32" height="40" viewBox="0 0 32 40" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;filter:drop-shadow(0 3px 4px rgba(0,0,0,0.35))">${ripple}<path d="M16 0 C 8 0 2 6 2 14 C 2 24 16 40 16 40 C 16 40 30 24 30 14 C 30 6 24 0 16 0 Z" fill="${color}" stroke="rgba(255,255,255,0.85)" stroke-width="1.5"/>${inner}</svg>`;
   return L.divIcon({ html: svg, className: "", iconSize: [32, 40], iconAnchor: [16, 40], popupAnchor: [0, -44] });
 }
 
