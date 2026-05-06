@@ -509,7 +509,16 @@ function MiniTable({ data, onRowClick }) {
   );
 }
 
-function TableSummary({ data, onRowClick }) {
+// KPI 활성 상태별 헤더 라벨/색상
+const TABLE_HEADER_BY_KPI = {
+  all:      { ko: "전체",      bar: "var(--brand)", chipBg: "var(--brand-wash)",         chipFg: "var(--brand)" },
+  normal:   { ko: "정상",      bar: "#10b981",       chipBg: "rgba(16,185,129,0.12)",     chipFg: "#047857"      },
+  critical: { ko: "위험",      bar: "#dc2626",       chipBg: "rgba(220,38,38,0.12)",      chipFg: "#991b1b"      },
+  warn:     { ko: "이상 의심", bar: "var(--warn)",   chipBg: "rgba(245,158,11,0.14)",     chipFg: "#b45309"      },
+  offline:  { ko: "통신 장애", bar: "#64748b",       chipBg: "rgba(100,116,139,0.14)",    chipFg: "#475569"      },
+};
+
+function TableSummary({ data, onRowClick, activeKpi }) {
   const [query, setQuery] = useState("");
   const filtered = data.filter(
     (r) =>
@@ -518,6 +527,7 @@ function TableSummary({ data, onRowClick }) {
       r.deviceId.toLowerCase().includes(query.toLowerCase()) ||
       r.location.includes(query)
   );
+  const meta = TABLE_HEADER_BY_KPI[activeKpi] || TABLE_HEADER_BY_KPI.all;
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <PanelHeader
@@ -542,11 +552,17 @@ function TableSummary({ data, onRowClick }) {
         }
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ width: 4, height: 18, background: "var(--brand)", borderRadius: 2 }} />
-          <div style={{ fontSize: 14, fontWeight: 700 }}>전체 장비 현황 요약</div>
+          <span style={{
+            width: 4, height: 18, background: meta.bar, borderRadius: 2,
+            transition: "background 200ms ease",
+          }} />
+          <div style={{ fontSize: 14, fontWeight: 700 }}>
+            {meta.ko} 장비 현황 요약
+          </div>
           <span style={{
             fontSize: 10, fontWeight: 700, padding: "2px 8px",
-            background: "var(--brand-wash)", color: "var(--brand)", borderRadius: 999,
+            background: meta.chipBg, color: meta.chipFg, borderRadius: 999,
+            transition: "background 200ms ease, color 200ms ease",
           }}>
             {filtered.length}개
           </span>
@@ -1506,7 +1522,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
           gridTemplateColumns: "minmax(520px, 1fr) minmax(360px, 0.65fr)",
           gap: 16, minHeight: 0,
         }}>
-          <TableSummary data={tableData} onRowClick={handleRowClick} />
+          <TableSummary data={tableData} onRowClick={handleRowClick} activeKpi={activeKpi} />
           <LogPanel lines={lines} />
         </div>
 
