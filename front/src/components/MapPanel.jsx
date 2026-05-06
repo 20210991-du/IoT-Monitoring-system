@@ -135,7 +135,7 @@ function popupHtml(m) {
   </div>`;
 }
 
-export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger }) {
+export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger, boundsRequest }) {
   const containerRef    = useRef(null);
   const mapRef          = useRef(null);
   const tileRef         = useRef(null);
@@ -230,6 +230,23 @@ export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger }) {
       map.flyToBounds(bounds, { padding: [50, 50], duration: 0.8, maxZoom: 13 });
     }
   }, [fitTrigger, markers]);
+
+  // 외부 bounds 요청 (예: 챗봇 응답이 여러 노드 언급 시) → 해당 좌표들 fitBounds
+  useEffect(() => {
+    if (!boundsRequest || !boundsRequest.coords || boundsRequest.coords.length === 0) return;
+    const map = mapRef.current;
+    if (!map) return;
+    map.closePopup();
+    if (boundsRequest.coords.length === 1) {
+      const [lat, lng] = boundsRequest.coords[0];
+      map.flyTo([lat, lng], 14, { duration: 0.8 });
+      return;
+    }
+    const bounds = L.latLngBounds(boundsRequest.coords);
+    if (bounds.isValid()) {
+      map.flyToBounds(bounds, { padding: [60, 60], duration: 0.8, maxZoom: 13 });
+    }
+  }, [boundsRequest]);
 
   return (
     <div
