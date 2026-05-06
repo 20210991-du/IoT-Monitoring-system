@@ -93,6 +93,107 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
+// ── /api/chat/stream (SSE) ───────────────────────────
+// Ollama stream: true 응답을 토큰 단위로 SSE event 로 전달.
+// 클라이언트는 EventSource 또는 fetch + ReadableStream 으로 수신.
+app.post("/api/chat/stream", async (req, res) => {
+  const { message, context = {}, history = [] } = req.body || {};
+  if (!message || typeof message !== "string") {
+    return res.status(400).json({ ok: false, error: "message 필드가 비어있습니다." });
+  }
+
+  // SSE 헤더
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders && res.flushHeaders();
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const systemPrompt = buildSystemPrompt(context);
+  const recent = history.slice(-6).map((h) => ({
+    role: h.role === "ai" ? "assistant" : "user",
+    content: h.text,
+  }));
+
+  const ollamaPayload = {
+    model: OLLAMA_MODEL,
+    messages: [
+      { role: "system", content: systemPrompt },
+      ...recent,
+      { role: "user", content: message },
+    ],
+    stream: true,
+    think: false,
+    options: { temperature: 0.3, num_predict: 800 },
+  };
+
+  try {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 90_000);
+    const ollamaRes = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(ollamaPayload),
+      signal: ctrl.signal,
+    });
+    if (!ollamaRes.ok) {
+      const txt = await ollamaRes.text().catch(() => "");
+      send("error", { message: `Ollama HTTP ${ollamaRes.status}: ${txt}` });
+      clearTimeout(timeout);
+      return res.end();
+    }
+
+    // ndjson 스트림 파싱
+    const reader = ollamaRes.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let acc = "";
+    let tokens = { prompt: 0, completion: 0 };
+
+    // 클라이언트 disconnect 처리
+    req.on("close", () => {
+      try { ctrl.abort(); } catch {}
+    });
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let obj;
+        try { obj = JSON.parse(line); } catch { continue; }
+        const piece = obj.message && obj.message.content;
+        if (piece) {
+          acc += piece;
+          send("delta", { text: piece });
+        }
+        if (obj.done) {
+          tokens = {
+            prompt: obj.prompt_eval_count,
+            completion: obj.eval_count,
+          };
+          send("done", { reply: acc.trim(), model: OLLAMA_MODEL, tokens });
+        }
+      }
+    }
+    clearTimeout(timeout);
+    res.end();
+  } catch (err) {
+    console.error("[chat/stream] error:", err.message);
+    send("error", { message: err.message });
+    res.end();
+  }
+});
+
 // ── 정적 파일 ────────────────────────────────────────
 app.use(express.static(path.join(__dirname, "dist"), {
   // index.html 만 캐시 X (assets 는 hash 기반이라 캐시 OK)

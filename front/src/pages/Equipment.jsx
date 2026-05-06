@@ -65,7 +65,11 @@ export function Equipment({ onOpen, equipment = [] }) {
 
   const zones = useMemo(() => {
     const s = new Set(equipment.map((e) => e.zone));
-    return ["all", ...Array.from(s)];
+    // 제1구역 → 제2구역 → ... 자연 순서 정렬
+    const sorted = Array.from(s).sort((a, b) =>
+      a.localeCompare(b, "ko", { numeric: true })
+    );
+    return ["all", ...sorted];
   }, [equipment]);
 
   const filtered = useMemo(() => {

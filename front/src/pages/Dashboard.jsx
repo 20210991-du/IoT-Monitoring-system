@@ -150,7 +150,7 @@ function AnomalyCard({ item, onClick, kind }) {
         </div>
         <div style={{ textAlign: "right", flexShrink: 0 }}>
           <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", letterSpacing: "0.05em" }}>MSE</div>
-          <div className="mono num" style={{ fontSize: 14, fontWeight: 700, color, lineHeight: 1 }}>{item.mse.toFixed(3)}</div>
+          <div className="mono" style={{ fontSize: 14, fontWeight: 700, color, lineHeight: 1 }}>{item.mse.toFixed(3)}</div>
         </div>
       </div>
       {item.contribution && item.contribution.length > 0 && (
@@ -237,89 +237,6 @@ function highlightBody(text) {
   );
 }
 
-function AIAdvicePanel({ insights, onClickInsight }) {
-  return (
-    <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
-      <PanelHeader
-        right={
-          <div style={{
-            display: "flex", alignItems: "center", gap: 6,
-            padding: "2px 10px", borderRadius: 999,
-            background: "rgba(79,70,229,0.1)", color: "var(--brand)",
-            fontSize: 10, fontWeight: 700,
-          }}>
-            <span style={{
-              width: 6, height: 6, borderRadius: "50%", background: "var(--brand)",
-              animation: "pulse-dot 1.2s infinite",
-            }} />
-            분석 엔진 가동중
-          </div>
-        }
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Icons.sparkle size={16} color="var(--brand)" />
-          <div style={{ fontSize: 14, fontWeight: 700 }}>AI 조치 권고</div>
-        </div>
-      </PanelHeader>
-      <div className="scroll" style={{ padding: 12, overflowY: "auto", flex: 1 }}>
-        {insights.map((it, i) => {
-          // body 에서 첫 번째 노드 ID 추출 (TB24-5JN001 형식)
-          const m = (it.body || "").match(/TB24-5JN\d+/);
-          const node = m ? m[0] : null;
-          const clickable = !!node && !!onClickInsight;
-          return (
-            <div
-              key={i}
-              onClick={clickable ? () => onClickInsight(node) : undefined}
-              role={clickable ? "button" : undefined}
-              tabIndex={clickable ? 0 : undefined}
-              title={clickable ? `지도에서 ${node} 위치로 이동` : undefined}
-              style={{
-                display: "flex", gap: 12,
-                padding: "12px 14px", marginBottom: 6,
-                background: "var(--bg-sunk)",
-                border: "1px solid var(--line-soft)",
-                borderRadius: 10,
-                alignItems: "flex-start",
-                cursor: clickable ? "pointer" : "default",
-                transition: "border-color 140ms ease, background 140ms ease",
-              }}
-              onMouseEnter={(e) => {
-                if (clickable) e.currentTarget.style.borderColor = "var(--brand)";
-              }}
-              onMouseLeave={(e) => {
-                if (clickable) e.currentTarget.style.borderColor = "var(--line-soft)";
-              }}
-            >
-              <div style={{
-                flexShrink: 0,
-                width: 24, height: 24, borderRadius: "50%",
-                background: "var(--brand-wash)", color: "var(--brand)",
-                display: "grid", placeItems: "center",
-                fontSize: 12, fontWeight: 800,
-                fontFamily: "Space Grotesk, system-ui, sans-serif",
-                marginTop: 1,
-              }}>
-                {i + 1}
-              </div>
-              <div style={{
-                fontSize: 13, color: "var(--ink-2)", lineHeight: 1.6, flex: 1,
-                letterSpacing: "-0.01em",
-              }}>
-                {highlightBody(it.body)}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </Panel>
-  );
-}
-
-const mapBtn = {
-  width: 32, height: 32, display: "grid", placeItems: "center",
-  color: "var(--ink-2)",
-};
 
 function Metric({ label, value, color, mono }) {
   return (
@@ -833,6 +750,61 @@ async function callLLM(message, context, history) {
   }
 }
 
+// SSE 스트리밍 호출 — onDelta(piece) 토큰 단위 콜백, onDone(full) 종료 콜백
+async function callLLMStream(message, context, history, { onDelta, onDone, onError, signal }) {
+  let acc = "";
+  try {
+    const res = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, context, history }),
+      signal,
+    });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      // SSE block: event: X\ndata: Y\n\n
+      let sep;
+      while ((sep = buf.indexOf("\n\n")) !== -1) {
+        const block = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const lines = block.split("\n");
+        let event = "message";
+        let data  = "";
+        for (const ln of lines) {
+          if (ln.startsWith("event:")) event = ln.slice(6).trim();
+          else if (ln.startsWith("data:")) data += ln.slice(5).trim();
+        }
+        if (!data) continue;
+        let payload;
+        try { payload = JSON.parse(data); } catch { continue; }
+        if (event === "delta" && payload.text) {
+          acc += payload.text;
+          onDelta && onDelta(payload.text, acc);
+        } else if (event === "done") {
+          onDone && onDone(payload);
+          return { ok: true, reply: payload.reply || acc.trim() };
+        } else if (event === "error") {
+          throw new Error(payload.message || "stream error");
+        }
+      }
+    }
+    // 스트림이 자연 종료 (done 이벤트 없이) — 누적된 acc 반환
+    onDone && onDone({ reply: acc.trim() });
+    return { ok: true, reply: acc.trim() };
+  } catch (err) {
+    onError && onError(err);
+    return { ok: false, error: err.message };
+  }
+}
+
 // 챗봇 응답에서 단일 status 키워드 감지 (정확히 1개일 때만 반환)
 function detectKpiFromReply(text) {
   if (!text) return null;
@@ -846,18 +818,41 @@ function detectKpiFromReply(text) {
   return hits.length === 1 ? hits[0] : null;
 }
 
+// 채팅 히스토리 localStorage 키 + 한도
+const CHAT_STORAGE_KEY = "siwon.chat.history";
+const CHAT_MAX_KEEP = 60; // 최근 60개 메시지만 보관
+
+function loadChatHistory() {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr) || arr.length === 0) return null;
+    // 형식 검증
+    return arr.filter((m) => m && typeof m.text === "string" && (m.role === "ai" || m.role === "user"));
+  } catch { return null; }
+}
+
+function saveChatHistory(messages) {
+  try {
+    const trimmed = messages.slice(-CHAT_MAX_KEEP);
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(trimmed));
+  } catch { /* ignore quota */ }
+}
+
 function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
   const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
-  const [messages, setMessages] = useState([
-    { role: "ai", text: "안녕하세요. AI 챗봇입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime },
-  ]);
+  const greeting = { role: "ai", text: "안녕하세요. AI 챗봇입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime };
+  const [messages, setMessages] = useState(() => loadChatHistory() || [greeting]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [llmActive, setLlmActive] = useState(null); // null=미확인, true=LLM, false=mock
   const listRef = useRef(null);
 
+  // 메시지 변할 때마다 저장 + 자동 스크롤
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+    saveChatHistory(messages);
   }, [messages, sending]);
 
   const send = async (e) => {
@@ -867,37 +862,66 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
     const now = new Date();
     const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
     const newUserMsg = { role: "user", text: trimmed, time };
-    setMessages((m) => [...m, newUserMsg]);
+    const r = new Date();
+    const rtime = `${String(r.getHours()).padStart(2, "0")}:${String(r.getMinutes()).padStart(2, "0")}`;
+    // 사용자 메시지 + 빈 AI 메시지(스트리밍 채워질 자리) 동시 추가
+    setMessages((m) => [...m, newUserMsg, { role: "ai", text: "", time: rtime, streaming: true }]);
     setInput("");
     setSending(true);
 
-    // 1) LLM 시도, 실패 시 mock fallback
     const ctx = buildChatContext(equipment, weather);
-    const historyForLLM = [...messages, newUserMsg].slice(-12); // 최근 12개
-    const llmRes = await callLLM(trimmed, ctx, historyForLLM);
-    let reply;
-    if (llmRes.ok) {
-      reply = llmRes.reply;
-      setLlmActive(true);
+    const historyForLLM = [...messages, newUserMsg].slice(-12);
+
+    // LLM 스트리밍 시도
+    let finalReply = "";
+    let usedLLM = false;
+
+    const stream = await callLLMStream(trimmed, ctx, historyForLLM, {
+      onDelta: (_piece, acc) => {
+        // AI 메시지(마지막)의 text 누적 갱신
+        setMessages((m) => {
+          const arr = m.slice();
+          const last = arr[arr.length - 1];
+          if (last && last.role === "ai" && last.streaming) {
+            arr[arr.length - 1] = { ...last, text: acc };
+          }
+          return arr;
+        });
+      },
+      onDone: (payload) => {
+        finalReply = (payload && payload.reply) || "";
+      },
+    });
+
+    if (stream.ok) {
+      finalReply = stream.reply || finalReply;
+      usedLLM = true;
     } else {
-      reply = mockAIResponse(trimmed, { equipment });
-      setLlmActive(false);
+      // 스트리밍 실패 → mock fallback
+      finalReply = mockAIResponse(trimmed, { equipment });
     }
 
-    const r = new Date();
-    const rtime = `${String(r.getHours()).padStart(2, "0")}:${String(r.getMinutes()).padStart(2, "0")}`;
-    setMessages((m) => [...m, { role: "ai", text: reply, time: rtime }]);
+    // 마지막 메시지를 최종 결과로 확정 (streaming 플래그 해제)
+    setMessages((m) => {
+      const arr = m.slice();
+      const last = arr[arr.length - 1];
+      if (last && last.role === "ai") {
+        arr[arr.length - 1] = { role: "ai", text: finalReply, time: rtime };
+      }
+      return arr;
+    });
+    setLlmActive(usedLLM);
     setSending(false);
 
-    // 응답 안의 노드 ID 추출 → 지도 자동 zoom (1개=flyTo, 2개+=fitBounds)
-    const matches = reply.match(/TB24-5JN\d+/g) || [];
+    // 응답에서 노드 ID 추출 → 지도 자동 zoom
+    const matches = (finalReply || "").match(/TB24-5JN\d+/g) || [];
     const nodes = [...new Set(matches)];
     if (nodes.length > 0 && onBotReply) onBotReply(nodes);
 
-    // 응답 안의 단일 status 추출 → 자동 KPI 필터 (30초 후 전체 복귀)
+    // 응답에서 단일 status 추출 → 자동 KPI 필터 (30초)
     if (onAutoKpi) {
-      const kpi = detectKpiFromReply(reply);
-      onAutoKpi(kpi); // null 도 전달 → 기존 자동 필터 해제
+      const kpi = detectKpiFromReply(finalReply);
+      onAutoKpi(kpi);
     }
   };
 
@@ -913,14 +937,34 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
           const dot = isLlm  ? "#10b981"                : isMock ? "#f59e0b"               : "var(--brand)";
           const lbl = isLlm  ? "LLM 연결됨"             : isMock ? "mock fallback"         : "대기";
           return (
-            <div style={{
-              display: "flex", alignItems: "center", gap: 6,
-              padding: "2px 10px", borderRadius: 999,
-              background: bg, color: fg,
-              fontSize: 10, fontWeight: 700,
-            }}>
-              <span style={{ width: 6, height: 6, borderRadius: "50%", background: dot, animation: "pulse-dot 1.2s infinite" }} />
-              {lbl}
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <button
+                onClick={() => {
+                  if (sending) return;
+                  setMessages([greeting]);
+                  setLlmActive(null);
+                  try { localStorage.removeItem(CHAT_STORAGE_KEY); } catch {}
+                }}
+                title="대화 초기화"
+                style={{
+                  display: "grid", placeItems: "center",
+                  width: 22, height: 22, borderRadius: 6,
+                  background: "transparent", border: "1px solid var(--line)",
+                  color: "var(--ink-3)", cursor: sending ? "not-allowed" : "pointer",
+                  opacity: sending ? 0.4 : 1,
+                }}
+              >
+                <Icons.refresh size={11} />
+              </button>
+              <div style={{
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "2px 10px", borderRadius: 999,
+                background: bg, color: fg,
+                fontSize: 10, fontWeight: 700,
+              }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: dot, animation: "pulse-dot 1.2s infinite" }} />
+                {lbl}
+              </div>
             </div>
           );
         })()}
@@ -938,7 +982,8 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
         display: "flex", flexDirection: "column", gap: 8,
       }}>
         {messages.map((m, i) => <ChatMessage key={i} message={m} />)}
-        {sending && <ChatTyping />}
+        {/* 스트리밍 중엔 마지막 AI 메시지의 깜빡 커서가 visual feedback 역할 — 별도 typing indicator 불필요 */}
+        {sending && messages[messages.length - 1]?.role !== "ai" && <ChatTyping />}
       </div>
 
       <form onSubmit={send} style={{
@@ -987,6 +1032,36 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
   );
 }
 
+// 간단 inline 마크다운 파서: **굵게**, `코드`, [텍스트](URL) 정도만
+//  - 외부 의존성 없이 React 노드 배열 반환
+//  - LLM 이 자주 쓰는 굵게 강조 (** **) 만 잘 처리하면 충분
+function renderInlineMD(text) {
+  if (!text) return null;
+  const tokens = [];
+  // 패턴: **굵게**  |  `코드`
+  const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
+  let last = 0, m, key = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) tokens.push(text.slice(last, m.index));
+    if (m[2] != null) {
+      tokens.push(<strong key={key++} style={{ fontWeight: 800 }}>{m[2]}</strong>);
+    } else if (m[3] != null) {
+      tokens.push(
+        <code key={key++} style={{
+          fontFamily: "JetBrains Mono, ui-monospace, monospace",
+          fontSize: "0.92em",
+          padding: "1px 5px",
+          borderRadius: 4,
+          background: "rgba(0,0,0,0.06)",
+        }}>{m[3]}</code>
+      );
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) tokens.push(text.slice(last));
+  return tokens;
+}
+
 function ChatMessage({ message }) {
   const isAi = message.role === "ai";
   return (
@@ -1023,7 +1098,16 @@ function ChatMessage({ message }) {
           wordBreak: "break-word",
           boxShadow: isAi ? "none" : "0 4px 10px -4px rgba(79,70,229,0.4)",
         }}>
-          {message.text}
+          {renderInlineMD(message.text)}
+          {message.streaming && (
+            <span style={{
+              display: "inline-block",
+              width: 7, height: 13, marginLeft: 2,
+              verticalAlign: "text-bottom",
+              background: "var(--brand)",
+              animation: "blink 0.9s step-start infinite",
+            }} />
+          )}
         </div>
         <div style={{
           fontSize: 9, color: "var(--ink-4)",
@@ -1267,7 +1351,7 @@ export function AnalysisModal({ item, onClose }) {
                   <div key={c.sensor}>
                     <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                       <span style={{ fontSize: 12, fontWeight: 600, color: i === 0 ? "var(--err)" : "var(--ink-2)" }}>{c.sensor}</span>
-                      <span className="mono num" style={{ fontSize: 12, fontWeight: 700, color: i === 0 ? "var(--err)" : "var(--ink-2)" }}>{c.pct}%</span>
+                      <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: i === 0 ? "var(--err)" : "var(--ink-2)" }}>{c.pct}%</span>
                     </div>
                     <div style={{ height: 6, background: "var(--bg-elev)", borderRadius: 3, overflow: "hidden" }}>
                       <div style={{
@@ -1535,7 +1619,7 @@ function DashboardEquipmentDrawer({ item, onClose }) {
                 }}
               >
                 <div style={{ fontSize: 10, color: "var(--ink-3)" }}>{s.l}</div>
-                <div className="mono num" style={{ fontSize: 20, fontWeight: 700, marginTop: 2, color: s.a || "var(--ink)" }}>{s.v}</div>
+                <div className="mono" style={{ fontSize: 20, fontWeight: 700, marginTop: 2, color: s.a || "var(--ink)" }}>{s.v}</div>
               </div>
             ))}
           </div>
@@ -1573,7 +1657,7 @@ function DashboardEquipmentDrawer({ item, onClose }) {
   );
 }
 
-export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], insights = [], aiEvents = [] }) {
+export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], aiEvents = [] }) {
   const [activeKpi, setActiveKpi] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [focused, setFocused] = useState(null); // {lat, lng, node, ts}
