@@ -643,7 +643,7 @@ function LogPanel({ lines }) {
   );
 }
 
-// ── AI 분석 어시스턴트 (mock 챗봇) ───────────────────────────
+// ── AI 챗봇 (mock) ─────────────────────────────────────────
 //   현재 LLM 미연동 — 키워드/노드 ID 매칭 기반 응답.
 //   실제 백엔드 연결 시 mockAIResponse → fetch("/api/chat") 으로 교체 예정.
 
@@ -722,7 +722,7 @@ function mockAIResponse(input, ctx = {}) {
 function ChatPanel({ equipment = [] }) {
   const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
   const [messages, setMessages] = useState([
-    { role: "ai", text: "안녕하세요. AI 분석 어시스턴트입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime },
+    { role: "ai", text: "안녕하세요. AI 챗봇입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime },
   ]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -767,7 +767,7 @@ function ChatPanel({ equipment = [] }) {
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Icons.sparkle size={16} color="var(--brand)" />
-          <div style={{ fontSize: 13, fontWeight: 700 }}>AI 분석 어시스턴트</div>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>AI 챗봇</div>
         </div>
       </PanelHeader>
 
@@ -1526,7 +1526,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
           <LogPanel lines={lines} />
         </div>
 
-        {/* (col 2, row 3) — AI 분석 어시스턴트 (채팅) */}
+        {/* (col 2, row 3) — AI 챗봇 */}
         <div style={{ gridColumn: 2, gridRow: 3, minHeight: 0 }}>
           <ChatPanel equipment={equipment} />
         </div>

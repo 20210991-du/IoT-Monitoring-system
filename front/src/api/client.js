@@ -83,5 +83,7 @@ export function devicesToMarkers(devices) {
     };
   });
 
-  return [...clusters, ...singles];
+  // 클러스터(정상/통신장애) 마커는 지도 노이즈로 판단하여 제거.
+  // 위험·이상 의심 single 마커만 지도에 표시 — 운영자 시선 집중.
+  return singles;
 }
