@@ -134,9 +134,6 @@ export function Equipment({ onOpen, equipment = [] }) {
         <FilterPill active={filter === "critical"} onClick={() => { setFilter("critical"); setPage(1); }} color="#dc2626" count={counts.critical}>
           <Icons.alert size={12} /> 위험
         </FilterPill>
-        <FilterPill active={filter === "anomaly"} onClick={() => { setFilter("anomaly"); setPage(1); }} color="var(--err)" count={counts.anomaly}>
-          <Icons.alert size={12} /> 이상
-        </FilterPill>
         <FilterPill active={filter === "warn"} onClick={() => { setFilter("warn"); setPage(1); }} color="var(--warn)" count={counts.warn}>
           <Icons.eye size={12} /> 관찰
         </FilterPill>

@@ -70,10 +70,9 @@ const DOMINANT_BY_LABEL = {
 const ANOMALY_LABELS = ["위상차 급변", "방식전위 이탈", "AC 유입 과다", "희생전류 저하", "통신 품질 저하"];
 const WARN_LABELS = ["성능 저하 트렌드", "간헐적 통신 지연", "습도 상승", "온도 급변"];
 
-// 55 devices: 42 normal, 2 critical, 4 anomaly, 4 warn, 3 offline
+// 55 devices: 42 normal, 2 critical, 8 warn, 3 offline (5단계로 단순화)
 //   critical (위험)   — 99%+ 즉각 조치 필요 (MSE 0.85+)
-//   anomaly  (이상의심)— 추세 상승, 중간 단계 (MSE 0.5~0.85)
-//   warn     (관찰)   — 가스 외 애매 신호 (MSE 0.28~0.5)
+//   warn     (관찰)   — 추세 상승·애매 신호 등 (MSE 0.28~0.85)
 //   normal   (정상)
 //   offline  (통신장애)
 export const EQUIPMENT = (() => {
@@ -81,8 +80,7 @@ export const EQUIPMENT = (() => {
   const statuses = [
     ...Array(42).fill("normal"),
     ...Array(2).fill("critical"),
-    ...Array(4).fill("anomaly"),
-    ...Array(4).fill("warn"),
+    ...Array(8).fill("warn"),
     ...Array(3).fill("offline"),
   ];
   for (let i = statuses.length - 1; i > 0; i--) {
@@ -131,7 +129,8 @@ export const EQUIPMENT = (() => {
       hum = +(40 + rand() * 20).toFixed(1);
       commDbm = -65 - Math.floor(rand() * 10);
       commOk = true;
-      mse = +(0.28 + rand() * 0.11).toFixed(3);
+      // warn 범위 확장 (이상의심 흡수): 0.28 ~ 0.83
+      mse = +(0.28 + rand() * 0.55).toFixed(3);
     } else if (status === "offline") {
       label = "통신 두절";
       dominant = "통신품질";
