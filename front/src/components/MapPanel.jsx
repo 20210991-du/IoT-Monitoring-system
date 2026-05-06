@@ -48,18 +48,34 @@ function makeIcon(status) {
   const inner = iconPaths
     ? `<g transform="translate(9 7) scale(0.583)" stroke="white" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round">${iconPaths}</g>`
     : `<circle cx="16" cy="14" r="5" fill="rgba(255,255,255,0.92)"/>`;
-  // 위험(critical) 마커: radar 펄스 ring 2개 (staggered) — pin 뒤에 배치
+  // 위험(critical) 마커: 강조 효과 — halo + 3 ripple ring (staggered)
   const ripple = status === "critical"
-    ? `<circle cx="16" cy="14" r="6" fill="none" stroke="#dc2626" stroke-width="2">
-         <animate attributeName="r" values="7;22" dur="1.6s" repeatCount="indefinite"/>
-         <animate attributeName="opacity" values="0.9;0" dur="1.6s" repeatCount="indefinite"/>
+    ? `<!-- breathing halo (반투명 빨강 후광) -->
+       <circle cx="16" cy="14" r="14" fill="rgba(220,38,38,0.28)">
+         <animate attributeName="r"       values="13;17;13"  dur="1.4s" repeatCount="indefinite"/>
+         <animate attributeName="opacity" values="0.55;0.15;0.55" dur="1.4s" repeatCount="indefinite"/>
        </circle>
-       <circle cx="16" cy="14" r="6" fill="none" stroke="#dc2626" stroke-width="2">
-         <animate attributeName="r" values="7;22" dur="1.6s" begin="0.8s" repeatCount="indefinite"/>
-         <animate attributeName="opacity" values="0.9;0" dur="1.6s" begin="0.8s" repeatCount="indefinite"/>
+       <!-- ripple ring 1 -->
+       <circle cx="16" cy="14" r="6" fill="none" stroke="#dc2626" stroke-width="2.6">
+         <animate attributeName="r"       values="7;28"  dur="1.8s" repeatCount="indefinite"/>
+         <animate attributeName="opacity" values="1;0"   dur="1.8s" repeatCount="indefinite"/>
+       </circle>
+       <!-- ripple ring 2 (0.6s 지연) -->
+       <circle cx="16" cy="14" r="6" fill="none" stroke="#dc2626" stroke-width="2.6">
+         <animate attributeName="r"       values="7;28"  dur="1.8s" begin="0.6s" repeatCount="indefinite"/>
+         <animate attributeName="opacity" values="1;0"   dur="1.8s" begin="0.6s" repeatCount="indefinite"/>
+       </circle>
+       <!-- ripple ring 3 (1.2s 지연) -->
+       <circle cx="16" cy="14" r="6" fill="none" stroke="#dc2626" stroke-width="2.6">
+         <animate attributeName="r"       values="7;28"  dur="1.8s" begin="1.2s" repeatCount="indefinite"/>
+         <animate attributeName="opacity" values="1;0"   dur="1.8s" begin="1.2s" repeatCount="indefinite"/>
        </circle>`
     : "";
-  const svg = `<svg width="32" height="40" viewBox="0 0 32 40" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;filter:drop-shadow(0 3px 4px rgba(0,0,0,0.35))">${ripple}<path d="M16 0 C 8 0 2 6 2 14 C 2 24 16 40 16 40 C 16 40 30 24 30 14 C 30 6 24 0 16 0 Z" fill="${color}" stroke="rgba(255,255,255,0.85)" stroke-width="1.5"/>${inner}</svg>`;
+  // 위험 마커는 빨강 glow drop-shadow 추가 (이중 그림자)
+  const filterCss = status === "critical"
+    ? "overflow:visible;filter:drop-shadow(0 3px 4px rgba(0,0,0,0.35)) drop-shadow(0 0 8px rgba(220,38,38,0.85))"
+    : "overflow:visible;filter:drop-shadow(0 3px 4px rgba(0,0,0,0.35))";
+  const svg = `<svg width="32" height="40" viewBox="0 0 32 40" xmlns="http://www.w3.org/2000/svg" style="${filterCss}">${ripple}<path d="M16 0 C 8 0 2 6 2 14 C 2 24 16 40 16 40 C 16 40 30 24 30 14 C 30 6 24 0 16 0 Z" fill="${color}" stroke="rgba(255,255,255,0.85)" stroke-width="1.5"/>${inner}</svg>`;
   return L.divIcon({ html: svg, className: "", iconSize: [32, 40], iconAnchor: [16, 40], popupAnchor: [0, -44] });
 }
 
