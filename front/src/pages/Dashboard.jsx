@@ -802,7 +802,20 @@ async function callLLM(message, context, history) {
   }
 }
 
-function ChatPanel({ equipment = [], weather = null, onBotReply }) {
+// 챗봇 응답에서 단일 status 키워드 감지 (정확히 1개일 때만 반환)
+function detectKpiFromReply(text) {
+  if (!text) return null;
+  const flags = {
+    critical: /위험/.test(text),
+    warn:     /이상\s*의심|이상의심/.test(text),
+    offline:  /통신\s*장애|통신\s*두절/.test(text),
+    normal:   /정상\b|정상\s/.test(text),
+  };
+  const hits = Object.entries(flags).filter(([_, v]) => v).map(([k]) => k);
+  return hits.length === 1 ? hits[0] : null;
+}
+
+function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
   const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
   const [messages, setMessages] = useState([
     { role: "ai", text: "안녕하세요. AI 챗봇입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime },
@@ -849,6 +862,12 @@ function ChatPanel({ equipment = [], weather = null, onBotReply }) {
     const matches = reply.match(/TB24-5JN\d+/g) || [];
     const nodes = [...new Set(matches)];
     if (nodes.length > 0 && onBotReply) onBotReply(nodes);
+
+    // 응답 안의 단일 status 추출 → 자동 KPI 필터 (30초 후 전체 복귀)
+    if (onAutoKpi) {
+      const kpi = detectKpiFromReply(reply);
+      onAutoKpi(kpi); // null 도 전달 → 기존 자동 필터 해제
+    }
   };
 
   return (
@@ -1531,6 +1550,9 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
   const [boundsRequest, setBoundsRequest] = useState(null); // { coords, ts } — 챗봇이 여러 노드 언급 시
   const [showNormal, setShowNormal] = useState(true);        // 지도 위 정상 핀 토글
   const weather = useWeather();                              // 챗봇 컨텍스트용 날씨
+  const [autoKpiSec, setAutoKpiSec] = useState(0);           // AI 자동 필터 잔여 초 (0 = 비활성)
+  const autoKpiTimer = useRef(null);                         // setTimeout 핸들
+  const autoKpiTick  = useRef(null);                         // setInterval 핸들 (1초)
 
   const counts = useMemo(() => {
     const c = { all: equipment.length, normal: 0, critical: 0, anomaly: 0, warn: 0, offline: 0 };
@@ -1585,11 +1607,42 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
     if (item && item.node) focusByNode(item.node);
   };
 
-  // KPI 카드 클릭: 활성 토글 + 지도 fit (필터된 마커 모두 보이게)
+  // 사용자가 KPI 직접 클릭: 활성 토글 + 지도 fit + AI 자동 타이머 취소
   const handleKpiClick = (newActive) => {
+    cancelAutoKpi();
     setActiveKpi(newActive);
     setFitTrigger(Date.now());
   };
+
+  // AI 자동 필터 취소 (타이머 + 카운트다운 정리)
+  const cancelAutoKpi = () => {
+    if (autoKpiTimer.current) { clearTimeout(autoKpiTimer.current); autoKpiTimer.current = null; }
+    if (autoKpiTick.current)  { clearInterval(autoKpiTick.current);  autoKpiTick.current  = null; }
+    setAutoKpiSec(0);
+  };
+
+  // 챗봇 응답에서 status 추출 → 자동 KPI 활성 (30초 후 자동 해제)
+  const handleAutoKpi = (kpi) => {
+    cancelAutoKpi();
+    setActiveKpi(kpi);
+    setFitTrigger(Date.now());
+    if (!kpi) return; // 총 장비(전체) 복귀는 타이머 X
+    const TOTAL = 30;
+    setAutoKpiSec(TOTAL);
+    // 1초마다 카운트다운
+    autoKpiTick.current = setInterval(() => {
+      setAutoKpiSec((s) => Math.max(0, s - 1));
+    }, 1000);
+    // 30초 후 전체 복귀
+    autoKpiTimer.current = setTimeout(() => {
+      setActiveKpi(null);
+      setFitTrigger(Date.now());
+      cancelAutoKpi();
+    }, TOTAL * 1000);
+  };
+
+  // 언마운트 시 타이머 정리
+  useEffect(() => () => cancelAutoKpi(), []);
 
   // 챗봇 응답에서 노드 ID 들이 언급되면 지도 자동 zoom
   //  - 1개: flyTo + 팝업
@@ -1637,9 +1690,35 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
         minHeight: 0,
         overflow: "auto",
       }}>
-        {/* (col 1, row 1) — KPI */}
-        <div style={{ gridColumn: 1, gridRow: 1, minHeight: 0 }}>
+        {/* (col 1, row 1) — KPI + AI 자동 필터 카운트다운 칩 */}
+        <div style={{ gridColumn: 1, gridRow: 1, minHeight: 0, position: "relative" }}>
           <KPIRow active={activeKpi} setActive={handleKpiClick} counts={counts} />
+          {autoKpiSec > 0 && activeKpi && (
+            <button
+              onClick={cancelAutoKpi}
+              title="클릭 시 즉시 전체 보기로 복귀"
+              style={{
+                position: "absolute", right: 0, top: -28,
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "3px 10px",
+                borderRadius: 999,
+                background: "linear-gradient(135deg, #4f46e5, #8b83ff)",
+                color: "#fff", fontSize: 10, fontWeight: 700,
+                border: "none", cursor: "pointer",
+                boxShadow: "0 4px 12px -3px rgba(79,70,229,0.45)",
+                animation: "slide-in-up 200ms ease both",
+              }}
+            >
+              <Icons.sparkle size={11} color="#fff" />
+              <span>AI 자동 보기</span>
+              <span style={{
+                padding: "0 5px", borderRadius: 999,
+                background: "rgba(255,255,255,0.22)",
+                fontFamily: "ui-monospace, Menlo, monospace",
+              }}>{autoKpiSec}s</span>
+              <span style={{ opacity: 0.85 }}>· 해제</span>
+            </button>
+          )}
         </div>
 
         {/* (col 2, row 1+2) — AI 탐지 (span) */}
@@ -1675,7 +1754,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
 
         {/* (col 2, row 3) — AI 챗봇 */}
         <div style={{ gridColumn: 2, gridRow: 3, minHeight: 0 }}>
-          <ChatPanel equipment={equipment} weather={weather} onBotReply={fitToNodes} />
+          <ChatPanel equipment={equipment} weather={weather} onBotReply={fitToNodes} onAutoKpi={handleAutoKpi} />
         </div>
       </div>
       <DashboardEquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
