@@ -60,7 +60,8 @@ app.post("/api/chat", async (req, res) => {
       { role: "user", content: message },
     ],
     stream: false,
-    options: { temperature: 0.3, num_predict: 700 },
+    think: false,                                      // qwen3 thinking 모드 차단 (content 비는 이슈)
+    options: { temperature: 0.3, num_predict: 800 },
   };
 
   try {
