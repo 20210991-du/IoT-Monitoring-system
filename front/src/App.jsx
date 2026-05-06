@@ -91,7 +91,7 @@ function EquipmentDrawer({ item, onClose }) {
                 }}
               >
                 <div style={{ fontSize: 10, color: "var(--ink-3)" }}>{s.l}</div>
-                <div className="mono num" style={{ fontSize: 20, fontWeight: 700, marginTop: 2, color: s.a || "var(--ink)" }}>{s.v}</div>
+                <div className="mono" style={{ fontSize: 20, fontWeight: 700, marginTop: 2, color: s.a || "var(--ink)" }}>{s.v}</div>
               </div>
             ))}
           </div>
@@ -330,7 +330,6 @@ export function App() {
             markers={markers}
             anomalies={anomalies}
             watch={watch}
-            insights={insights}
             aiEvents={aiEvents}
           />
         )}
