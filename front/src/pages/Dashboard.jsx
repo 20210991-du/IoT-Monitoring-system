@@ -746,6 +746,42 @@ function mockAIResponse(input, ctx = {}) {
   return `"${text}" — 아직 LLM 미연동 상태라 일반 응답이 어렵습니다.\n노드 ID(예: TB24-5JN042) 또는 도메인 키워드로 질문해 주세요. '도움'을 입력하면 사용법을 안내합니다.`;
 }
 
+// 컨텍스트 추출 (equipment → LLM 시스템 프롬프트용)
+function buildChatContext(equipment) {
+  const counts = { all: equipment.length, normal: 0, critical: 0, warn: 0, offline: 0 };
+  const criticalNodes = [];
+  const warnNodes = [];
+  const offlineNodes = [];
+  equipment.forEach((e) => {
+    if (counts[e.status] !== undefined) counts[e.status]++;
+    if (e.status === "critical") criticalNodes.push(e.deviceId);
+    else if (e.status === "warn") warnNodes.push(e.deviceId);
+    else if (e.status === "offline") offlineNodes.push(e.deviceId);
+  });
+  return { counts, criticalNodes, warnNodes, offlineNodes };
+}
+
+async function callLLM(message, context, history) {
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 60_000);
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, context, history }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "unknown");
+    return { ok: true, reply: data.reply, model: data.model };
+  } catch (err) {
+    clearTimeout(timeout);
+    return { ok: false, error: err.message };
+  }
+}
+
 function ChatPanel({ equipment = [], onBotReply }) {
   const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
   const [messages, setMessages] = useState([
@@ -753,48 +789,71 @@ function ChatPanel({ equipment = [], onBotReply }) {
   ]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [llmActive, setLlmActive] = useState(null); // null=미확인, true=LLM, false=mock
   const listRef = useRef(null);
 
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, sending]);
 
-  const send = (e) => {
+  const send = async (e) => {
     e && e.preventDefault();
     const trimmed = input.trim();
     if (!trimmed || sending) return;
     const now = new Date();
     const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-    setMessages((m) => [...m, { role: "user", text: trimmed, time }]);
+    const newUserMsg = { role: "user", text: trimmed, time };
+    setMessages((m) => [...m, newUserMsg]);
     setInput("");
     setSending(true);
-    setTimeout(() => {
-      const reply = mockAIResponse(trimmed, { equipment });
-      const r = new Date();
-      const rtime = `${String(r.getHours()).padStart(2, "0")}:${String(r.getMinutes()).padStart(2, "0")}`;
-      setMessages((m) => [...m, { role: "ai", text: reply, time: rtime }]);
-      setSending(false);
-      // 응답 안의 노드 ID 추출 → 지도 자동 zoom (1개=flyTo, 2개+=fitBounds)
-      const matches = reply.match(/TB24-5JN\d+/g) || [];
-      const nodes = [...new Set(matches)];
-      if (nodes.length > 0 && onBotReply) onBotReply(nodes);
-    }, 500 + Math.random() * 500);
+
+    // 1) LLM 시도, 실패 시 mock fallback
+    const ctx = buildChatContext(equipment);
+    const historyForLLM = [...messages, newUserMsg].slice(-12); // 최근 12개
+    const llmRes = await callLLM(trimmed, ctx, historyForLLM);
+    let reply;
+    if (llmRes.ok) {
+      reply = llmRes.reply;
+      setLlmActive(true);
+    } else {
+      reply = mockAIResponse(trimmed, { equipment });
+      setLlmActive(false);
+    }
+
+    const r = new Date();
+    const rtime = `${String(r.getHours()).padStart(2, "0")}:${String(r.getMinutes()).padStart(2, "0")}`;
+    setMessages((m) => [...m, { role: "ai", text: reply, time: rtime }]);
+    setSending(false);
+
+    // 응답 안의 노드 ID 추출 → 지도 자동 zoom (1개=flyTo, 2개+=fitBounds)
+    const matches = reply.match(/TB24-5JN\d+/g) || [];
+    const nodes = [...new Set(matches)];
+    if (nodes.length > 0 && onBotReply) onBotReply(nodes);
   };
 
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       <PanelHeader
-        right={
-          <div style={{
-            display: "flex", alignItems: "center", gap: 6,
-            padding: "2px 10px", borderRadius: 999,
-            background: "rgba(79,70,229,0.10)", color: "var(--brand)",
-            fontSize: 10, fontWeight: 700,
-          }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--brand)", animation: "pulse-dot 1.2s infinite" }} />
-            mock 모드
-          </div>
-        }
+        right={(() => {
+          // 모드: null = 아직 호출 X, true = LLM 연결됨, false = mock fallback
+          const isLlm  = llmActive === true;
+          const isMock = llmActive === false;
+          const bg  = isLlm  ? "rgba(16,185,129,0.10)" : isMock ? "rgba(245,158,11,0.10)" : "rgba(79,70,229,0.10)";
+          const fg  = isLlm  ? "#047857"               : isMock ? "#b45309"               : "var(--brand)";
+          const dot = isLlm  ? "#10b981"                : isMock ? "#f59e0b"               : "var(--brand)";
+          const lbl = isLlm  ? "LLM 연결됨"             : isMock ? "mock fallback"         : "대기";
+          return (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "2px 10px", borderRadius: 999,
+              background: bg, color: fg,
+              fontSize: 10, fontWeight: 700,
+            }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: dot, animation: "pulse-dot 1.2s infinite" }} />
+              {lbl}
+            </div>
+          );
+        })()}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Icons.sparkle size={16} color="var(--brand)" />
