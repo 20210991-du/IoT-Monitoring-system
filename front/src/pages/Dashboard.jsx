@@ -752,13 +752,28 @@ function buildChatContext(equipment) {
   const criticalNodes = [];
   const warnNodes = [];
   const offlineNodes = [];
+  const trends = []; // 위험·이상 의심 노드의 12시간 MSE 추이
   equipment.forEach((e) => {
     if (counts[e.status] !== undefined) counts[e.status]++;
     if (e.status === "critical") criticalNodes.push(e.deviceId);
     else if (e.status === "warn") warnNodes.push(e.deviceId);
     else if (e.status === "offline") offlineNodes.push(e.deviceId);
+    // 위험·이상 의심 노드만 trend 포함 (토큰 절약)
+    if ((e.status === "critical" || e.status === "warn") && Array.isArray(e.mseHistory)) {
+      trends.push({
+        deviceId: e.deviceId,
+        zone: e.zone,
+        label: e.label,
+        status: e.status,
+        mse: e.mse,
+        mseHistory: e.mseHistory,
+      });
+    }
   });
-  return { counts, criticalNodes, warnNodes, offlineNodes };
+  // 시각 정보
+  const now = new Date();
+  const nowText = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  return { counts, criticalNodes, warnNodes, offlineNodes, trends, nowText };
 }
 
 async function callLLM(message, context, history) {
