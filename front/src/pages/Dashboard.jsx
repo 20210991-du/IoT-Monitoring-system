@@ -15,9 +15,10 @@ const statusChip = (status) => {
 };
 
 function Kpi({ label, value, accent, icon, delta, active, onClick, danger }) {
-  // 위험(danger=true) 카드는 0건이 아닐 때만 강조 (다른 카드와 톤 일관, accent bar 만 펄스).
+  // 위험(danger=true) 카드는 0건이 아닐 때 추가 강조 (bar 펄스 + 빨강 그림자).
+  // 모든 카드는 자신의 status accent 색을 숫자에 적용 → 시각적 일관성.
   const alarming = danger && value > 0;
-  const valueFg  = alarming ? "#dc2626" : "var(--ink)";
+  const valueFg  = value > 0 ? accent : "var(--ink-3)";
   const iconCol  = accent;
   return (
     <button
