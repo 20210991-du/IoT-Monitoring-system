@@ -152,6 +152,27 @@ export const EQUIPMENT = (() => {
     const mm = (60 - (minAgo % 60)) % 60;
     const updatedAt = `14:${String(mm).padStart(2, "0")}`;
 
+    // 12시간 MSE 추이 (오래된 → 현재) — status 별 추세 패턴
+    const mseHistory = (() => {
+      const hours = 12;
+      const arr = [];
+      if (status === "offline") return new Array(hours).fill(null);
+      if (mse == null) return new Array(hours).fill(0);
+      let val;
+      if (status === "critical")      val = mse * 0.45;  // 시작 낮게 → 급상승
+      else if (status === "warn")     val = mse * 0.65;  // 완만 상승
+      else                            val = mse * 0.9;   // 정상은 평탄
+      for (let h = 0; h < hours; h++) {
+        const target = mse;
+        const pull = status === "critical" ? 0.18 : status === "warn" ? 0.10 : 0.04;
+        val += (target - val) * pull + (rand() - 0.5) * (status === "normal" ? 0.02 : 0.04);
+        arr.push(+Math.max(0, val).toFixed(3));
+      }
+      // 마지막은 현재값으로 정확히 매칭
+      arr[arr.length - 1] = mse;
+      return arr;
+    })();
+
     out.push({
       id: i,
       facilityId: `TB-${facilityIdx}-${seq.slice(0, 4)}`,
@@ -167,6 +188,7 @@ export const EQUIPMENT = (() => {
       commDbm,
       commOk,
       mse,
+      mseHistory,           // 신규: 12시간 (1h 간격) MSE 추이
       contribution: (status === "normal" || status === "offline") ? [] : makeContribution(status === "critical" ? "anomaly" : status, dominant),
       threshold: 0.409,
       updatedAt,
