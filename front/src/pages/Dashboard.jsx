@@ -377,7 +377,7 @@ function MarkerPopup({ m, onClose }) {
   );
 }
 
-function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrigger, boundsRequest, showNormal, setShowNormal }) {
+function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrigger, boundsRequest, showNormal, setShowNormal, autoKpiSec = 0, onCancelAutoKpi }) {
   return (
     <Panel style={{ position: "relative", height: "100%", isolation: "isolate" }}>
       <MapPanel markers={markers} onMarker={onMarker} mapStyle={mapStyle} focus={focus} fitTrigger={fitTrigger} boundsRequest={boundsRequest} />
@@ -438,6 +438,37 @@ function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrig
         }} />
         정상 {showNormal ? "표시" : "숨김"}
       </button>
+
+      {/* AI 자동 보기 카운트다운 칩 (지도 상단 중앙) */}
+      {autoKpiSec > 0 && (
+        <button
+          onClick={onCancelAutoKpi}
+          title="클릭 시 즉시 전체 보기로 복귀"
+          style={{
+            position: "absolute", left: "50%", top: 16,
+            transform: "translateX(-50%)",
+            zIndex: 1000,
+            display: "flex", alignItems: "center", gap: 5,
+            padding: "4px 10px",
+            borderRadius: 999,
+            background: "linear-gradient(135deg, #4f46e5, #8b83ff)",
+            color: "#fff", fontSize: 10, fontWeight: 700,
+            border: "none", cursor: "pointer",
+            boxShadow: "0 4px 12px -3px rgba(79,70,229,0.45)",
+            animation: "slide-in-up 200ms ease both",
+            backdropFilter: "blur(10px)",
+          }}
+        >
+          <Icons.sparkle size={10} color="#fff" />
+          <span>AI 자동 보기</span>
+          <span style={{
+            padding: "0 5px", borderRadius: 999,
+            background: "rgba(255,255,255,0.22)",
+            fontFamily: "ui-monospace, Menlo, monospace",
+          }}>{autoKpiSec}s</span>
+          <span style={{ opacity: 0.85 }}>· 해제</span>
+        </button>
+      )}
 
       {/* 지도 스타일 스위처는 Header 설정 아이콘 드롭다운으로 이동 (2026-05-04) */}
     </Panel>
@@ -1690,35 +1721,9 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
         minHeight: 0,
         overflow: "auto",
       }}>
-        {/* (col 1, row 1) — KPI + AI 자동 필터 카운트다운 칩 */}
-        <div style={{ gridColumn: 1, gridRow: 1, minHeight: 0, position: "relative" }}>
+        {/* (col 1, row 1) — KPI */}
+        <div style={{ gridColumn: 1, gridRow: 1, minHeight: 0 }}>
           <KPIRow active={activeKpi} setActive={handleKpiClick} counts={counts} />
-          {autoKpiSec > 0 && activeKpi && (
-            <button
-              onClick={cancelAutoKpi}
-              title="클릭 시 즉시 전체 보기로 복귀"
-              style={{
-                position: "absolute", right: 0, top: -28,
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "3px 10px",
-                borderRadius: 999,
-                background: "linear-gradient(135deg, #4f46e5, #8b83ff)",
-                color: "#fff", fontSize: 10, fontWeight: 700,
-                border: "none", cursor: "pointer",
-                boxShadow: "0 4px 12px -3px rgba(79,70,229,0.45)",
-                animation: "slide-in-up 200ms ease both",
-              }}
-            >
-              <Icons.sparkle size={11} color="#fff" />
-              <span>AI 자동 보기</span>
-              <span style={{
-                padding: "0 5px", borderRadius: 999,
-                background: "rgba(255,255,255,0.22)",
-                fontFamily: "ui-monospace, Menlo, monospace",
-              }}>{autoKpiSec}s</span>
-              <span style={{ opacity: 0.85 }}>· 해제</span>
-            </button>
-          )}
         </div>
 
         {/* (col 2, row 1+2) — AI 탐지 (span) */}
@@ -1738,6 +1743,8 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
             boundsRequest={boundsRequest}
             showNormal={showNormal}
             setShowNormal={setShowNormal}
+            autoKpiSec={autoKpiSec}
+            onCancelAutoKpi={cancelAutoKpi}
           />
         </div>
 
