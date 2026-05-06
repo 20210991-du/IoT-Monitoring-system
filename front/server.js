@@ -122,9 +122,15 @@ function buildSystemPrompt(ctx) {
   const offlineNodes  = ctx.offlineNodes || [];
   const trends        = ctx.trends || [];
   const nowText       = ctx.nowText || "현재";
+  const weather       = ctx.weather; // null 가능
 
   const summaryLine =
     `전체 ${counts.all ?? 0}대 / 정상 ${counts.normal ?? 0} · 위험 ${counts.critical ?? 0} · 이상 의심 ${counts.warn ?? 0} · 통신 장애 ${counts.offline ?? 0}`;
+
+  // 날씨 라인 (있을 때만)
+  const weatherLine = weather
+    ? `${weather.ko} · ${weather.temp}°C (서울, ${weather.time})`
+    : "(데이터 없음)";
 
   // 12시간 추이 텍스트 표 (위험·이상 의심만)
   const trendBlock = trends.length === 0 ? "- (위험·이상 의심 노드 없음)" :
@@ -155,6 +161,14 @@ function buildSystemPrompt(ctx) {
 
 # 현재 시각
 ${nowText}
+
+# 현재 날씨 (서울)
+${weatherLine}
+
+날씨가 매설배관에 미치는 영향 (참고):
+- 강한 비/소나기/뇌우 → 침수·습도 상승 → 맨홀 침수, 통신 두절 가능
+- 한파/혹한 → 토양 동결 → 방식전위 변동
+- 폭염/일교차 → 온도 센서 이상
 
 # 현재 시스템 상태 (실시간)
 - ${summaryLine}

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { Icons } from "../components/Icons.jsx";
 import { MapPanel } from "../components/MapPanel.jsx";
 import { devicesToMarkers } from "../api/client.js";
+import { useWeather } from "../lib/weather.js";
 
 const statusChip = (status) => {
   const map = {
@@ -746,8 +747,8 @@ function mockAIResponse(input, ctx = {}) {
   return `"${text}" — 아직 LLM 미연동 상태라 일반 응답이 어렵습니다.\n노드 ID(예: TB24-5JN042) 또는 도메인 키워드로 질문해 주세요. '도움'을 입력하면 사용법을 안내합니다.`;
 }
 
-// 컨텍스트 추출 (equipment → LLM 시스템 프롬프트용)
-function buildChatContext(equipment) {
+// 컨텍스트 추출 (equipment + weather → LLM 시스템 프롬프트용)
+function buildChatContext(equipment, weather) {
   const counts = { all: equipment.length, normal: 0, critical: 0, warn: 0, offline: 0 };
   const criticalNodes = [];
   const warnNodes = [];
@@ -773,7 +774,11 @@ function buildChatContext(equipment) {
   // 시각 정보
   const now = new Date();
   const nowText = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  return { counts, criticalNodes, warnNodes, offlineNodes, trends, nowText };
+  // 날씨 (있을 때만)
+  const weatherCtx = weather && !weather.stale
+    ? { temp: weather.temp, ko: weather.ko, code: weather.code, time: weather.time }
+    : null;
+  return { counts, criticalNodes, warnNodes, offlineNodes, trends, nowText, weather: weatherCtx };
 }
 
 async function callLLM(message, context, history) {
@@ -797,7 +802,7 @@ async function callLLM(message, context, history) {
   }
 }
 
-function ChatPanel({ equipment = [], onBotReply }) {
+function ChatPanel({ equipment = [], weather = null, onBotReply }) {
   const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
   const [messages, setMessages] = useState([
     { role: "ai", text: "안녕하세요. AI 챗봇입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime },
@@ -823,7 +828,7 @@ function ChatPanel({ equipment = [], onBotReply }) {
     setSending(true);
 
     // 1) LLM 시도, 실패 시 mock fallback
-    const ctx = buildChatContext(equipment);
+    const ctx = buildChatContext(equipment, weather);
     const historyForLLM = [...messages, newUserMsg].slice(-12); // 최근 12개
     const llmRes = await callLLM(trimmed, ctx, historyForLLM);
     let reply;
@@ -1525,6 +1530,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
   const [fitTrigger, setFitTrigger] = useState(0); // 카운터: 변할 때마다 지도 fit
   const [boundsRequest, setBoundsRequest] = useState(null); // { coords, ts } — 챗봇이 여러 노드 언급 시
   const [showNormal, setShowNormal] = useState(true);        // 지도 위 정상 핀 토글
+  const weather = useWeather();                              // 챗봇 컨텍스트용 날씨
 
   const counts = useMemo(() => {
     const c = { all: equipment.length, normal: 0, critical: 0, anomaly: 0, warn: 0, offline: 0 };
@@ -1669,7 +1675,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
 
         {/* (col 2, row 3) — AI 챗봇 */}
         <div style={{ gridColumn: 2, gridRow: 3, minHeight: 0 }}>
-          <ChatPanel equipment={equipment} onBotReply={fitToNodes} />
+          <ChatPanel equipment={equipment} weather={weather} onBotReply={fitToNodes} />
         </div>
       </div>
       <DashboardEquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
