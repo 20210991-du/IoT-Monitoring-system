@@ -15,38 +15,38 @@ const statusChip = (status) => {
 };
 
 function Kpi({ label, value, accent, icon, delta, active, onClick, danger }) {
-  // 위험(danger=true) 카드는 0건이 아닐 때만 강조 (배경/펄스).
+  // 위험(danger=true) 카드는 0건이 아닐 때만 강조 (다른 카드와 톤 일관, accent bar 만 펄스).
   const alarming = danger && value > 0;
-  const cardBg   = alarming ? "linear-gradient(135deg, #dc2626, #991b1b)" : "var(--bg-elev)";
-  const labelFg  = alarming ? "rgba(255,255,255,0.95)" : "var(--ink-3)";
-  const valueFg  = alarming ? "#fff" : "var(--ink)";
-  const subFg    = alarming ? "rgba(255,255,255,0.85)" : "var(--ink-3)";
-  const iconCol  = alarming ? "rgba(255,255,255,0.95)" : accent;
-  const stroke   = alarming ? "rgba(255,255,255,0.55)" : accent;
+  const valueFg  = alarming ? "#dc2626" : "var(--ink)";
+  const iconCol  = accent;
   return (
     <button
       onClick={onClick}
       style={{
         position: "relative", flex: 1, minWidth: 0, height: 112, textAlign: "left",
-        background: cardBg, borderRadius: 16,
-        border: `1px solid ${alarming ? "#7f1d1d" : (active ? accent : "var(--line)")}`,
+        background: "var(--bg-elev)", borderRadius: 16,
+        border: `1px solid ${active ? accent : "var(--line)"}`,
         padding: "18px 20px",
         boxShadow: alarming
-          ? `0 0 0 3px rgba(220,38,38,0.25), 0 12px 28px -10px rgba(220,38,38,0.55), var(--shadow-card)`
+          ? `0 0 0 1px rgba(220,38,38,0.18), 0 6px 16px -6px rgba(220,38,38,0.25), var(--shadow-card)`
           : (active ? `0 0 0 3px ${accent}22, var(--shadow-card)` : "var(--shadow-card)"),
         cursor: "pointer", transition: "all 180ms",
         overflow: "hidden",
-        animation: alarming ? "danger-pulse 1.6s ease-in-out infinite" : "none",
       }}
     >
-      <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 4, background: alarming ? "rgba(255,255,255,0.9)" : accent }} />
+      <div style={{
+        position: "absolute", left: 0, top: 0, bottom: 0,
+        width: alarming ? 5 : 4,
+        background: accent,
+        animation: alarming ? "danger-bar-pulse 1.4s ease-in-out infinite" : "none",
+      }} />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: labelFg, letterSpacing: "0.02em" }}>{label}</div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", letterSpacing: "0.02em" }}>{label}</div>
         <div style={{ color: iconCol, opacity: 0.95 }}>{icon}</div>
       </div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
         <div className="num" style={{ fontSize: 44, fontWeight: 700, lineHeight: 1, color: valueFg }}>{value}</div>
-        <div style={{ fontSize: 13, color: subFg, fontWeight: 500 }}>대</div>
+        <div style={{ fontSize: 13, color: "var(--ink-3)", fontWeight: 500 }}>대</div>
         {delta && (
           <div className="mono" style={{
             marginLeft: "auto", fontSize: 11, fontWeight: 700,
@@ -54,10 +54,10 @@ function Kpi({ label, value, accent, icon, delta, active, onClick, danger }) {
           }}>{delta}</div>
         )}
       </div>
-      <svg viewBox="0 0 200 30" style={{ position: "absolute", right: 14, bottom: 10, width: 130, height: 26, opacity: alarming ? 0.4 : 0.5 }}>
+      <svg viewBox="0 0 200 30" style={{ position: "absolute", right: 14, bottom: 10, width: 130, height: 26, opacity: 0.5 }}>
         <polyline
           fill="none"
-          stroke={stroke}
+          stroke={accent}
           strokeWidth="1.5"
           points="0,20 20,18 40,22 60,12 80,16 100,8 120,14 140,6 160,10 180,4 200,12"
         />
