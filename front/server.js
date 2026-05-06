@@ -21,7 +21,7 @@ const __dirname  = path.dirname(__filename);
 
 const PORT         = process.env.PORT          || 5050;
 const OLLAMA_URL   = process.env.OLLAMA_URL    || "http://localhost:11434";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "gemma4:e4b";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "qwen3.5:9b";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
