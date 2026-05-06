@@ -1613,55 +1613,67 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
           row 3 (1fr, min 280)     — 좌: 표+로그            / 우: AI 조치 권고
         AI 탐지가 row 1+2 를 span 하여 우측 분기점이 좌측의 지도/표 분기점과 정확히 일치.
       */}
+      {/*
+        외곽 flex column:
+          1) KPI (자연 높이, 항상 상단 고정)
+          2) 본체 grid (2col × 2row, 부족하면 내부 스크롤)
+        KPI 가 grid 셀이 아니라 flex item 이라 압축되지 않음.
+      */}
       <div style={{
         position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
         padding: 24,
-        display: "grid",
-        gridTemplateColumns: "1fr 460px",
-        gridTemplateRows: "auto minmax(300px, 1.2fr) minmax(240px, 1fr)",
-        gap: 16,
+        display: "flex", flexDirection: "column", gap: 16,
         minHeight: 0,
         overflow: "auto",
       }}>
-        {/* (col 1, row 1) — KPI */}
-        <div style={{ gridColumn: 1, gridRow: 1, minHeight: 0 }}>
+        {/* KPI — 항상 상단, 압축 X */}
+        <div style={{ flex: "0 0 auto" }}>
           <KPIRow active={activeKpi} setActive={handleKpiClick} counts={counts} />
         </div>
 
-        {/* (col 2, row 1+2) — AI 탐지 (span) */}
-        <div style={{ gridColumn: 2, gridRow: "1 / span 2", minHeight: 0 }}>
-          <AIPanels anomalies={anomalies} watch={watch} onAnalyze={handleAnalyze} />
-        </div>
-
-        {/* (col 1, row 2) — 지도 */}
-        <div style={{ gridColumn: 1, gridRow: 2, minHeight: 0 }}>
-          <MapPanelWrap
-            markers={filteredMarkers}
-            onMarker={() => {}}
-            mapStyle={mapStyle}
-            setMapStyle={setMapStyle}
-            focus={focused}
-            fitTrigger={fitTrigger}
-            boundsRequest={boundsRequest}
-            showNormal={showNormal}
-            setShowNormal={setShowNormal}
-          />
-        </div>
-
-        {/* (col 1, row 3) — 표 + 로그 */}
+        {/* 본체 2×2 grid */}
         <div style={{
-          gridColumn: 1, gridRow: 3,
+          flex: "1 1 auto",
           display: "grid",
-          gridTemplateColumns: "minmax(440px, 1fr) minmax(280px, 0.6fr)",
+          gridTemplateColumns: "1fr 460px",
+          gridTemplateRows: "minmax(300px, 1.2fr) minmax(240px, 1fr)",
           gap: 16, minHeight: 0,
         }}>
-          <TableSummary data={tableData} onRowClick={handleRowClick} activeKpi={activeKpi} />
-          <LogPanel lines={lines} />
-        </div>
+          {/* (col 1, row 1) — 지도 */}
+          <div style={{ gridColumn: 1, gridRow: 1, minHeight: 0 }}>
+            <MapPanelWrap
+              markers={filteredMarkers}
+              onMarker={() => {}}
+              mapStyle={mapStyle}
+              setMapStyle={setMapStyle}
+              focus={focused}
+              fitTrigger={fitTrigger}
+              boundsRequest={boundsRequest}
+              showNormal={showNormal}
+              setShowNormal={setShowNormal}
+            />
+          </div>
 
-        {/* (col 2, row 3) — AI 챗봇 */}
-        <div style={{ gridColumn: 2, gridRow: 3, minHeight: 0 }}>
-          <ChatPanel equipment={equipment} onBotReply={fitToNodes} />
+          {/* (col 2, row 1) — AI 탐지 */}
+          <div style={{ gridColumn: 2, gridRow: 1, minHeight: 0 }}>
+            <AIPanels anomalies={anomalies} watch={watch} onAnalyze={handleAnalyze} />
+          </div>
+
+          {/* (col 1, row 2) — 표 + 로그 */}
+          <div style={{
+            gridColumn: 1, gridRow: 2,
+            display: "grid",
+            gridTemplateColumns: "minmax(440px, 1fr) minmax(280px, 0.6fr)",
+            gap: 16, minHeight: 0,
+          }}>
+            <TableSummary data={tableData} onRowClick={handleRowClick} activeKpi={activeKpi} />
+            <LogPanel lines={lines} />
+          </div>
+
+          {/* (col 2, row 2) — AI 챗봇 */}
+          <div style={{ gridColumn: 2, gridRow: 2, minHeight: 0 }}>
+            <ChatPanel equipment={equipment} onBotReply={fitToNodes} />
+          </div>
         </div>
       </div>
       <DashboardEquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
