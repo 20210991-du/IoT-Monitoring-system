@@ -71,7 +71,6 @@ function KPIRow({ active, setActive, counts }) {
     { k: "all",      label: "총 장비",   value: counts.all,      accent: "var(--brand)", icon: <Icons.box size={18} /> },
     { k: "normal",   label: "정상",      value: counts.normal,   accent: "var(--ok)",    icon: <Icons.check size={18} /> },
     { k: "critical", label: "위험",      value: counts.critical, accent: "#dc2626",      icon: <Icons.alert size={18} />, danger: true },
-    { k: "anomaly",  label: "이상 의심", value: counts.anomaly,  accent: "var(--err)",   icon: <Icons.alert size={18} /> },
     { k: "warn",     label: "관찰 필요", value: counts.warn,     accent: "var(--warn)",  icon: <Icons.eye size={18} /> },
     { k: "offline",  label: "통신 장애", value: counts.offline,  accent: "var(--ink-3)", icon: <Icons.wifi_off size={18} /> },
   ];
@@ -628,7 +627,7 @@ function LogPanel({ lines }) {
 //   현재 LLM 미연동 — 키워드/노드 ID 매칭 기반 응답.
 //   실제 백엔드 연결 시 mockAIResponse → fetch("/api/chat") 으로 교체 예정.
 
-const STATUS_KO_BY_KEY = { normal: "정상", critical: "위험", anomaly: "이상 의심", warn: "관찰 필요", offline: "통신 장애" };
+const STATUS_KO_BY_KEY = { normal: "정상", critical: "위험", warn: "관찰 필요", offline: "통신 장애" };
 
 function mockAIResponse(input, ctx = {}) {
   const equipment = ctx.equipment || [];
@@ -659,9 +658,8 @@ function mockAIResponse(input, ctx = {}) {
     return `🚨 위험 ${c.length}건:\n${c.map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
   }
   if (/이상|의심|anomaly/.test(lower)) {
-    const a = equipment.filter((e) => e.status === "anomaly");
-    if (a.length === 0) return "현재 이상 의심 장비가 없습니다.";
-    return `⚠️ 이상 의심 ${a.length}건:\n${a.slice(0, 6).map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
+    // 5단계 분류로 단순화 — 이상 의심 단계 제거됨
+    return "위험도는 5단계로 단순화되었습니다 (정상/위험/관찰/통신장애).\n'위험' 또는 '관찰' 로 질문해 주세요.";
   }
   if (/관찰|watch|warn/.test(lower)) {
     const w = equipment.filter((e) => e.status === "warn");
@@ -674,9 +672,9 @@ function mockAIResponse(input, ctx = {}) {
     return `📵 통신 장애 ${o.length}건:\n${o.map((e) => `• ${e.deviceId} · ${e.zone}`).join("\n")}`;
   }
   if (/요약|상태|summary|현황/.test(lower)) {
-    const c = { critical: 0, anomaly: 0, warn: 0, normal: 0, offline: 0 };
+    const c = { critical: 0, warn: 0, normal: 0, offline: 0 };
     equipment.forEach((e) => { if (c[e.status] !== undefined) c[e.status]++; });
-    return `📊 전체 ${equipment.length}대\n• 위험 ${c.critical}대 · 이상 의심 ${c.anomaly}대\n• 관찰 ${c.warn}대 · 통신장애 ${c.offline}대\n• 정상 ${c.normal}대`;
+    return `📊 전체 ${equipment.length}대\n• 위험 ${c.critical}대 · 관찰 ${c.warn}대\n• 통신장애 ${c.offline}대 · 정상 ${c.normal}대`;
   }
 
   // 3) 도메인 용어 설명
@@ -693,12 +691,12 @@ function mockAIResponse(input, ctx = {}) {
     return "통신 품질은 노드 신호 세기(dBm). -65 이상 양호, -75 이하 주의, -85 이하 통신 두절 임박. 게이트웨이 위치·안테나 점검.";
   }
   if (/임계|threshold|mse/.test(lower)) {
-    return "MSE 임계값(현재 0.409) 초과 시 이상으로 분류. 0.85 이상은 위험, 0.42~0.85 이상 의심, 0.28~0.42 관찰. 임계는 모델 학습 시 결정.";
+    return "MSE 임계값(현재 0.409) 초과 시 이상으로 분류. 0.85 이상은 위험, 0.28~0.85 관찰. 임계는 모델 학습 시 결정.";
   }
 
   // 4) 도움말
   if (/도움|help|\?$|메뉴/.test(lower)) {
-    return "사용 예시:\n• 'TB24-5JN042' 특정 장비 조회\n• '위험' / '이상' / '관찰' / '장애' 현재 목록\n• '요약' 전체 상태\n• '방식전위' / '희생전류' / 'AC유입' 도메인 설명";
+    return "사용 예시:\n• 'TB24-5JN042' 특정 장비 조회\n• '위험' / '관찰' / '장애' 현재 목록\n• '요약' 전체 상태\n• '방식전위' / '희생전류' / 'AC유입' 도메인 설명";
   }
 
   // 5) fallback
@@ -1509,12 +1507,12 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
           gap: 16, minHeight: 0,
         }}>
           <TableSummary data={tableData} onRowClick={handleRowClick} />
-          <LogPanel lines={lines} />
+          <ChatPanel equipment={equipment} />
         </div>
 
-        {/* (col 2, row 3) — AI 분석 어시스턴트 (채팅) */}
+        {/* (col 2, row 3) — 실시간 시스템 로그 */}
         <div style={{ gridColumn: 2, gridRow: 3, minHeight: 0 }}>
-          <ChatPanel equipment={equipment} />
+          <LogPanel lines={lines} />
         </div>
       </div>
       <DashboardEquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
