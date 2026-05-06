@@ -1617,7 +1617,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
         position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
         padding: 24,
         display: "grid",
-        gridTemplateColumns: "1fr 520px",
+        gridTemplateColumns: "1fr 460px",
         gridTemplateRows: "auto minmax(300px, 1.2fr) minmax(240px, 1fr)",
         gap: 16,
         minHeight: 0,
@@ -1652,7 +1652,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
         <div style={{
           gridColumn: 1, gridRow: 3,
           display: "grid",
-          gridTemplateColumns: "minmax(520px, 1fr) minmax(360px, 0.65fr)",
+          gridTemplateColumns: "minmax(440px, 1fr) minmax(280px, 0.6fr)",
           gap: 16, minHeight: 0,
         }}>
           <TableSummary data={tableData} onRowClick={handleRowClick} activeKpi={activeKpi} />
