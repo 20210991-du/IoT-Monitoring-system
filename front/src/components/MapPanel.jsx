@@ -102,7 +102,7 @@ function popupHtml(m) {
     <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
       <div><div style="font-size:9px;color:#888;margin-bottom:1px">MSE</div><div style="font-weight:700;font-size:12px">${m.mse != null ? m.mse.toFixed(3) : "-"}</div></div>
       <div><div style="font-size:9px;color:#888;margin-bottom:1px">구역</div><div style="font-weight:700;font-size:12px">${m.zone || "-"}</div></div>
-      <div><div style="font-size:9px;color:#888;margin-bottom:1px">상태</div><div style="font-weight:700;font-size:12px">${m.status === "anomaly" ? "이상" : "관찰"}</div></div>
+      <div><div style="font-size:9px;color:#888;margin-bottom:1px">상태</div><div style="font-weight:700;font-size:12px">${m.status === "critical" ? "위험" : "이상 의심"}</div></div>
     </div>
     ${contrib ? `<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">${contrib}</div>` : ""}
   </div>`;

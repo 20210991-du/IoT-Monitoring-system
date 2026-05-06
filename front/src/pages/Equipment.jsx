@@ -6,7 +6,7 @@ const statusChip = (status) => {
     normal:   { ko: "정상",     fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
     critical: { ko: "위험",     fg: "#fff",     bg: "#dc2626",                bd: "#991b1b" },
     anomaly:  { ko: "이상",     fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    warn:     { ko: "관찰",     fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
+    warn:     { ko: "이상",     fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
     offline:  { ko: "통신장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
   };
   return map[status] || map.normal;
@@ -135,7 +135,7 @@ export function Equipment({ onOpen, equipment = [] }) {
           <Icons.alert size={12} /> 위험
         </FilterPill>
         <FilterPill active={filter === "warn"} onClick={() => { setFilter("warn"); setPage(1); }} color="var(--warn)" count={counts.warn}>
-          <Icons.eye size={12} /> 관찰
+          <Icons.eye size={12} /> 이상 의심
         </FilterPill>
         <FilterPill active={filter === "offline"} onClick={() => { setFilter("offline"); setPage(1); }} color="var(--ink-3)" count={counts.offline}>
           <Icons.wifi_off size={12} /> 통신장애
