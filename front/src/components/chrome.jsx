@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from "react";
 import { Icons } from "./Icons.jsx";
 import { getBeep, setBeep, playBeep } from "../lib/userPrefs.js";
 import { ProfileModal } from "./UserModals.jsx";
+import { useWeather } from "../lib/weather.js";
 
 // 역할별 라벨/그라디언트 (Header 아바타 · 드롭다운 톤)
 const ROLE_META = {
@@ -499,6 +500,7 @@ const API_STATUS_STYLE = {
 };
 
 export function SubNav({ tab, setTab, apiStatus = "mock", user, pendingCount = 0 }) {
+  const weather = useWeather();
   const baseTabs = [
     { k: "dashboard", ko: "대시보드" },
     { k: "equipment", ko: "전체 장비 현황" },
@@ -557,13 +559,17 @@ export function SubNav({ tab, setTab, apiStatus = "mock", user, pendingCount = 0
         }} />
         {st.text}
       </span>
-      <span style={{
-        display: "flex", alignItems: "center", gap: 6,
-        fontSize: 13, fontWeight: 600, color: "var(--ink-2)",
-      }}>
-        <span style={{ fontSize: 16 }}>⛅</span>
-        <span>흐림</span>
-        <span className="mono" style={{ color: "var(--ink-3)" }}>12°C</span>
+      <span
+        style={{
+          display: "flex", alignItems: "center", gap: 6,
+          fontSize: 13, fontWeight: 600, color: "var(--ink-2)",
+          opacity: weather?.stale ? 0.55 : 1,
+        }}
+        title={weather?.time ? `Open-Meteo · 서울 · ${weather.time}` : "날씨 로드 중"}
+      >
+        <span style={{ fontSize: 16 }}>{weather?.icon || "⛅"}</span>
+        <span>{weather?.ko || "흐림"}</span>
+        <span className="mono" style={{ color: "var(--ink-3)" }}>{weather ? `${weather.temp}°C` : "—"}</span>
       </span>
     </div>
   );
