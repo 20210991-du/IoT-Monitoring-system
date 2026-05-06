@@ -43,7 +43,9 @@ function makeIcon(status) {
   const color =
     status === "critical" ? "#991b1b" :
     status === "anomaly"  ? "#ef4444" :
-    status === "warn"     ? "#f59e0b" : "#4f46e5";
+    status === "warn"     ? "#f59e0b" :
+    status === "normal"   ? "#10b981" :
+    status === "offline"  ? "#64748b" : "#4f46e5";
   const iconPaths = PIN_INNER_ICON[status] || "";
   const inner = iconPaths
     ? `<g transform="translate(9 7) scale(0.583)" stroke="white" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round">${iconPaths}</g>`
@@ -115,21 +117,29 @@ function makeClusterIcon(count, status = "mixed") {
   });
 }
 
+const STATUS_DISPLAY = {
+  critical: { ko: "위험",      color: "#991b1b", bg: "rgba(220,38,38,0.12)",  bd: "rgba(220,38,38,0.3)"  },
+  warn:     { ko: "이상 의심", color: "#b45309", bg: "rgba(245,158,11,0.12)", bd: "rgba(245,158,11,0.3)" },
+  normal:   { ko: "정상",      color: "#047857", bg: "rgba(16,185,129,0.12)", bd: "rgba(16,185,129,0.3)" },
+  offline:  { ko: "통신 장애", color: "#475569", bg: "rgba(100,116,139,0.12)", bd: "rgba(100,116,139,0.3)" },
+};
+
 function popupHtml(m) {
-  const color = m.status === "anomaly" ? "#ef4444" : "#f59e0b";
+  const sd = STATUS_DISPLAY[m.status] || STATUS_DISPLAY.warn;
+  const color = sd.color;
   const contrib = (m.contribution || []).slice(0, 2).map((c, i) => {
-    const bg  = i === 0 ? (m.status === "anomaly" ? "rgba(239,68,68,0.12)" : "rgba(245,158,11,0.12)") : "#f1f5f9";
+    const bg  = i === 0 ? sd.bg : "#f1f5f9";
     const col = i === 0 ? color : "#64748b";
-    const bd  = i === 0 ? (m.status === "anomaly" ? "rgba(239,68,68,0.3)" : "rgba(245,158,11,0.3)") : "#e2e8f0";
+    const bd  = i === 0 ? sd.bd : "#e2e8f0";
     return `<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:${bg};color:${col};border:1px solid ${bd}">${c.sensor} ${c.pct}%</span>`;
   }).join("");
   return `<div style="min-width:190px;font-family:system-ui,sans-serif">
     <div style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;color:${color}">${m.node}</div>
-    <div style="font-size:12px;font-weight:600;margin-top:4px;color:#555">${m.label || ""}</div>
+    <div style="font-size:12px;font-weight:600;margin-top:4px;color:#555">${m.label || (m.status === "normal" ? "정상 작동" : "")}</div>
     <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
       <div><div style="font-size:9px;color:#888;margin-bottom:1px">MSE</div><div style="font-weight:700;font-size:12px">${m.mse != null ? m.mse.toFixed(3) : "-"}</div></div>
       <div><div style="font-size:9px;color:#888;margin-bottom:1px">구역</div><div style="font-weight:700;font-size:12px">${m.zone || "-"}</div></div>
-      <div><div style="font-size:9px;color:#888;margin-bottom:1px">상태</div><div style="font-weight:700;font-size:12px">${m.status === "critical" ? "위험" : "이상 의심"}</div></div>
+      <div><div style="font-size:9px;color:#888;margin-bottom:1px">상태</div><div style="font-weight:700;font-size:12px;color:${color}">${sd.ko}</div></div>
     </div>
     ${contrib ? `<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">${contrib}</div>` : ""}
   </div>`;
