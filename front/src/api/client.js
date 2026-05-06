@@ -35,9 +35,10 @@ export function devicesToMarkers(devices) {
   const toX = (lng) => clamp((lng - LNG_MIN) / (LNG_MAX - LNG_MIN), 0.05, 0.95);
   const toY = (lat) => clamp(1 - (lat - LAT_MIN) / (LAT_MAX - LAT_MIN), 0.05, 0.95);
 
-  // 위험/이상/관찰 장비 → 개별 single 마커
-  const singles = devices
-    .filter((d) => (d.status === "critical" || d.status === "anomaly" || d.status === "warn") && d.lat != null && d.lng != null)
+  // 모든 장비를 개별 single 마커로 표시 (클러스터링 X)
+  // 색·아이콘은 status 별 (정상/위험/이상의심/통신장애)
+  return devices
+    .filter((d) => d.lat != null && d.lng != null)
     .map((d) => ({
       id:           `s-${d.deviceId}`,
       kind:         "single",
@@ -52,38 +53,4 @@ export function devicesToMarkers(devices) {
       zone:         d.zone,
       contribution: d.contribution || [],
     }));
-
-  // 정상/오프라인 장비 → 구역별 cluster 마커 (구성에 따라 색상 다름)
-  const byZone = {};
-  devices
-    .filter((d) => (d.status === "normal" || d.status === "offline") && d.lat != null && d.lng != null)
-    .forEach((d) => {
-      if (!byZone[d.zone]) byZone[d.zone] = { lats: [], lngs: [], normal: 0, offline: 0 };
-      byZone[d.zone].lats.push(d.lat);
-      byZone[d.zone].lngs.push(d.lng);
-      byZone[d.zone][d.status]++;
-    });
-
-  const clusters = Object.entries(byZone).map(([zone, data]) => {
-    const clat = avg(data.lats);
-    const clng = avg(data.lngs);
-    // 클러스터 status: 전부 정상=normal, 전부 장애=offline, 둘 다 섞임=mixed
-    let cstatus = "mixed";
-    if (data.offline === 0) cstatus = "normal";
-    else if (data.normal === 0) cstatus = "offline";
-    return {
-      id:     `c-${zone}`,
-      kind:   "cluster",
-      count:  data.lats.length,
-      lat:    clat,
-      lng:    clng,
-      x:      toX(clng),
-      y:      toY(clat),
-      status: cstatus,
-    };
-  });
-
-  // 클러스터(정상/통신장애) 마커는 지도 노이즈로 판단하여 제거.
-  // 위험·이상 의심 single 마커만 지도에 표시 — 운영자 시선 집중.
-  return singles;
 }
