@@ -1453,9 +1453,8 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
     console.warn(`[focusByNode] 노드 위치를 찾을 수 없습니다: ${node}`);
   };
 
-  // 표 row 클릭: 드로어 열기 + 지도 포커스
+  // 표 row 클릭: 지도 포커스만 (드로어 열지 않음 — 대시보드 표는 요약용)
   const handleRowClick = (eq) => {
-    setDrawer(eq);
     if (eq && eq.lat != null && eq.lng != null) {
       setFocused({ lat: eq.lat, lng: eq.lng, node: eq.deviceId, ts: Date.now() });
     }
