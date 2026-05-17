@@ -2,19 +2,21 @@
  * 통합 서버 (Express)
  *  - 정적 파일 (dist/) 서빙
  *  - POST /api/chat → Ollama 프록시 (시스템 프롬프트 + 컨텍스트 주입)
+ *  - GET  /api/devices, /api/alarms, /api/summary 등 → siwon MySQL 쿼리
  *
  * 실행: node server.js
- *   PORT (default 5050)
- *   OLLAMA_URL (default http://localhost:11434)
- *   OLLAMA_MODEL (default gemma4:e4b)
+ *   PORT          (default 5050)
+ *   OLLAMA_URL    (default http://localhost:11434)
+ *   OLLAMA_MODEL  (default qwen3.5:9b)
+ *   SIWON_DB_*    (siwon-db.env 에서 source — 없으면 DB API 비활성)
  *
  * 같은 origin 으로 정적 파일과 API 동시 서비스 → CORS 불필요.
- * 프론트는 fetch("/api/chat") 으로 호출.
  */
 
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
+import mysql from "mysql2/promise";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -23,15 +25,52 @@ const PORT         = process.env.PORT          || 5050;
 const OLLAMA_URL   = process.env.OLLAMA_URL    || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "qwen3.5:9b";
 
+const SIWON_DB_HOST = process.env.SIWON_DB_HOST || "127.0.0.1";
+const SIWON_DB_PORT = parseInt(process.env.SIWON_DB_PORT || "3306", 10);
+const SIWON_DB_USER = process.env.SIWON_DB_USER || "siwon_app";
+const SIWON_DB_PASS = process.env.SIWON_DB_PASS || "";
+const SIWON_DB_NAME = process.env.SIWON_DB_NAME || "siwon";
+const SITE_ID       = parseInt(process.env.SITE_ID || "2", 10);  // 군산도시가스
+
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+
+// ── MySQL pool ────────────────────────────────────────
+let pool = null;
+if (SIWON_DB_PASS) {
+  pool = mysql.createPool({
+    host: SIWON_DB_HOST, port: SIWON_DB_PORT,
+    user: SIWON_DB_USER, password: SIWON_DB_PASS,
+    database: SIWON_DB_NAME,
+    waitForConnections: true, connectionLimit: 8, queueLimit: 0,
+    charset: "utf8mb4_unicode_ci",
+    dateStrings: false,
+  });
+  console.log(`▶ MySQL  ${SIWON_DB_USER}@${SIWON_DB_HOST}:${SIWON_DB_PORT}/${SIWON_DB_NAME}`);
+} else {
+  console.log("▶ MySQL  비활성 (SIWON_DB_PASS 환경변수 없음)");
+}
+
+function dbRequired(_req, res, next) {
+  if (!pool) return res.status(503).json({ ok: false, error: "DB pool 비활성 (서버 환경변수 SIWON_DB_PASS 누락)" });
+  next();
+}
 
 // ── /api/health ──────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
   try {
     const r = await fetch(`${OLLAMA_URL}/api/version`);
     const v = r.ok ? await r.json() : null;
-    res.json({ ok: true, ollama: v, model: OLLAMA_MODEL });
+    let db = null;
+    if (pool) {
+      try {
+        const [rows] = await pool.query("SELECT COUNT(*) AS rows_ FROM kscg_sensor_data");
+        db = { ok: true, sensor_data_rows: rows[0].rows_ };
+      } catch (e) {
+        db = { ok: false, error: e.message };
+      }
+    }
+    res.json({ ok: true, ollama: v, model: OLLAMA_MODEL, db });
   } catch (err) {
     res.json({ ok: false, error: err.message, model: OLLAMA_MODEL });
   }
@@ -191,6 +230,282 @@ app.post("/api/chat/stream", async (req, res) => {
     console.error("[chat/stream] error:", err.message);
     send("error", { message: err.message });
     res.end();
+  }
+});
+
+// ─────────────────────────────────────────────────────
+// MySQL 기반 데이터 API
+//   - 우리 siwon DB (Mac Studio MySQL) 에서 조회.
+//   - 옴니 KSCG 미러 + 자체 테이블 둘 다 활용.
+//   - 대시보드용 도메인 매핑 (8 센서 → 6 표시 + 배터리/RSSI) 적용.
+// ─────────────────────────────────────────────────────
+
+// 단말당 SENSOR_ID 순서 → 측정 종류 매핑 (각 단말 8 센서, 고정 시퀀스)
+// TB_SENSOR_INFO.TYPE 이 모두 1 로 잘못 입력돼 있어 SENSOR_ID 순서로 추정.
+//   seq 1=방식전위(mV)  2=희생전류(mA)  3=AC유입(mV)  4=배터리(mV)
+//   seq 5=온도(℃)       6=습도(%)      7=충격/가스   8=RSSI
+const SENSOR_SEQ_KIND = ["volt", "sacrificial", "ac", "battery", "temp", "hum", "shock", "commDbm"];
+
+// 시설번호 "1-178" 형식의 첫 자리 → 구역 라벨
+function zoneFromFacility(num) {
+  if (!num) return "-";
+  const m = String(num).match(/^(\d+)/);
+  return m ? `제${m[1]}구역` : "-";
+}
+
+// 단말 status (DEVICE_STATUS + 최신 알람 + 통신 두절 24h+) 판정
+//   1=정상 / 0=중지 → 우리 frontend 의 normal/critical/warn/offline 매핑은
+//   별도 로직 (활성 alarm + 통신 단절 + LSTM 예측 등) 으로 보강.
+//   여기서는 1=normal, 0=offline 기본 매핑만.
+function mapStatus(deviceStatus, hoursSilent, activeAlarmCount) {
+  if (hoursSilent != null && hoursSilent >= 24) return "offline";
+  if (activeAlarmCount > 0) return "critical";  // 활성 알람 있으면 위험
+  if (deviceStatus === 0) return "offline";
+  return "normal";
+}
+
+// ── GET /api/summary — KPI 카운트 ─────────────────────
+app.get("/api/summary", dbRequired, async (_req, res) => {
+  try {
+    const [[counts]] = await pool.query(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN t.DEVICE_STATUS = 1 THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN t.DEVICE_STATUS = 0 THEN 1 ELSE 0 END) AS inactive
+      FROM kscg_transmitter_info t
+      JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
+    `, [SITE_ID]);
+
+    // 최근 1시간 안 들어온 단말 = 통신 두절 추정
+    const [[silent]] = await pool.query(`
+      SELECT COUNT(*) AS offline
+      FROM (
+        SELECT t.TRANSMITTER_ID,
+               TIMESTAMPDIFF(HOUR, MAX(r.DATE), NOW()) AS hours_silent
+        FROM kscg_transmitter_info t
+        JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
+        JOIN kscg_sensor_info si  ON si.TRANSMITTER_ID = t.TRANSMITTER_ID
+        JOIN kscg_recent_data r   ON r.SENSOR_ID = si.SENSOR_ID
+        GROUP BY t.TRANSMITTER_ID
+        HAVING hours_silent >= 24
+      ) x
+    `, [SITE_ID]);
+
+    // 활성 알람 (status=0 등 운영 중) → critical 추정
+    const [[alarmsRecent]] = await pool.query(`
+      SELECT COUNT(DISTINCT si.TRANSMITTER_ID) AS critical
+      FROM kscg_alarm_log a
+      JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
+      JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = si.TRANSMITTER_ID AND m.SITE_ID = ?
+      WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 7 DAY)
+    `, [SITE_ID]);
+
+    const total    = Number(counts.total) || 0;
+    const offline  = Number(silent.offline) || 0;
+    const critical = Number(alarmsRecent.critical) || 0;
+    const warn     = 0;  // TODO: LSTM 예측 → ai_predictions 연계 시 채우기
+    const normal   = total - offline - critical - warn;
+
+    res.json({
+      ok: true,
+      site_id: SITE_ID,
+      counts: { all: total, normal, critical, warn, offline },
+    });
+  } catch (err) {
+    console.error("[/api/summary]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── GET /api/devices — 단말 55대 + 시설 + 최신 8 센서 ──
+app.get("/api/devices", dbRequired, async (_req, res) => {
+  try {
+    // 1. 단말 + 시설 메타
+    const [devices] = await pool.query(`
+      SELECT
+        t.TRANSMITTER_ID AS id,
+        t.NAME           AS deviceId,
+        t.SERIAL_NUM     AS serial,
+        t.DEVICE_STATUS  AS deviceStatus,
+        t.INSTALL_DATE   AS installDate,
+        t.PERIOD_SEC     AS periodSec,
+        f.FACILITY_ID    AS facilityId,
+        f.NUMBER         AS facilityNum,
+        f.POSITION       AS location,
+        f.LATITUDE       AS lat,
+        f.LONGITUDE      AS lng
+      FROM kscg_transmitter_info t
+      JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
+      LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
+      ORDER BY t.TRANSMITTER_ID
+    `, [SITE_ID]);
+
+    // 2. 단말별 8 센서 최신값 (ROW_NUMBER 로 단말당 seq 부여)
+    const [sensorRows] = await pool.query(`
+      SELECT
+        si.TRANSMITTER_ID,
+        si.SENSOR_ID,
+        si.UNIT,
+        r.DATE  AS measuredAt,
+        r.VALUE AS value,
+        ROW_NUMBER() OVER (PARTITION BY si.TRANSMITTER_ID ORDER BY si.SENSOR_ID) AS seq
+      FROM kscg_sensor_info si
+      JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = si.TRANSMITTER_ID AND m.SITE_ID = ?
+      LEFT JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID
+      ORDER BY si.TRANSMITTER_ID, si.SENSOR_ID
+    `, [SITE_ID]);
+
+    // 단말별 sensors 매핑 + 최신 측정시각·통신 두절 시간
+    const byDev = {};
+    for (const s of sensorRows) {
+      const tid  = s.TRANSMITTER_ID;
+      const kind = SENSOR_SEQ_KIND[s.seq - 1] || `sensor${s.seq}`;
+      if (!byDev[tid]) byDev[tid] = { sensors: {}, lastMeasured: null };
+      byDev[tid].sensors[kind] = s.value;
+      if (s.measuredAt && (!byDev[tid].lastMeasured || s.measuredAt > byDev[tid].lastMeasured)) {
+        byDev[tid].lastMeasured = s.measuredAt;
+      }
+    }
+
+    // 3. 단말별 최근 7일 활성 알람 개수
+    const [alarmRows] = await pool.query(`
+      SELECT si.TRANSMITTER_ID, COUNT(*) AS cnt, MAX(a.GEN_DATE) AS latest
+      FROM kscg_alarm_log a
+      JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
+      JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = si.TRANSMITTER_ID AND m.SITE_ID = ?
+      WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 7 DAY)
+      GROUP BY si.TRANSMITTER_ID
+    `, [SITE_ID]);
+    const alarmsByDev = Object.fromEntries(alarmRows.map(r => [r.TRANSMITTER_ID, r]));
+
+    const now = new Date();
+    const out = devices.map((d) => {
+      const slot   = byDev[d.id] || { sensors: {}, lastMeasured: null };
+      const alm    = alarmsByDev[d.id];
+      const hoursSilent = slot.lastMeasured
+        ? Math.floor((now - new Date(slot.lastMeasured)) / 3600000)
+        : null;
+      const status = mapStatus(d.deviceStatus, hoursSilent, alm ? Number(alm.cnt) : 0);
+      return {
+        id:          d.id,
+        deviceId:    d.deviceId,
+        facilityId:  d.facilityNum,
+        zone:        zoneFromFacility(d.facilityNum),
+        location:    d.location,
+        lat:         d.lat,
+        lng:         d.lng,
+        installDate: d.installDate,
+        periodSec:   d.periodSec,
+        deviceStatus: d.deviceStatus,
+        status,
+        // 6+2 센서 최신값 (프론트 mock shape 와 매칭)
+        volt:        slot.sensors.volt        ?? null,
+        sacrificial: slot.sensors.sacrificial ?? null,
+        ac:          slot.sensors.ac          ?? null,
+        battery:     slot.sensors.battery     ?? null,
+        temp:        slot.sensors.temp        ?? null,
+        hum:         slot.sensors.hum         ?? null,
+        shock:       slot.sensors.shock       ?? null,
+        commDbm:     slot.sensors.commDbm     ?? null,
+        commOk:      slot.sensors.commDbm != null && slot.sensors.commDbm > -115,
+        updatedAt:   slot.lastMeasured,
+        hoursSilent,
+        recentAlarms: alm ? Number(alm.cnt) : 0,
+      };
+    });
+
+    res.json({ ok: true, site_id: SITE_ID, count: out.length, devices: out });
+  } catch (err) {
+    console.error("[/api/devices]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── GET /api/devices/:id/history — 단말 시계열 추이 ───
+//   query: range=1h|24h|7d  (default 24h)  kind=volt|ac|temp|hum|... (default volt)
+app.get("/api/devices/:id/history", dbRequired, async (req, res) => {
+  try {
+    const id      = parseInt(req.params.id, 10);
+    const range   = req.query.range || "24h";
+    const kind    = req.query.kind  || "volt";
+    const seq     = SENSOR_SEQ_KIND.indexOf(kind) + 1;
+    if (seq < 1) return res.status(400).json({ ok: false, error: `unknown kind: ${kind}` });
+
+    const hours   = range === "1h" ? 1 : range === "7d" ? 168 : 24;
+
+    // 단말의 해당 seq SENSOR_ID 찾기 (단말당 SENSOR_ID 정렬 후 seq 번째)
+    const [sensorRows] = await pool.query(`
+      SELECT SENSOR_ID, UNIT,
+             ROW_NUMBER() OVER (PARTITION BY TRANSMITTER_ID ORDER BY SENSOR_ID) AS seq
+      FROM kscg_sensor_info WHERE TRANSMITTER_ID = ?
+    `, [id]);
+    const sensor = sensorRows.find((s) => Number(s.seq) === seq);
+    if (!sensor) return res.status(404).json({ ok: false, error: "센서 없음" });
+
+    const [rows] = await pool.query(`
+      SELECT WRITE_DATE AS t, VALUE AS v
+      FROM kscg_sensor_data
+      WHERE SENSOR_ID = ?
+        AND WRITE_DATE > DATE_SUB(NOW(), INTERVAL ? HOUR)
+      ORDER BY WRITE_DATE
+    `, [sensor.SENSOR_ID, hours]);
+
+    res.json({
+      ok: true,
+      device_id: id, kind, unit: sensor.UNIT, range,
+      count: rows.length,
+      points: rows,
+    });
+  } catch (err) {
+    console.error("[/api/devices/:id/history]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── GET /api/alarms — 최근 알람 ───────────────────────
+//   query: limit=20 (default), days=7 (default)
+app.get("/api/alarms", dbRequired, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || "20", 10), 100);
+    const days  = parseInt(req.query.days  || "7", 10);
+    const [rows] = await pool.query(`
+      SELECT
+        a.ALARM_ID    AS id,
+        a.GEN_DATE    AS occurredAt,
+        a.SENDED_DATE AS sentAt,
+        a.GRADE_ID    AS gradeId,
+        g.GRADE_TEXT  AS gradeText,
+        a.SENSOR_ID   AS sensorId,
+        t.NAME        AS deviceId,
+        f.NUMBER      AS facilityNum,
+        a.VALUE       AS value,
+        a.CONTENTS    AS contents,
+        a.STATUS      AS status,
+        a.TYPE        AS notifyType
+      FROM kscg_alarm_log a
+      LEFT JOIN kscg_alarm_grade_info g ON g.GRADE_ID = a.GRADE_ID
+      LEFT JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
+      LEFT JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = si.TRANSMITTER_ID
+      LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
+      LEFT JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = si.TRANSMITTER_ID
+      WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL ? DAY)
+      ORDER BY a.GEN_DATE DESC
+      LIMIT ?
+    `, [days, limit]);
+    res.json({ ok: true, count: rows.length, alarms: rows });
+  } catch (err) {
+    console.error("[/api/alarms]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── GET /api/sync-status — sync 상태 (관제용) ─────────
+app.get("/api/sync-status", dbRequired, async (_req, res) => {
+  try {
+    const [rows] = await pool.query(`SELECT * FROM sync_state ORDER BY table_name`);
+    res.json({ ok: true, rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
