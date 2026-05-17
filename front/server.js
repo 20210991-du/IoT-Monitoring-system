@@ -89,7 +89,19 @@ const CACHEABLE_TOOLS = new Set([
   "list_devices", "get_device_detail", "get_summary",
   "get_aggregate", "get_zone_summary", "compare_devices",
   "find_devices_by_value", "get_predictions",
+  "search_devices_by_location", "geocode_location", "find_devices_near",
 ]);
+
+// Haversine 거리 (km). 두 좌표 사이 대권 거리.
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2
+          + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 function toolCacheGet(key) {
   const hit = TOOL_CACHE.get(key);
   if (!hit) return null;
@@ -329,6 +341,52 @@ const TOOLS = [
           deviceId: { type: "string", description: "단말 ID. 없으면 전체 최근 예측" },
           limit:    { type: "integer", default: 10 }
         }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_devices_by_location",
+      description: "지명/장소/랜드마크 키워드로 단말 검색. POSITION + 시설번호 LIKE 매칭 (한국어 OK). 예: '미룡동', '시청', '버스터미널', '해망동 DM기술'. 공백으로 여러 키워드 AND.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "검색 키워드 (공백 구분 다중 가능)" },
+          limit: { type: "integer", default: 20 }
+        },
+        required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "geocode_location",
+      description: "지명·랜드마크·주소 → 좌표(lat/lng) 변환. OpenStreetMap Nominatim 사용. 일반 지명(은파호수공원, 군산시청, 군산교도소)에 적합. 군산 우선 검색. 결과 받아서 find_devices_near 로 인근 단말 조회 가능.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "지명/랜드마크. 예: '은파호수공원', '군산시청'" }
+        },
+        required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "find_devices_near",
+      description: "특정 좌표 반경 N km 내 단말 검색 (Haversine 거리). 결과는 가까운 순. 군산 범위: lat 35.8~36.0, lng 126.4~126.9. 좌표 모르면 geocode_location 먼저.",
+      parameters: {
+        type: "object",
+        properties: {
+          lat:      { type: "number", description: "위도" },
+          lng:      { type: "number", description: "경도" },
+          radiusKm: { type: "number", default: 2.0, description: "반경 (km). 기본 2km, 좁으면 0.5, 넓으면 5" },
+          limit:    { type: "integer", default: 20 }
+        },
+        required: ["lat", "lng"]
       }
     }
   }
@@ -784,6 +842,113 @@ async function execToolInternal(name, args) {
           };
         }
         return { count: rows.length, predictions: rows };
+      }
+
+      // 위치/지명 키워드 검색 (POSITION + facility number LIKE)
+      case "search_devices_by_location": {
+        const query = String(args.query || "").trim();
+        if (!query) return { error: "query 필수" };
+        const limit = Math.min(Number(args.limit) || 20, 60);
+        // 공백으로 분리한 토큰 각각 AND 매칭 (POSITION OR facility number)
+        const tokens = query.split(/\s+/).filter(Boolean).slice(0, 5);
+        const conds = tokens.map(() => "(f.POSITION LIKE ? OR f.NUMBER LIKE ?)").join(" AND ");
+        const params = [SITE_ID];
+        for (const t of tokens) { params.push(`%${t}%`, `%${t}%`); }
+        const sql = `
+          SELECT t.NAME AS deviceId, f.NUMBER AS facility, f.POSITION AS location,
+                 f.LATITUDE AS lat, f.LONGITUDE AS lng,
+                 (SELECT MAX(r.DATE) FROM kscg_sensor_info si JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID WHERE si.TRANSMITTER_ID = t.TRANSMITTER_ID) AS lastSeen
+          FROM kscg_transmitter_info t
+          JOIN kscg_site_mydevice mm ON mm.TRANSMITTER_ID = t.TRANSMITTER_ID AND mm.SITE_ID = ?
+          LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
+          ${conds ? `WHERE ${conds}` : ""}
+          ORDER BY t.TRANSMITTER_ID
+          LIMIT ${limit}
+        `;
+        const [rows] = await pool.query(sql, params);
+        return {
+          query,
+          count: rows.length,
+          devices: rows.map((r) => ({
+            deviceId: r.deviceId,
+            facility: r.facility,
+            zone:     zoneFromFacility(r.facility),
+            location: r.location,
+            lat:      r.lat,
+            lng:      r.lng,
+            lastSeen: r.lastSeen,
+          })),
+        };
+      }
+
+      // 지명 → 좌표 (Nominatim, free OpenStreetMap)
+      case "geocode_location": {
+        const query = String(args.query || "").trim();
+        if (!query) return { error: "query 필수" };
+        // 군산 우선 검색 (도시명 자동 추가). 한국어 우선 헤더.
+        // 군산 viewbox: lng_min=126.3, lat_min=35.7 — lng_max=127.1, lat_max=36.1
+        const qWithCity = /군산|군산시|gunsan/i.test(query) ? query : `${query} 군산`;
+        const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(qWithCity)}&format=json&addressdetails=0&limit=3&accept-language=ko&viewbox=126.3,36.1,127.1,35.7&bounded=0&countrycodes=kr`;
+        try {
+          const res = await fetch(url, {
+            headers: { "User-Agent": "siwon-IoT-monitoring/1.0 capstone-project" },
+            signal: AbortSignal.timeout(8000),
+          });
+          if (!res.ok) return { error: `Nominatim HTTP ${res.status}` };
+          const data = await res.json();
+          if (!Array.isArray(data) || data.length === 0) {
+            return { query, count: 0, message: "지명 못 찾음 — 다른 키워드 시도 또는 search_devices_by_location 사용 권장" };
+          }
+          return {
+            query,
+            count: data.length,
+            results: data.map((r) => ({
+              displayName: r.display_name,
+              lat: Number(r.lat),
+              lng: Number(r.lon),
+              type: r.type,
+              importance: r.importance,
+            })),
+          };
+        } catch (e) {
+          return { error: `geocode 실패: ${e.message}` };
+        }
+      }
+
+      // 좌표 + 반경 검색 (Haversine 거리)
+      case "find_devices_near": {
+        const lat = Number(args.lat);
+        const lng = Number(args.lng);
+        const radiusKm = Math.min(Math.max(Number(args.radiusKm) || 2.0, 0.1), 30);
+        const limit = Math.min(Number(args.limit) || 20, 60);
+        if (!isFinite(lat) || !isFinite(lng)) return { error: "lat/lng 필수 (숫자)" };
+        const [rows] = await pool.query(`
+          SELECT t.NAME AS deviceId, f.NUMBER AS facility, f.POSITION AS location,
+                 f.LATITUDE AS lat, f.LONGITUDE AS lng,
+                 (SELECT MAX(r.DATE) FROM kscg_sensor_info si JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID WHERE si.TRANSMITTER_ID = t.TRANSMITTER_ID) AS lastSeen
+          FROM kscg_transmitter_info t
+          JOIN kscg_site_mydevice mm ON mm.TRANSMITTER_ID = t.TRANSMITTER_ID AND mm.SITE_ID = ?
+          LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
+          WHERE f.LATITUDE IS NOT NULL AND f.LONGITUDE IS NOT NULL
+        `, [SITE_ID]);
+        const withDist = rows.map((r) => ({
+          deviceId: r.deviceId,
+          facility: r.facility,
+          zone:     zoneFromFacility(r.facility),
+          location: r.location,
+          lat:      r.lat,
+          lng:      r.lng,
+          lastSeen: r.lastSeen,
+          distanceKm: Number(haversineKm(lat, lng, r.lat, r.lng).toFixed(3)),
+        })).filter((r) => r.distanceKm <= radiusKm)
+           .sort((a, b) => a.distanceKm - b.distanceKm)
+           .slice(0, limit);
+        return {
+          center: { lat, lng },
+          radiusKm,
+          count: withDist.length,
+          devices: withDist,
+        };
       }
 
       default:
@@ -1684,7 +1849,7 @@ ${offlineBlock ? `# 통신 장애 노드 상세 (마지막 측정 시각 + 두�
 # 최근 12시간 MSE 추이 (1시간 간격, 가장 오래된 → 현재)
 ${trendBlock}
 
-# 도구(Tools) 사용 가이드 — 12 개 도구
+# 도구(Tools) 사용 가이드 — 15 개 도구
 위 "현재 시스템 상태" 와 "12h MSE 추이" 에 이미 있는 정보면 그대로 답변. 없는 정보(특정 단말 상세, 시리얼/설치일/위경도, 시계열 추이, 알람 이력 등)는 아래 도구를 직접 호출해서 조회:
 
 **기본 조회 (6)**
@@ -1702,6 +1867,16 @@ ${trendBlock}
 - **get_recent_changes** — 변화량 통계 (시작/끝/델타/최저/최고/평균/표준편차/방향). "얼마나 변했어", "어떻게 바뀌었어" 류.
 - **get_maintenance_log** — 현장 점검·정비 이력.
 - **get_predictions** — AI LSTM 예측 결과 (현재 데이터 비어있을 수 있음 — message 필드 확인).
+
+**위치/지도 (3)**
+- **search_devices_by_location** — 지명 키워드로 단말 검색 (DB POSITION LIKE). "미룡동", "시청 앞", "버스터미널" 같은 DB 텍스트 매칭 가능한 경우 1차 시도.
+- **geocode_location** — 지명/랜드마크 → 좌표 (OpenStreetMap). 일반 지명(예: '은파호수공원', '군산교도소') 으로 좌표 모를 때.
+- **find_devices_near** — 좌표 + 반경(km) 안 단말. geocode 결과 받아서 사용. 반경 기본 2km.
+
+위치 질문 흐름 (중요):
+1. "OO 단말" / "OO 앞 단말" → search_devices_by_location 1회로 충분한 경우 多
+2. "OO 근처 단말" / "OO 주변 단말 N km" → DB 에 OO 없으면 geocode_location → find_devices_near 2단계
+3. 단말 ID 부근 → get_device_detail 로 lat/lng 받은 뒤 find_devices_near
 
 # 응답 작성 규칙 (강화 — 자문 Q5 반영)
 1. **도구 결과를 직접 인용** — 답변에 구체 수치를 명시. "조회한 값은 -1501 mV 였습니다" 처럼.
