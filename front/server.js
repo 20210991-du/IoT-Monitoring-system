@@ -76,7 +76,361 @@ app.get("/api/health", async (_req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────
+// Tools (Function Calling) — LLM 이 필요시 DB 직접 조회
+// ─────────────────────────────────────────────────────
+
+const TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "list_devices",
+      description: "군산도시가스 단말기 목록 조회. status/zone 필터 가능. 단말 ID 모를 때 후보 좁히기에 사용.",
+      parameters: {
+        type: "object",
+        properties: {
+          status: { type: "string", enum: ["normal","critical","warn","offline","all"], description: "단말 상태" },
+          zone:   { type: "string", description: "예: '제1구역', '제8구역'" },
+          limit:  { type: "integer", default: 20 }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_device_detail",
+      description: "특정 단말의 메타(시설번호, 위경도, 설치일) + 8 센서(방식전위/희생전류/AC유입/배터리/온도/습도/충격/RSSI) 최신값 + 통신 상태",
+      parameters: {
+        type: "object",
+        properties: {
+          deviceId: { type: "string", description: "예: 'TB24-250401'" }
+        },
+        required: ["deviceId"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_device_history",
+      description: "단말 시계열 추이 (특정 센서, 시간 범위). 추세·변화 분석용.",
+      parameters: {
+        type: "object",
+        properties: {
+          deviceId: { type: "string" },
+          kind:     { type: "string", enum: ["volt","sacrificial","ac","battery","temp","hum","shock","commDbm"], description: "센서 종류" },
+          range:    { type: "string", enum: ["1h","24h","7d","30d"], default: "24h" }
+        },
+        required: ["deviceId","kind"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_alarms",
+      description: "최근 알람 이력. 등급(1=위험,2=경고,3=주의) 필터 가능.",
+      parameters: {
+        type: "object",
+        properties: {
+          days:    { type: "integer", default: 7,  description: "최근 N일" },
+          gradeId: { type: "integer", description: "1=위험, 2=경고, 3=주의" },
+          limit:   { type: "integer", default: 20 }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_summary",
+      description: "전체 KPI 카운트 (정상/위험/이상의심/통신장애 단말 수)",
+      parameters: { type: "object", properties: {} }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_aggregate",
+      description: "전체 단말의 센서값 집계 (평균/최대/최소). 예: 전체 평균 방식전위, 최저 RSSI 등.",
+      parameters: {
+        type: "object",
+        properties: {
+          metric: { type: "string", enum: ["volt","ac","temp","hum","battery","commDbm"], description: "측정 종류" },
+          op:     { type: "string", enum: ["avg","max","min"], default: "avg" }
+        },
+        required: ["metric"]
+      }
+    }
+  }
+];
+
+// 단말 seq → SENSOR_ID 찾는 헬퍼
+async function findSensorId(transmitterId, seq) {
+  const [rows] = await pool.query(`
+    SELECT SENSOR_ID, ROW_NUMBER() OVER (PARTITION BY TRANSMITTER_ID ORDER BY SENSOR_ID) AS sq
+    FROM kscg_sensor_info WHERE TRANSMITTER_ID = ?
+  `, [transmitterId]);
+  return rows.find((r) => Number(r.sq) === seq)?.SENSOR_ID || null;
+}
+
+// 단말 ID(NAME) → TRANSMITTER_ID
+async function getTransmitterIdByName(deviceId) {
+  const [rows] = await pool.query(`SELECT TRANSMITTER_ID FROM kscg_transmitter_info WHERE NAME = ?`, [deviceId]);
+  return rows[0]?.TRANSMITTER_ID || null;
+}
+
+// ── tool dispatchers ────────────────────────────────
+async function execTool(name, args) {
+  if (!pool) return { error: "DB pool 비활성" };
+  args = args || {};
+  try {
+    switch (name) {
+      // 단말 목록
+      case "list_devices": {
+        const limit = Math.min(Number(args.limit) || 20, 60);
+        let sql = `
+          SELECT t.NAME AS deviceId, f.NUMBER AS facility, f.POSITION AS location,
+                 t.DEVICE_STATUS AS deviceStatus,
+                 (SELECT MAX(r.DATE)
+                  FROM kscg_sensor_info si JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID
+                  WHERE si.TRANSMITTER_ID = t.TRANSMITTER_ID) AS lastSeen
+          FROM kscg_transmitter_info t
+          JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
+          LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
+        `;
+        const where = [];
+        const params = [SITE_ID];
+        if (args.zone) {
+          // zone "제1구역" → facility number "1-XXX" prefix
+          const m = String(args.zone).match(/(\d+)/);
+          if (m) { where.push(`f.NUMBER LIKE ?`); params.push(`${m[1]}-%`); }
+        }
+        if (where.length) sql += ` WHERE ${where.join(" AND ")}`;
+        sql += ` ORDER BY t.TRANSMITTER_ID LIMIT ${limit}`;
+        const [rows] = await pool.query(sql, params);
+        // status 필터링 (lastSeen 기반)
+        const now = Date.now();
+        const filtered = rows.map((r) => {
+          const hoursSilent = r.lastSeen ? Math.floor((now - new Date(r.lastSeen).getTime()) / 3600000) : null;
+          const status = hoursSilent != null && hoursSilent >= 24 ? "offline" : "normal";
+          return { ...r, hoursSilent, status };
+        }).filter((r) => !args.status || args.status === "all" || r.status === args.status);
+        return { count: filtered.length, devices: filtered };
+      }
+
+      // 단말 상세 (8 센서 최신값)
+      case "get_device_detail": {
+        const deviceId = args.deviceId;
+        if (!deviceId) return { error: "deviceId 필수" };
+        const txid = await getTransmitterIdByName(deviceId);
+        if (!txid) return { error: `단말 없음: ${deviceId}` };
+        const [meta] = await pool.query(`
+          SELECT t.NAME AS deviceId, t.SERIAL_NUM AS serial, t.INSTALL_DATE AS installDate,
+                 t.DEVICE_STATUS AS deviceStatus, t.PERIOD_SEC AS periodSec,
+                 f.NUMBER AS facility, f.POSITION AS location, f.LATITUDE AS lat, f.LONGITUDE AS lng
+          FROM kscg_transmitter_info t
+          LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
+          WHERE t.TRANSMITTER_ID = ?
+        `, [txid]);
+        const [sensors] = await pool.query(`
+          SELECT si.UNIT, r.DATE AS measuredAt, r.VALUE AS value,
+                 ROW_NUMBER() OVER (PARTITION BY si.TRANSMITTER_ID ORDER BY si.SENSOR_ID) AS seq
+          FROM kscg_sensor_info si
+          LEFT JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID
+          WHERE si.TRANSMITTER_ID = ?
+          ORDER BY si.SENSOR_ID
+        `, [txid]);
+        const sensorVals = {};
+        let lastMeasured = null;
+        for (const s of sensors) {
+          const kind = SENSOR_SEQ_KIND[s.seq - 1];
+          if (kind) sensorVals[kind] = s.value;
+          if (s.measuredAt && (!lastMeasured || s.measuredAt > lastMeasured)) lastMeasured = s.measuredAt;
+        }
+        const hoursSilent = lastMeasured ? Math.floor((Date.now() - new Date(lastMeasured).getTime()) / 3600000) : null;
+        return {
+          ...meta[0],
+          zone: zoneFromFacility(meta[0]?.facility),
+          sensors: sensorVals,
+          lastMeasured,
+          hoursSilent,
+          status: hoursSilent != null && hoursSilent >= 24 ? "offline" : "normal",
+        };
+      }
+
+      // 단말 시계열
+      case "get_device_history": {
+        const deviceId = args.deviceId;
+        const kind     = args.kind || "volt";
+        const range    = args.range || "24h";
+        const seq      = SENSOR_SEQ_KIND.indexOf(kind) + 1;
+        if (seq < 1) return { error: `unknown kind: ${kind}` };
+        const txid = await getTransmitterIdByName(deviceId);
+        if (!txid) return { error: `단말 없음: ${deviceId}` };
+        const sensorId = await findSensorId(txid, seq);
+        if (!sensorId) return { error: "센서 매핑 없음" };
+        const hours = range === "1h" ? 1 : range === "7d" ? 168 : range === "30d" ? 720 : 24;
+        const [rows] = await pool.query(`
+          SELECT WRITE_DATE AS t, VALUE AS v
+          FROM kscg_sensor_data
+          WHERE SENSOR_ID = ? AND WRITE_DATE > DATE_SUB(NOW(), INTERVAL ? HOUR)
+          ORDER BY WRITE_DATE
+        `, [sensorId, hours]);
+        // 30d 처럼 큰 범위는 샘플링 (집계)
+        let points = rows;
+        if (rows.length > 100) {
+          const step = Math.ceil(rows.length / 100);
+          points = rows.filter((_, i) => i % step === 0);
+        }
+        return { deviceId, kind, range, count: rows.length, sampled: points.length, points };
+      }
+
+      // 알람
+      case "get_alarms": {
+        const days = Number(args.days) || 7;
+        const limit = Math.min(Number(args.limit) || 20, 50);
+        const where = ["a.GEN_DATE > DATE_SUB(NOW(), INTERVAL ? DAY)"];
+        const params = [days];
+        if (args.gradeId) { where.push("a.GRADE_ID = ?"); params.push(Number(args.gradeId)); }
+        const [rows] = await pool.query(`
+          SELECT a.GEN_DATE AS occurredAt, g.GRADE_TEXT AS grade,
+                 t.NAME AS deviceId, f.NUMBER AS facility,
+                 a.VALUE AS value, a.CONTENTS AS contents
+          FROM kscg_alarm_log a
+          LEFT JOIN kscg_alarm_grade_info g ON g.GRADE_ID = a.GRADE_ID
+          LEFT JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
+          LEFT JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = si.TRANSMITTER_ID
+          LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
+          WHERE ${where.join(" AND ")}
+          ORDER BY a.GEN_DATE DESC LIMIT ${limit}
+        `, params);
+        return { count: rows.length, alarms: rows };
+      }
+
+      // KPI 카운트
+      case "get_summary": {
+        const [[total]] = await pool.query(`
+          SELECT COUNT(*) AS all_ FROM kscg_transmitter_info t
+          JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
+        `, [SITE_ID]);
+        const [[silent]] = await pool.query(`
+          SELECT COUNT(*) AS offline FROM (
+            SELECT t.TRANSMITTER_ID, TIMESTAMPDIFF(HOUR, MAX(r.DATE), NOW()) AS h
+            FROM kscg_transmitter_info t
+            JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
+            JOIN kscg_sensor_info si ON si.TRANSMITTER_ID = t.TRANSMITTER_ID
+            JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID
+            GROUP BY t.TRANSMITTER_ID HAVING h >= 24
+          ) x
+        `, [SITE_ID]);
+        const [[alm]] = await pool.query(`
+          SELECT COUNT(DISTINCT si.TRANSMITTER_ID) AS critical
+          FROM kscg_alarm_log a
+          JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
+          JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = si.TRANSMITTER_ID AND m.SITE_ID = ?
+          WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 7 DAY)
+        `, [SITE_ID]);
+        const all = Number(total.all_) || 0;
+        const offline = Number(silent.offline) || 0;
+        const critical = Number(alm.critical) || 0;
+        return { total: all, normal: all - offline - critical, critical, warn: 0, offline };
+      }
+
+      // 집계 (평균·최대·최소)
+      case "get_aggregate": {
+        const metric = args.metric;
+        const op = args.op || "avg";
+        const seq = SENSOR_SEQ_KIND.indexOf(metric) + 1;
+        if (seq < 1) return { error: `unknown metric: ${metric}` };
+        const opSql = { avg: "AVG", max: "MAX", min: "MIN" }[op] || "AVG";
+        // RECENT_DATA 의 모든 군산 단말 seq 번째 센서값 집계
+        const [rows] = await pool.query(`
+          SELECT ${opSql}(r.VALUE) AS result
+          FROM kscg_recent_data r
+          JOIN kscg_sensor_info si ON si.SENSOR_ID = r.SENSOR_ID
+          JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = si.TRANSMITTER_ID AND m.SITE_ID = ?
+          WHERE (
+            SELECT COUNT(*) FROM kscg_sensor_info si2
+            WHERE si2.TRANSMITTER_ID = si.TRANSMITTER_ID AND si2.SENSOR_ID <= si.SENSOR_ID
+          ) = ?
+        `, [SITE_ID, seq]);
+        return { metric, op, result: Number(rows[0].result?.toFixed(2)) };
+      }
+
+      default:
+        return { error: `unknown tool: ${name}` };
+    }
+  } catch (err) {
+    console.error(`[tool ${name}]`, err);
+    return { error: err.message };
+  }
+}
+
+// Ollama tool calling 라운드 루프 (최대 5회)
+//   - tool_calls 가 있으면 execTool 실행 후 messages 에 append → 다음 라운드
+//   - tool_calls 가 없으면 최종 응답 (content) 반환
+//   - toolTrace 로 어떤 도구가 호출됐는지 추적 (디버깅용)
+async function runChatWithTools(messages, signal) {
+  const MAX_ROUNDS = 5;
+  const working = [...messages];
+  const toolTrace = [];
+  let lastTokens = {};
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        messages: working,
+        tools: TOOLS,
+        stream: false,
+        think: false,
+        options: { temperature: 0.3, num_predict: 1000 },
+      }),
+      signal,
+    });
+    if (!res.ok) throw new Error(`Ollama HTTP ${res.status}: ${await res.text().catch(() => "")}`);
+    const data = await res.json();
+    const msg = data.message || {};
+    lastTokens = { prompt: data.prompt_eval_count, completion: data.eval_count };
+
+    // tool 호출이 없으면 최종 응답
+    const toolCalls = msg.tool_calls || [];
+    if (toolCalls.length === 0) {
+      return { content: msg.content || "", rounds: round + 1, toolTrace, tokens: lastTokens };
+    }
+
+    // tool 호출 실행 → 결과 messages 에 append → 다음 라운드
+    working.push({ role: "assistant", content: msg.content || "", tool_calls: toolCalls });
+    for (const tc of toolCalls) {
+      const name = tc.function?.name;
+      const args = tc.function?.arguments || {};
+      console.log(`[tool] round ${round + 1} → ${name}(${JSON.stringify(args)})`);
+      const result = await execTool(name, args);
+      const ok = !result?.error;
+      toolTrace.push({ round: round + 1, name, args, ok });
+      working.push({
+        role: "tool",
+        content: JSON.stringify(result),
+        tool_name: name,
+      });
+    }
+  }
+  return {
+    content: "(도구 호출 한도 초과 — 정보를 더 얻지 못해 답변을 마무리하지 못했습니다.)",
+    rounds: MAX_ROUNDS,
+    toolTrace,
+    tokens: lastTokens,
+  };
+}
+
 // ── /api/chat ────────────────────────────────────────
+// Function Calling 사용:
+//   - LLM 에 TOOLS 정의 동봉 → 필요시 list_devices / get_device_detail 등 호출
+//   - 서버가 execTool() 로 MySQL 조회 → 결과를 messages 에 append → 다시 LLM 호출
+//   - 최대 5 라운드 (runChatWithTools 내부 MAX_ROUNDS)
 app.post("/api/chat", async (req, res) => {
   const { message, context = {}, history = [] } = req.body || {};
   if (!message || typeof message !== "string") {
@@ -91,40 +445,25 @@ app.post("/api/chat", async (req, res) => {
     content: h.text,
   }));
 
-  const ollamaPayload = {
-    model: OLLAMA_MODEL,
-    messages: [
-      { role: "system", content: systemPrompt },
-      ...recent,
-      { role: "user", content: message },
-    ],
-    stream: false,
-    think: false,                                      // qwen3 thinking 모드 차단 (content 비는 이슈)
-    options: { temperature: 0.3, num_predict: 800 },
-  };
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...recent,
+    { role: "user", content: message },
+  ];
 
   try {
     const ctrl = new AbortController();
-    const timeout = setTimeout(() => ctrl.abort(), 60_000); // 60s
-    const ollamaRes = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(ollamaPayload),
-      signal: ctrl.signal,
-    });
+    const timeout = setTimeout(() => ctrl.abort(), 120_000); // 120s (최대 5 tool 라운드 여유)
+    const result = await runChatWithTools(messages, ctrl.signal);
     clearTimeout(timeout);
 
-    if (!ollamaRes.ok) {
-      const txt = await ollamaRes.text().catch(() => "");
-      throw new Error(`Ollama HTTP ${ollamaRes.status}: ${txt}`);
-    }
-    const data = await ollamaRes.json();
-    const reply = (data.message && data.message.content) || "(빈 응답)";
     return res.json({
-      ok:    true,
-      reply: reply.trim(),
-      model: OLLAMA_MODEL,
-      tokens: { prompt: data.prompt_eval_count, completion: data.eval_count },
+      ok:        true,
+      reply:     (result.content || "(빈 응답)").trim(),
+      model:     OLLAMA_MODEL,
+      rounds:    result.rounds,
+      toolCalls: result.toolTrace || [],
+      tokens:    result.tokens || {},
     });
   } catch (err) {
     console.error("[chat] error:", err.message);
@@ -682,6 +1021,17 @@ ${offlineNodes.length ? `- 통신 장애 노드: ${offlineNodes.join(", ")}` : "
 ${offlineBlock ? `# 통신 장애 노드 상세 (마지막 측정 시각 + 두절 기간)\n${offlineBlock}\n` : ""}
 # 최근 12시간 MSE 추이 (1시간 간격, 가장 오래된 → 현재)
 ${trendBlock}
+
+# 도구(Tools) 사용 가이드
+위 "현재 시스템 상태" 와 "12h MSE 추이" 에 이미 있는 정보면 그대로 답변. 없는 정보(특정 단말 상세, 시리얼/설치일/위경도, 시계열 추이, 알람 이력 등)는 아래 도구를 직접 호출해서 조회:
+- **list_devices** — 단말 목록 (status/zone 필터). 단말 ID 후보 좁히기.
+- **get_device_detail** — 단말 메타 + 8 센서 최신값. "TB24-XXXXXX 상태", "방식전위가 얼만지" 등.
+- **get_device_history** — 시계열 (1h/24h/7d/30d). "추이", "어제부터", "변화" 류 질문.
+- **get_alarms** — 최근 알람 이력. "위험 알람", "어제 알람" 등.
+- **get_summary** — KPI 카운트. (이미 위에 있으면 호출 불필요)
+- **get_aggregate** — 전체 평균/최대/최소. "평균 방식전위", "최저 RSSI" 등.
+
+도구를 부른 후엔 받은 JSON 의 실제 값을 근거로 답하고, **추측 금지**. 호출 결과가 비어있거나 error 면 "데이터 없음" 으로 정직하게 답변.
 
 # 응답 규칙
 1. **간결** — 2~5문장. 인사말·사과 절대 금지. 바로 본론.
