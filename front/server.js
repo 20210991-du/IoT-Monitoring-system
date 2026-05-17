@@ -188,6 +188,8 @@ async function execTool(name, args) {
   try {
     switch (name) {
       // 단말 목록
+      //   주의: status 필터는 JS 후처리 (DB 컬럼이 아니라 lastSeen + 알람 카운트로 계산).
+      //         그래서 SQL 단에서 LIMIT 걸면 안 됨 → 전체 가져온 뒤 filter → slice.
       case "list_devices": {
         const limit = Math.min(Number(args.limit) || 20, 60);
         let sql = `
@@ -195,7 +197,11 @@ async function execTool(name, args) {
                  t.DEVICE_STATUS AS deviceStatus,
                  (SELECT MAX(r.DATE)
                   FROM kscg_sensor_info si JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID
-                  WHERE si.TRANSMITTER_ID = t.TRANSMITTER_ID) AS lastSeen
+                  WHERE si.TRANSMITTER_ID = t.TRANSMITTER_ID) AS lastSeen,
+                 (SELECT COUNT(*)
+                  FROM kscg_alarm_log a JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
+                  WHERE si.TRANSMITTER_ID = t.TRANSMITTER_ID
+                    AND a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 7 DAY)) AS recentAlarms
           FROM kscg_transmitter_info t
           JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
           LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
@@ -208,16 +214,24 @@ async function execTool(name, args) {
           if (m) { where.push(`f.NUMBER LIKE ?`); params.push(`${m[1]}-%`); }
         }
         if (where.length) sql += ` WHERE ${where.join(" AND ")}`;
-        sql += ` ORDER BY t.TRANSMITTER_ID LIMIT ${limit}`;
+        sql += ` ORDER BY t.TRANSMITTER_ID`;     // ★ LIMIT 제거 (필터 전에 자르면 X)
         const [rows] = await pool.query(sql, params);
-        // status 필터링 (lastSeen 기반)
         const now = Date.now();
-        const filtered = rows.map((r) => {
+        const annotated = rows.map((r) => {
           const hoursSilent = r.lastSeen ? Math.floor((now - new Date(r.lastSeen).getTime()) / 3600000) : null;
-          const status = hoursSilent != null && hoursSilent >= 24 ? "offline" : "normal";
-          return { ...r, hoursSilent, status };
-        }).filter((r) => !args.status || args.status === "all" || r.status === args.status);
-        return { count: filtered.length, devices: filtered };
+          const recentAlarms = Number(r.recentAlarms) || 0;
+          // /api/devices mapStatus 와 일치: 24h 두절 → offline, 최근 7일 알람 → critical, else normal
+          const status = hoursSilent != null && hoursSilent >= 24 ? "offline"
+                       : recentAlarms > 0 ? "critical"
+                       : "normal";
+          return { ...r, hoursSilent, recentAlarms, status };
+        });
+        const filtered = annotated.filter((r) => !args.status || args.status === "all" || r.status === args.status);
+        return {
+          totalScanned: annotated.length,
+          count: Math.min(filtered.length, limit),
+          devices: filtered.slice(0, limit),
+        };
       }
 
       // 단말 상세 (8 센서 최신값)
