@@ -700,13 +700,24 @@ function buildChatContext(equipment, weather) {
   const counts = { all: equipment.length, normal: 0, critical: 0, warn: 0, offline: 0 };
   const criticalNodes = [];
   const warnNodes = [];
-  const offlineNodes = [];
+  const offlineNodes = [];       // 단순 ID 리스트 (기존 호환)
+  const offlineDetails = [];     // 신규: 마지막 측정 시각 + 두절 시간
   const trends = []; // 위험·이상 의심 노드의 12시간 MSE 추이
   equipment.forEach((e) => {
     if (counts[e.status] !== undefined) counts[e.status]++;
     if (e.status === "critical") criticalNodes.push(e.deviceId);
     else if (e.status === "warn") warnNodes.push(e.deviceId);
-    else if (e.status === "offline") offlineNodes.push(e.deviceId);
+    else if (e.status === "offline") {
+      offlineNodes.push(e.deviceId);
+      offlineDetails.push({
+        deviceId:     e.deviceId,
+        zone:         e.zone,
+        location:     e.location,
+        facilityId:   e.facilityId,
+        updatedAt:    e.updatedAt,     // 마지막 측정 시각 (ISO)
+        hoursSilent:  e.hoursSilent,   // 몇 시간 끊겼는지
+      });
+    }
     // 위험·이상 의심 노드만 trend 포함 (토큰 절약)
     if ((e.status === "critical" || e.status === "warn") && Array.isArray(e.mseHistory)) {
       trends.push({
@@ -726,7 +737,7 @@ function buildChatContext(equipment, weather) {
   const weatherCtx = weather && !weather.stale
     ? { temp: weather.temp, ko: weather.ko, code: weather.code, time: weather.time }
     : null;
-  return { counts, criticalNodes, warnNodes, offlineNodes, trends, nowText, weather: weatherCtx };
+  return { counts, criticalNodes, warnNodes, offlineNodes, offlineDetails, trends, nowText, weather: weatherCtx };
 }
 
 async function callLLM(message, context, history) {
