@@ -1784,8 +1784,11 @@ function buildSystemPrompt(ctx) {
   const nowText         = ctx.nowText || "현재";
   const weather         = ctx.weather; // null 가능
 
-  const summaryLine =
-    `전체 ${counts.all ?? 0}대 / 정상 ${counts.normal ?? 0} · 위험 ${counts.critical ?? 0} · 이상 의심 ${counts.warn ?? 0} · 통신 장애 ${counts.offline ?? 0}`;
+  // 클라이언트가 context.counts 를 보냈는지 판정 (API 직접 호출 시 비어있음)
+  const hasContext = counts.all != null && Number(counts.all) > 0;
+  const summaryLine = hasContext
+    ? `전체 ${counts.all}대 / 정상 ${counts.normal ?? 0} · 위험 ${counts.critical ?? 0} · 이상 의심 ${counts.warn ?? 0} · 통신 장애 ${counts.offline ?? 0}`
+    : `(컨텍스트 미전달 — 정확한 KPI 는 get_summary 도구로 조회 필수. "0대" 라고 답변하지 말 것)`;
 
   // 통신 두절 상세 (마지막 측정 시각 + 끊긴 시간)
   const offlineBlock = offlineDetails.length === 0 ? "" :
@@ -1839,11 +1842,11 @@ ${weatherLine}
 - 한파/혹한 → 토양 동결 → 방식전위 변동
 - 폭염/일교차 → 온도 센서 이상
 
-# 현재 시스템 상태 (실시간)
+# 현재 시스템 상태 ${hasContext ? "(실시간)" : "(컨텍스트 미전달 — 도구 조회 필요)"}
 - ${summaryLine}
-${criticalNodes.length ? `- 위험 노드: ${criticalNodes.join(", ")}` : "- 위험 노드: 없음"}
-${warnNodes.length    ? `- 이상 의심 노드(상위 ${Math.min(warnNodes.length, 8)}): ${warnNodes.slice(0, 8).join(", ")}` : "- 이상 의심 노드: 없음"}
-${offlineNodes.length ? `- 통신 장애 노드: ${offlineNodes.join(", ")}` : ""}
+${hasContext ? (criticalNodes.length ? `- 위험 노드: ${criticalNodes.join(", ")}` : "- 위험 노드: 없음") : ""}
+${hasContext && warnNodes.length    ? `- 이상 의심 노드(상위 ${Math.min(warnNodes.length, 8)}): ${warnNodes.slice(0, 8).join(", ")}` : ""}
+${hasContext && offlineNodes.length ? `- 통신 장애 노드: ${offlineNodes.join(", ")}` : ""}
 
 ${offlineBlock ? `# 통신 장애 노드 상세 (마지막 측정 시각 + 두절 기간)\n${offlineBlock}\n` : ""}
 # 최근 12시간 MSE 추이 (1시간 간격, 가장 오래된 → 현재)
