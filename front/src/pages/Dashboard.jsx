@@ -762,17 +762,18 @@ async function callLLM(message, context, history) {
 }
 
 // SSE 스트리밍 호출
-//   onDelta(piece, acc)         — 토큰 단위 콜백
-//   onTool({round,name,args})   — 서버가 도구 호출했을 때 알림 (function calling)
-//   onDone(payload)             — 종료 콜백
-//   onError(err)                — 에러
-async function callLLMStream(message, context, history, { onDelta, onTool, onDone, onError, signal }) {
+//   onDelta(piece, acc)              — 토큰 단위 콜백
+//   onTool({round,name,args})        — 서버가 도구 호출했을 때 알림 (function calling)
+//   onSession({sessionId})           — 서버가 부여한 chat_sessions.id
+//   onDone(payload)                  — 종료 콜백
+//   onError(err)                     — 에러
+async function callLLMStream(message, context, history, sessionId, { onDelta, onTool, onSession, onDone, onError, signal }) {
   let acc = "";
   try {
     const res = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, context, history }),
+      body: JSON.stringify({ message, context, history, sessionId: sessionId || undefined }),
       signal,
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -806,9 +807,12 @@ async function callLLMStream(message, context, history, { onDelta, onTool, onDon
         } else if (event === "tool") {
           // 서버가 DB 도구 호출 시작 (function calling)
           onTool && onTool(payload);
+        } else if (event === "session") {
+          // 서버가 부여한 chat_sessions.id
+          onSession && onSession(payload);
         } else if (event === "done") {
           onDone && onDone(payload);
-          return { ok: true, reply: payload.reply || acc.trim() };
+          return { ok: true, reply: payload.reply || acc.trim(), sessionId: payload.sessionId };
         } else if (event === "error") {
           throw new Error(payload.message || "stream error");
         }
@@ -838,6 +842,7 @@ function detectKpiFromReply(text) {
 
 // 채팅 히스토리 localStorage 키 + 한도
 const CHAT_STORAGE_KEY = "siwon.chat.history";
+const CHAT_SESSION_KEY = "siwon.chat.session_id";
 const CHAT_MAX_KEEP = 60; // 최근 60개 메시지만 보관
 
 function loadChatHistory() {
@@ -865,6 +870,9 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [llmActive, setLlmActive] = useState(null); // null=미확인, true=LLM, false=mock
+  const [sessionId, setSessionId] = useState(() => {
+    try { const v = localStorage.getItem(CHAT_SESSION_KEY); return v ? Number(v) : null; } catch { return null; }
+  });
   const listRef = useRef(null);
 
   // 메시지 변할 때마다 저장 + 자동 스크롤
@@ -893,8 +901,17 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
     // LLM 스트리밍 시도
     let finalReply = "";
     let usedLLM = false;
+    let donePayload = null;
+    const t0 = Date.now();
 
-    const stream = await callLLMStream(trimmed, ctx, historyForLLM, {
+    const stream = await callLLMStream(trimmed, ctx, historyForLLM, sessionId, {
+      onSession: (info) => {
+        // 서버가 새 세션 발급 또는 기존 세션 확인 — localStorage 에 저장
+        if (info?.sessionId && info.sessionId !== sessionId) {
+          setSessionId(info.sessionId);
+          try { localStorage.setItem(CHAT_SESSION_KEY, String(info.sessionId)); } catch {}
+        }
+      },
       onDelta: (_piece, acc) => {
         // AI 메시지(마지막)의 text 누적 갱신
         setMessages((m) => {
@@ -920,6 +937,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
       },
       onDone: (payload) => {
         finalReply = (payload && payload.reply) || "";
+        donePayload = payload || null;
       },
     });
 
@@ -931,7 +949,8 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
       finalReply = mockAIResponse(trimmed, { equipment });
     }
 
-    // 마지막 메시지를 최종 결과로 확정 (streaming 플래그 해제, toolCalls 보존)
+    // 마지막 메시지를 최종 결과로 확정 (streaming 플래그 해제, toolCalls 보존, meta 부착)
+    const elapsedMs = Date.now() - t0;
     setMessages((m) => {
       const arr = m.slice();
       const last = arr[arr.length - 1];
@@ -941,6 +960,12 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
           text: finalReply,
           time: rtime,
           toolCalls: last.toolCalls || [],
+          meta: stream.ok ? {
+            elapsedMs,
+            rounds: donePayload?.rounds,
+            tokens: donePayload?.tokens,
+            model:  donePayload?.model,
+          } : { elapsedMs, fallback: "mock" },
         };
       }
       return arr;
@@ -978,9 +1003,13 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
                   if (sending) return;
                   setMessages([greeting]);
                   setLlmActive(null);
-                  try { localStorage.removeItem(CHAT_STORAGE_KEY); } catch {}
+                  setSessionId(null);
+                  try {
+                    localStorage.removeItem(CHAT_STORAGE_KEY);
+                    localStorage.removeItem(CHAT_SESSION_KEY);
+                  } catch {}
                 }}
-                title="대화 초기화"
+                title="대화 초기화 (새 세션 시작)"
                 style={{
                   display: "grid", placeItems: "center",
                   width: 22, height: 22, borderRadius: 6,
@@ -1178,8 +1207,20 @@ function ChatMessage({ message }) {
           textAlign: isAi ? "left" : "right",
           paddingLeft: isAi ? 4 : 0,
           paddingRight: isAi ? 0 : 4,
+          display: "flex",
+          justifyContent: isAi ? "flex-start" : "flex-end",
+          gap: 8,
         }}>
-          {message.time}
+          <span>{message.time}</span>
+          {/* 응답 메타 (AI 메시지만, 스트리밍 끝난 후) */}
+          {isAi && message.meta && !message.streaming && (
+            <span style={{ opacity: 0.7 }}>
+              {message.meta.elapsedMs != null && `${(message.meta.elapsedMs / 1000).toFixed(1)}s`}
+              {message.meta.rounds && ` · ${message.meta.rounds}R`}
+              {message.meta.tokens?.completion != null && ` · ${message.meta.tokens.completion}tok`}
+              {message.meta.fallback && ` · ${message.meta.fallback}`}
+            </span>
+          )}
         </div>
       </div>
     </div>

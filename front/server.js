@@ -118,6 +118,46 @@ async function logToolCall(name, args, ok, durationMs, _cached) {
   } catch (_) { /* swallow — audit 실패해도 진행 */ }
 }
 
+// ── 챗봇 영구 대화 저장 (chat_sessions + chat_messages) ──
+// 클라이언트가 sessionId 보내면 그것 사용, 없으면 새로 만들어 응답에 동봉.
+async function ensureChatSession(sessionId, firstUserMsg) {
+  if (!pool) return null;
+  if (sessionId) {
+    try {
+      const [rows] = await pool.query(`SELECT id FROM chat_sessions WHERE id = ?`, [sessionId]);
+      if (rows.length) return Number(sessionId);
+    } catch (_) {}
+  }
+  try {
+    const title = String(firstUserMsg || "").slice(0, 30).trim() || "(제목 없음)";
+    const [r] = await pool.query(`INSERT INTO chat_sessions (title) VALUES (?)`, [title]);
+    return r.insertId;
+  } catch (e) {
+    console.warn("[ensureChatSession]", e.message);
+    return null;
+  }
+}
+
+async function persistMessage(sessionId, role, text, contextJson, tokens, model) {
+  if (!pool || !sessionId || !text) return;
+  try {
+    await pool.query(
+      `INSERT INTO chat_messages (session_id, role, text, context_json, tokens_prompt, tokens_completion, model) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        sessionId, role, text,
+        contextJson ? JSON.stringify(contextJson) : null,
+        tokens?.prompt ?? null,
+        tokens?.completion ?? null,
+        model || null,
+      ],
+    );
+    // 세션 updated_at 자동 갱신 (ON UPDATE CURRENT_TIMESTAMP 가 INSERT 만으론 안 트리거됨)
+    await pool.query(`UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [sessionId]);
+  } catch (e) {
+    console.warn("[persistMessage]", e.message);
+  }
+}
+
 const TOOLS = [
   {
     type: "function",
@@ -819,7 +859,7 @@ async function runChatWithTools(messages, signal) {
 //   - 서버가 execTool() 로 MySQL 조회 → 결과를 messages 에 append → 다시 LLM 호출
 //   - 최대 5 라운드 (runChatWithTools 내부 MAX_ROUNDS)
 app.post("/api/chat", async (req, res) => {
-  const { message, context = {}, history = [] } = req.body || {};
+  const { message, context = {}, history = [], sessionId } = req.body || {};
   if (!message || typeof message !== "string") {
     return res.status(400).json({ ok: false, error: "message 필드가 비어있습니다." });
   }
@@ -838,15 +878,27 @@ app.post("/api/chat", async (req, res) => {
     { role: "user", content: message },
   ];
 
+  // 세션 영구화 (best-effort)
+  const sid = await ensureChatSession(sessionId, message);
+
   try {
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), 120_000); // 120s (최대 5 tool 라운드 여유)
     const result = await runChatWithTools(messages, ctrl.signal);
     clearTimeout(timeout);
 
+    const reply = (result.content || "(빈 응답)").trim();
+
+    // chat_messages 영구화 (background, best-effort)
+    if (sid) {
+      persistMessage(sid, "user", message, context, null, null);
+      persistMessage(sid, "ai", reply, { rounds: result.rounds, toolCalls: result.toolTrace }, result.tokens, OLLAMA_MODEL);
+    }
+
     return res.json({
       ok:        true,
-      reply:     (result.content || "(빈 응답)").trim(),
+      sessionId: sid,
+      reply,
       model:     OLLAMA_MODEL,
       rounds:    result.rounds,
       toolCalls: result.toolTrace || [],
@@ -870,7 +922,7 @@ app.post("/api/chat", async (req, res) => {
 //   - done  : { reply, tokens, rounds, toolCalls }   최종 완성 답변
 //   - error : { message }
 app.post("/api/chat/stream", async (req, res) => {
-  const { message, context = {}, history = [] } = req.body || {};
+  const { message, context = {}, history = [], sessionId } = req.body || {};
   if (!message || typeof message !== "string") {
     return res.status(400).json({ ok: false, error: "message 필드가 비어있습니다." });
   }
@@ -898,6 +950,10 @@ app.post("/api/chat/stream", async (req, res) => {
     ...recent,
     { role: "user", content: message },
   ];
+
+  // 세션 영구화 (best-effort). 응답에 session 이벤트로 동봉.
+  const sid = await ensureChatSession(sessionId, message);
+  if (sid) send("session", { sessionId: sid });
 
   const MAX_ROUNDS = 5;
   const toolTrace = [];
@@ -984,13 +1040,20 @@ app.post("/api/chat/stream", async (req, res) => {
       // tool_calls 가 없으면 최종 답변
       if (toolCalls.length === 0) {
         finalAccum += roundContent;
+        const finalReply = finalAccum.trim();
         send("done", {
-          reply:     finalAccum.trim(),
+          reply:     finalReply,
+          sessionId: sid,
           model:     OLLAMA_MODEL,
           rounds:    round + 1,
           toolCalls: toolTrace,
           tokens:    lastTokens,
         });
+        // chat_messages 영구화 (background)
+        if (sid) {
+          persistMessage(sid, "user", message, context, null, null);
+          persistMessage(sid, "ai", finalReply, { rounds: round + 1, toolCalls: toolTrace }, lastTokens, OLLAMA_MODEL);
+        }
         clearTimeout(timeout);
         return res.end();
       }
@@ -1372,6 +1435,104 @@ app.get("/api/anomalies", dbRequired, async (_req, res) => {
 // ── GET /api/insights — AI 조치 권고 (stub, ai_predictions 연동 전) ──
 app.get("/api/insights", (_req, res) => {
   res.json({ ok: true, insights: [] });
+});
+
+// ── 챗봇 세션 관리 ───────────────────────────────────
+// GET    /api/chat/sessions          — 세션 목록 (최근 30)
+// GET    /api/chat/sessions/:id      — 세션 + 메시지
+// POST   /api/chat/sessions          — 새 세션
+// DELETE /api/chat/sessions/:id      — 세션 삭제
+
+app.get("/api/chat/sessions", dbRequired, async (_req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT s.id, s.title, s.created_at, s.updated_at,
+             (SELECT COUNT(*) FROM chat_messages WHERE session_id = s.id) AS messageCount
+      FROM chat_sessions s
+      ORDER BY s.updated_at DESC LIMIT 30
+    `);
+    res.json({ ok: true, count: rows.length, sessions: rows });
+  } catch (err) {
+    console.error("[/api/chat/sessions]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/chat/sessions/:id", dbRequired, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "id 숫자" });
+    const [sess] = await pool.query(`SELECT * FROM chat_sessions WHERE id = ?`, [id]);
+    if (sess.length === 0) return res.status(404).json({ ok: false, error: "session not found" });
+    const [msgs] = await pool.query(`
+      SELECT role, text, tokens_prompt AS tokensPrompt, tokens_completion AS tokensCompletion,
+             model, created_at AS createdAt
+      FROM chat_messages WHERE session_id = ?
+      ORDER BY created_at, id LIMIT 200
+    `, [id]);
+    res.json({ ok: true, session: sess[0], messages: msgs });
+  } catch (err) {
+    console.error("[/api/chat/sessions/:id]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/chat/sessions", dbRequired, async (req, res) => {
+  try {
+    const title = String(req.body?.title || "").slice(0, 200) || "(제목 없음)";
+    const [r] = await pool.query(`INSERT INTO chat_sessions (title) VALUES (?)`, [title]);
+    res.json({ ok: true, sessionId: r.insertId, title });
+  } catch (err) {
+    console.error("[POST /api/chat/sessions]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete("/api/chat/sessions/:id", dbRequired, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "id 숫자" });
+    await pool.query(`DELETE FROM chat_messages WHERE session_id = ?`, [id]);
+    const [r] = await pool.query(`DELETE FROM chat_sessions WHERE id = ?`, [id]);
+    res.json({ ok: true, deleted: r.affectedRows });
+  } catch (err) {
+    console.error("[DELETE /api/chat/sessions/:id]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── POST /api/predict/:id — LSTM 예측 (ai_predictions 조회) ──
+//   현재 LSTM 백엔드(이두현) INSERT 대기 중. 데이터 없으면 stub 응답.
+//   id 파라미터는 TRANSMITTER_ID 숫자.
+app.post("/api/predict/:id", dbRequired, async (req, res) => {
+  try {
+    const txid = parseInt(req.params.id, 10);
+    if (!Number.isFinite(txid)) {
+      return res.status(400).json({ ok: false, error: "id 는 숫자(TRANSMITTER_ID) 여야 합니다" });
+    }
+    const [rows] = await pool.query(`
+      SELECT p.id, p.predicted_at, p.mse, p.threshold,
+             p.risk_level, p.comm_status, p.ai_reliability,
+             p.feature_contributions, p.is_sacrificial_device,
+             t.NAME AS deviceId
+      FROM ai_predictions p
+      LEFT JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = p.transmitter_id
+      WHERE p.transmitter_id = ?
+      ORDER BY p.predicted_at DESC LIMIT 1
+    `, [txid]);
+    if (rows.length === 0) {
+      return res.json({
+        ok: true,
+        prediction: null,
+        stub: true,
+        message: "예측 데이터 없음 (이두현 LSTM 백엔드 INSERT 대기 중)",
+      });
+    }
+    res.json({ ok: true, prediction: rows[0] });
+  } catch (err) {
+    console.error("[/api/predict]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // ── GET /api/sync-status — sync 상태 (관제용) ─────────
