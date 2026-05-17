@@ -761,8 +761,12 @@ async function callLLM(message, context, history) {
   }
 }
 
-// SSE 스트리밍 호출 — onDelta(piece) 토큰 단위 콜백, onDone(full) 종료 콜백
-async function callLLMStream(message, context, history, { onDelta, onDone, onError, signal }) {
+// SSE 스트리밍 호출
+//   onDelta(piece, acc)         — 토큰 단위 콜백
+//   onTool({round,name,args})   — 서버가 도구 호출했을 때 알림 (function calling)
+//   onDone(payload)             — 종료 콜백
+//   onError(err)                — 에러
+async function callLLMStream(message, context, history, { onDelta, onTool, onDone, onError, signal }) {
   let acc = "";
   try {
     const res = await fetch("/api/chat/stream", {
@@ -799,6 +803,9 @@ async function callLLMStream(message, context, history, { onDelta, onDone, onErr
         if (event === "delta" && payload.text) {
           acc += payload.text;
           onDelta && onDelta(payload.text, acc);
+        } else if (event === "tool") {
+          // 서버가 DB 도구 호출 시작 (function calling)
+          onTool && onTool(payload);
         } else if (event === "done") {
           onDone && onDone(payload);
           return { ok: true, reply: payload.reply || acc.trim() };
@@ -899,6 +906,18 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
           return arr;
         });
       },
+      onTool: (info) => {
+        // 서버가 DB 도구 호출 — "🔧 list_devices 조회 중..." UI 표시
+        setMessages((m) => {
+          const arr = m.slice();
+          const last = arr[arr.length - 1];
+          if (last && last.role === "ai" && last.streaming) {
+            const toolCalls = [...(last.toolCalls || []), info];
+            arr[arr.length - 1] = { ...last, toolCalls };
+          }
+          return arr;
+        });
+      },
       onDone: (payload) => {
         finalReply = (payload && payload.reply) || "";
       },
@@ -912,12 +931,17 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
       finalReply = mockAIResponse(trimmed, { equipment });
     }
 
-    // 마지막 메시지를 최종 결과로 확정 (streaming 플래그 해제)
+    // 마지막 메시지를 최종 결과로 확정 (streaming 플래그 해제, toolCalls 보존)
     setMessages((m) => {
       const arr = m.slice();
       const last = arr[arr.length - 1];
       if (last && last.role === "ai") {
-        arr[arr.length - 1] = { role: "ai", text: finalReply, time: rtime };
+        arr[arr.length - 1] = {
+          role: "ai",
+          text: finalReply,
+          time: rtime,
+          toolCalls: last.toolCalls || [],
+        };
       }
       return arr;
     });
@@ -1109,6 +1133,35 @@ function ChatMessage({ message }) {
           wordBreak: "break-word",
           boxShadow: isAi ? "none" : "0 4px 10px -4px rgba(79,70,229,0.4)",
         }}>
+          {/* 도구 호출 칩 (function calling) — 스트리밍 중이거나 호출이력 있을 때 표시 */}
+          {isAi && Array.isArray(message.toolCalls) && message.toolCalls.length > 0 && (
+            <div style={{
+              display: "flex", flexWrap: "wrap", gap: 4,
+              marginBottom: message.text ? 6 : 0,
+            }}>
+              {message.toolCalls.map((tc, idx) => (
+                <span key={idx} style={{
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  padding: "2px 7px",
+                  fontSize: 10.5, lineHeight: 1.3,
+                  borderRadius: 999,
+                  background: message.streaming ? "rgba(79,70,229,0.12)" : "rgba(0,0,0,0.04)",
+                  color: message.streaming ? "var(--brand)" : "var(--ink-4)",
+                  border: `1px solid ${message.streaming ? "rgba(79,70,229,0.25)" : "var(--line)"}`,
+                  whiteSpace: "nowrap",
+                  animation: message.streaming && !message.text ? "pulse-dot 1.4s ease-in-out infinite" : "none",
+                }}>
+                  <span style={{ fontSize: 9 }}>🔧</span>
+                  <span style={{ fontFamily: "JetBrains Mono, ui-monospace, monospace" }}>{tc.name}</span>
+                  {tc.args && Object.keys(tc.args).length > 0 && (
+                    <span style={{ opacity: 0.7, fontSize: 9.5 }}>
+                      ({Object.entries(tc.args).map(([k,v]) => `${k}:${String(v).slice(0,16)}`).join(", ")})
+                    </span>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
           {renderInlineMD(message.text)}
           {message.streaming && (
             <span style={{
