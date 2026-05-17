@@ -532,8 +532,19 @@ app.post("/api/chat/stream", async (req, res) => {
   let lastTokens = { prompt: 0, completion: 0 };
 
   const ctrl = new AbortController();
-  const timeout = setTimeout(() => ctrl.abort(), 180_000);   // 180s (라운드 여유)
-  req.on("close", () => { try { ctrl.abort(); } catch {} });
+  const timeout = setTimeout(() => { console.log("[chat/stream] timeout 180s"); ctrl.abort(); }, 180_000);   // 180s (라운드 여유)
+  // client disconnect → 진행 중인 Ollama fetch abort.
+  // res.writableFinished 는 res.end() 호출 후 true 가 됨. 우리가 아직 응답 안 끝낸 상태라면
+  // 'close' 는 진짜 클라이언트 단절. (express body parser 가 emit 하는 spurious close 는
+  //  대부분 응답 헤더 전이라서 첫 write 이후엔 안전.)
+  let aborted = false;
+  res.on("close", () => {
+    if (res.writableFinished) return;   // 우리가 정상 종료한 경우
+    if (aborted) return;
+    aborted = true;
+    console.log("[chat/stream] response closed early → abort");
+    try { ctrl.abort(); } catch {}
+  });
 
   try {
     for (let round = 0; round < MAX_ROUNDS; round++) {
