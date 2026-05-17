@@ -1,5 +1,7 @@
-// API client — FastAPI 백엔드(http://localhost:8000) 연동
-const BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+// API client — Mac Studio Express server.js 와 same-origin 통신
+//   기본은 빈 문자열 → 사이트를 서빙하는 같은 origin (/api/*) 호출
+//   개발 모드 (vite dev :5173) 에서는 VITE_API_BASE_URL=http://localhost:5050 권장
+const BASE = import.meta.env.VITE_API_BASE_URL || "";
 
 async function get(path) {
   const res = await fetch(`${BASE}${path}`, { signal: AbortSignal.timeout(8000) });

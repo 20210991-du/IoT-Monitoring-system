@@ -499,6 +499,80 @@ app.get("/api/alarms", dbRequired, async (req, res) => {
   }
 });
 
+// ── GET /api/anomalies — AI 탐지 (이상 의심 + 관찰) ──
+//   현재 LSTM 예측(ai_predictions) 미연동 → KSCG 알람 + 통신 두절로 임시 매핑.
+//   anomalies = 최근 7일 알람 발생 단말, watch = 24h 통신 두절 단말
+app.get("/api/anomalies", dbRequired, async (_req, res) => {
+  try {
+    // anomalies: 최근 7일 알람 → 위험·이상으로 매핑
+    const [anomalyRows] = await pool.query(`
+      SELECT
+        t.NAME AS node,
+        f.NUMBER AS facility,
+        a.GEN_DATE AS ts,
+        a.GRADE_ID AS gradeId,
+        g.GRADE_TEXT AS gradeText,
+        a.VALUE AS mse,
+        a.CONTENTS AS label
+      FROM kscg_alarm_log a
+      JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
+      JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = si.TRANSMITTER_ID
+      LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
+      LEFT JOIN kscg_alarm_grade_info g ON g.GRADE_ID = a.GRADE_ID
+      JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = si.TRANSMITTER_ID AND m.SITE_ID = ?
+      WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 30 DAY)
+      ORDER BY a.GEN_DATE DESC
+      LIMIT 20
+    `, [SITE_ID]);
+
+    // watch: 통신 24h 두절 단말
+    const [watchRows] = await pool.query(`
+      SELECT
+        t.NAME AS node, f.NUMBER AS facility,
+        MAX(r.DATE) AS lastSeen,
+        TIMESTAMPDIFF(HOUR, MAX(r.DATE), NOW()) AS hoursSilent
+      FROM kscg_transmitter_info t
+      JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
+      LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
+      JOIN kscg_sensor_info si ON si.TRANSMITTER_ID = t.TRANSMITTER_ID
+      LEFT JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID
+      GROUP BY t.TRANSMITTER_ID, t.NAME, f.NUMBER
+      HAVING hoursSilent >= 24
+      ORDER BY hoursSilent DESC
+      LIMIT 20
+    `, [SITE_ID]);
+
+    res.json({
+      ok: true,
+      anomalies: anomalyRows.map((r) => ({
+        node:  r.node,
+        zone:  zoneFromFacility(r.facility),
+        label: r.label,
+        mse:   r.mse,
+        threshold: -850,
+        contribution: [],
+        ts: r.ts,
+      })),
+      watch: watchRows.map((r) => ({
+        node:  r.node,
+        zone:  zoneFromFacility(r.facility),
+        label: `통신 두절 ${r.hoursSilent}h`,
+        mse:   r.hoursSilent,
+        threshold: 24,
+        contribution: [],
+      })),
+    });
+  } catch (err) {
+    console.error("[/api/anomalies]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── GET /api/insights — AI 조치 권고 (stub, ai_predictions 연동 전) ──
+app.get("/api/insights", (_req, res) => {
+  res.json({ ok: true, insights: [] });
+});
+
 // ── GET /api/sync-status — sync 상태 (관제용) ─────────
 app.get("/api/sync-status", dbRequired, async (_req, res) => {
   try {
