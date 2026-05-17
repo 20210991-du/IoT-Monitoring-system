@@ -253,14 +253,17 @@ function zoneFromFacility(num) {
   return m ? `제${m[1]}구역` : "-";
 }
 
-// 단말 status (DEVICE_STATUS + 최신 알람 + 통신 두절 24h+) 판정
-//   1=정상 / 0=중지 → 우리 frontend 의 normal/critical/warn/offline 매핑은
-//   별도 로직 (활성 alarm + 통신 단절 + LSTM 예측 등) 으로 보강.
-//   여기서는 1=normal, 0=offline 기본 매핑만.
-function mapStatus(deviceStatus, hoursSilent, activeAlarmCount) {
+// 단말 status 판정
+//   - offline  : 최근 측정 24h+ 없음 (진짜 통신 두절)
+//   - critical : 최근 7일 활성 알람 발생
+//   - warn     : (LSTM 예측 연동 후 확장 예정)
+//   - normal   : 그 외
+//
+// 주의: KSCG 의 DEVICE_STATUS 컬럼은 의미가 명확하지 않음 (시범 5대=1, 확대 50대=0).
+//       데이터 자체는 둘 다 정상 흐름이라 status 판정에 사용하지 않음.
+function mapStatus(_deviceStatus, hoursSilent, activeAlarmCount) {
   if (hoursSilent != null && hoursSilent >= 24) return "offline";
-  if (activeAlarmCount > 0) return "critical";  // 활성 알람 있으면 위험
-  if (deviceStatus === 0) return "offline";
+  if (activeAlarmCount > 0) return "critical";
   return "normal";
 }
 
