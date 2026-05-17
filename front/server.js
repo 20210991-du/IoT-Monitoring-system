@@ -485,9 +485,17 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// ── /api/chat/stream (SSE) ───────────────────────────
-// Ollama stream: true 응답을 토큰 단위로 SSE event 로 전달.
-// 클라이언트는 EventSource 또는 fetch + ReadableStream 으로 수신.
+// ── /api/chat/stream (SSE + Function Calling) ───────
+// 진짜 스트리밍 + tools 동시 지원.
+//   1 라운드: Ollama stream:true 로 호출 → delta 들 SSE 로 forward
+//   라운드 끝(done:true) 메시지에 tool_calls 있으면 → 실행 → result append → 다음 라운드
+//   tool_calls 없으면 최종 → `done` 이벤트 보내고 종료. 최대 MAX_ROUNDS 라운드.
+//
+// SSE events:
+//   - delta : { text }              모델이 토큰 생성한 조각
+//   - tool  : { round, name, args } 도구 호출 발생 알림 (UI 가 "조회 중..." 표시 가능)
+//   - done  : { reply, tokens, rounds, toolCalls }   최종 완성 답변
+//   - error : { message }
 app.post("/api/chat/stream", async (req, res) => {
   const { message, context = {}, history = [] } = req.body || {};
   if (!message || typeof message !== "string") {
@@ -512,76 +520,130 @@ app.post("/api/chat/stream", async (req, res) => {
     content: h.text,
   }));
 
-  const ollamaPayload = {
-    model: OLLAMA_MODEL,
-    messages: [
-      { role: "system", content: systemPrompt },
-      ...recent,
-      { role: "user", content: message },
-    ],
-    stream: true,
-    think: false,
-    options: { temperature: 0.3, num_predict: 800 },
-  };
+  const working = [
+    { role: "system", content: systemPrompt },
+    ...recent,
+    { role: "user", content: message },
+  ];
+
+  const MAX_ROUNDS = 5;
+  const toolTrace = [];
+  let finalAccum = "";
+  let lastTokens = { prompt: 0, completion: 0 };
+
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 180_000);   // 180s (라운드 여유)
+  req.on("close", () => { try { ctrl.abort(); } catch {} });
 
   try {
-    const ctrl = new AbortController();
-    const timeout = setTimeout(() => ctrl.abort(), 90_000);
-    const ollamaRes = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(ollamaPayload),
-      signal: ctrl.signal,
-    });
-    if (!ollamaRes.ok) {
-      const txt = await ollamaRes.text().catch(() => "");
-      send("error", { message: `Ollama HTTP ${ollamaRes.status}: ${txt}` });
-      clearTimeout(timeout);
-      return res.end();
-    }
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const ollamaRes = await fetch(`${OLLAMA_URL}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: OLLAMA_MODEL,
+          messages: working,
+          tools: TOOLS,
+          stream: true,
+          think: false,
+          options: { temperature: 0.3, num_predict: 1000 },
+        }),
+        signal: ctrl.signal,
+      });
+      if (!ollamaRes.ok) {
+        const txt = await ollamaRes.text().catch(() => "");
+        send("error", { message: `Ollama HTTP ${ollamaRes.status}: ${txt}` });
+        clearTimeout(timeout);
+        return res.end();
+      }
 
-    // ndjson 스트림 파싱
-    const reader = ollamaRes.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    let acc = "";
-    let tokens = { prompt: 0, completion: 0 };
+      // ndjson 파싱: 이번 라운드의 content 누적 + 마지막 chunk 에서 tool_calls 파악
+      const reader = ollamaRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let roundContent = "";
+      let toolCalls = [];
+      let roundDone = false;
 
-    // 클라이언트 disconnect 처리
-    req.on("close", () => {
-      try { ctrl.abort(); } catch {}
-    });
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        let obj;
-        try { obj = JSON.parse(line); } catch { continue; }
-        const piece = obj.message && obj.message.content;
-        if (piece) {
-          acc += piece;
-          send("delta", { text: piece });
-        }
-        if (obj.done) {
-          tokens = {
-            prompt: obj.prompt_eval_count,
-            completion: obj.eval_count,
-          };
-          send("done", { reply: acc.trim(), model: OLLAMA_MODEL, tokens });
+      while (!roundDone) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let obj;
+          try { obj = JSON.parse(line); } catch { continue; }
+          const msg = obj.message || {};
+          const piece = msg.content;
+          if (piece) {
+            roundContent += piece;
+            // tool_calls 가 동봉되지 않은 일반 delta 만 client 로 전송
+            // (tool_calls 가 같이 오는 라운드의 content 는 보통 비어있거나 짧은 preamble)
+            send("delta", { text: piece });
+          }
+          if (obj.done) {
+            roundDone = true;
+            lastTokens = {
+              prompt:    obj.prompt_eval_count    || lastTokens.prompt,
+              completion:obj.eval_count           || lastTokens.completion,
+            };
+            // 마지막 메시지에서 tool_calls 추출
+            if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+              toolCalls = msg.tool_calls;
+            }
+          }
         }
       }
+
+      // tool_calls 가 없으면 최종 답변
+      if (toolCalls.length === 0) {
+        finalAccum += roundContent;
+        send("done", {
+          reply:     finalAccum.trim(),
+          model:     OLLAMA_MODEL,
+          rounds:    round + 1,
+          toolCalls: toolTrace,
+          tokens:    lastTokens,
+        });
+        clearTimeout(timeout);
+        return res.end();
+      }
+
+      // tool_calls 가 있으면 실행 → result append → 다음 라운드
+      working.push({ role: "assistant", content: roundContent, tool_calls: toolCalls });
+      for (const tc of toolCalls) {
+        const name = tc.function?.name;
+        const args = tc.function?.arguments || {};
+        console.log(`[stream tool] round ${round + 1} → ${name}(${JSON.stringify(args)})`);
+        send("tool", { round: round + 1, name, args });
+        const result = await execTool(name, args);
+        const ok = !result?.error;
+        toolTrace.push({ round: round + 1, name, args, ok });
+        working.push({
+          role: "tool",
+          content: JSON.stringify(result),
+          tool_name: name,
+        });
+      }
     }
+
+    // MAX_ROUNDS 초과
+    send("done", {
+      reply: "(도구 호출 한도 초과 — 정보가 충분하지 않아 답변을 마무리하지 못했습니다.)",
+      model: OLLAMA_MODEL,
+      rounds: MAX_ROUNDS,
+      toolCalls: toolTrace,
+      tokens: lastTokens,
+    });
     clearTimeout(timeout);
     res.end();
   } catch (err) {
     console.error("[chat/stream] error:", err.message);
     send("error", { message: err.message });
+    clearTimeout(timeout);
     res.end();
   }
 });
