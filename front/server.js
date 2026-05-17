@@ -588,11 +588,14 @@ app.post("/api/chat/stream", async (req, res) => {
           let obj;
           try { obj = JSON.parse(line); } catch { continue; }
           const msg = obj.message || {};
+          // ★ Ollama 는 tool_calls 를 done:false chunk 에 넣음 (그 후 빈 done:true 가 옴).
+          //   chunk 어디서 오든 잡아 누적.
+          if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+            toolCalls.push(...msg.tool_calls);
+          }
           const piece = msg.content;
           if (piece) {
             roundContent += piece;
-            // tool_calls 가 동봉되지 않은 일반 delta 만 client 로 전송
-            // (tool_calls 가 같이 오는 라운드의 content 는 보통 비어있거나 짧은 preamble)
             send("delta", { text: piece });
           }
           if (obj.done) {
@@ -601,10 +604,6 @@ app.post("/api/chat/stream", async (req, res) => {
               prompt:    obj.prompt_eval_count    || lastTokens.prompt,
               completion:obj.eval_count           || lastTokens.completion,
             };
-            // 마지막 메시지에서 tool_calls 추출
-            if (Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
-              toolCalls = msg.tool_calls;
-            }
           }
         }
       }
