@@ -1437,6 +1437,48 @@ app.get("/api/insights", (_req, res) => {
   res.json({ ok: true, insights: [] });
 });
 
+// ── GET /api/admin/tool-stats — 도구 호출 통계 (audit_log 집계) ──
+app.get("/api/admin/tool-stats", dbRequired, async (req, res) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days || "7", 10), 1), 90);
+    const [rows] = await pool.query(`
+      SELECT target_id AS tool,
+             COUNT(*) AS calls,
+             SUM(JSON_EXTRACT(metadata_json, '$.ok') = true) AS ok,
+             SUM(JSON_EXTRACT(metadata_json, '$.cached') = true) AS cached,
+             AVG(JSON_EXTRACT(metadata_json, '$.durationMs')) AS avgMs,
+             MAX(JSON_EXTRACT(metadata_json, '$.durationMs')) AS maxMs
+      FROM audit_log
+      WHERE action = 'tool_call'
+        AND created_at > DATE_SUB(NOW(), INTERVAL ? DAY)
+      GROUP BY target_id
+      ORDER BY calls DESC
+    `, [days]);
+    const totals = rows.reduce((a, r) => {
+      a.calls  += Number(r.calls)  || 0;
+      a.ok     += Number(r.ok)     || 0;
+      a.cached += Number(r.cached) || 0;
+      return a;
+    }, { calls: 0, ok: 0, cached: 0 });
+    res.json({
+      ok: true,
+      days,
+      totals,
+      tools: rows.map((r) => ({
+        tool:   r.tool,
+        calls:  Number(r.calls)  || 0,
+        ok:     Number(r.ok)     || 0,
+        cached: Number(r.cached) || 0,
+        avgMs:  r.avgMs != null ? Math.round(Number(r.avgMs)) : null,
+        maxMs:  r.maxMs != null ? Math.round(Number(r.maxMs)) : null,
+      })),
+    });
+  } catch (err) {
+    console.error("[/api/admin/tool-stats]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── 챗봇 세션 관리 ───────────────────────────────────
 // GET    /api/chat/sessions          — 세션 목록 (최근 30)
 // GET    /api/chat/sessions/:id      — 세션 + 메시지
@@ -1666,6 +1708,7 @@ ${trendBlock}
 2. **[추정] 라벨** — 도구 데이터로 직접 확인되지 않은 결론(원인 추측, 향후 예측 등)은 반드시 [추정] 머리표를 붙임. 예: "[추정] 토양 동결로 인한 변화로 보입니다."
 3. **확인 불가는 정직히** — 도구 결과가 비어있거나 error 면 "데이터 없음" 으로 답변. 절대 만들어내지 말 것.
 4. **숫자 + 단위** — mV, dBm, %, ℃ 등 단위 빠뜨리지 말 것.
+5. **도구 적극 활용** — 작은 의심에도 도구 호출로 fact 검증. 한 응답에 도구 여러 개 연쇄 호출 가능 (예: list_devices → 결과 중 한 단말 get_device_detail).
 
 
 
