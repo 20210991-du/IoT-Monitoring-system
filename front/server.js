@@ -609,16 +609,26 @@ app.listen(PORT, () => {
 // 시스템 프롬프트 (도메인 지식 + 실시간 시스템 상태 주입)
 // ─────────────────────────────────────────────────────
 function buildSystemPrompt(ctx) {
-  const counts        = ctx.counts || {};
-  const criticalNodes = ctx.criticalNodes || [];
-  const warnNodes     = ctx.warnNodes || [];
-  const offlineNodes  = ctx.offlineNodes || [];
-  const trends        = ctx.trends || [];
-  const nowText       = ctx.nowText || "현재";
-  const weather       = ctx.weather; // null 가능
+  const counts          = ctx.counts || {};
+  const criticalNodes   = ctx.criticalNodes || [];
+  const warnNodes       = ctx.warnNodes || [];
+  const offlineNodes    = ctx.offlineNodes || [];
+  const offlineDetails  = ctx.offlineDetails || [];   // 신규: 마지막 측정 시각 + 두절 시간
+  const trends          = ctx.trends || [];
+  const nowText         = ctx.nowText || "현재";
+  const weather         = ctx.weather; // null 가능
 
   const summaryLine =
     `전체 ${counts.all ?? 0}대 / 정상 ${counts.normal ?? 0} · 위험 ${counts.critical ?? 0} · 이상 의심 ${counts.warn ?? 0} · 통신 장애 ${counts.offline ?? 0}`;
+
+  // 통신 두절 상세 (마지막 측정 시각 + 끊긴 시간)
+  const offlineBlock = offlineDetails.length === 0 ? "" :
+    offlineDetails.map((o) => {
+      const last = o.updatedAt ? new Date(o.updatedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" }) : "확인 불가";
+      const hrs  = o.hoursSilent != null ? o.hoursSilent : "?";
+      const days = o.hoursSilent != null ? Math.floor(o.hoursSilent / 24) : "?";
+      return `  · ${o.deviceId} (${o.zone || "-"}, ${o.location || "-"}): 마지막 측정 ${last} · 두절 ${hrs}시간 (≈${days}일)`;
+    }).join("\n");
 
   // 날씨 라인 (있을 때만)
   const weatherLine = weather
@@ -669,6 +679,7 @@ ${criticalNodes.length ? `- 위험 노드: ${criticalNodes.join(", ")}` : "- 위
 ${warnNodes.length    ? `- 이상 의심 노드(상위 ${Math.min(warnNodes.length, 8)}): ${warnNodes.slice(0, 8).join(", ")}` : "- 이상 의심 노드: 없음"}
 ${offlineNodes.length ? `- 통신 장애 노드: ${offlineNodes.join(", ")}` : ""}
 
+${offlineBlock ? `# 통신 장애 노드 상세 (마지막 측정 시각 + 두절 기간)\n${offlineBlock}\n` : ""}
 # 최근 12시간 MSE 추이 (1시간 간격, 가장 오래된 → 현재)
 ${trendBlock}
 
@@ -676,9 +687,10 @@ ${trendBlock}
 1. **간결** — 2~5문장. 인사말·사과 절대 금지. 바로 본론.
 2. **노드 ID 인용** — 위 상태/추이 표에 있는 노드 ID 를 그대로 답변에 포함.
 3. **추이 표는 시간 데이터** — 위 "최근 12시간 MSE 추이" 표가 곧 과거 데이터입니다. "과거 시점 정보가 없다" 는 답변 절대 금지. 표의 12개 값이 1시간 간격이므로 "약 N시간 전" 표현 가능.
-4. **환각 금지** — 표에 없는 데이터(예: 12시간 이전, 다른 센서 시계열)만 "확인되지 않음".
-5. **운영 친화** — 가능하면 "현장 점검 권장" 등 짧은 액션 한 줄.
-6. **포맷** — 마크다운 헤더(##) X. **굵게**(**TB24-5JN011**) 정도만.
+4. **통신 장애 시점** — "통신 장애 노드 상세" 섹션에 마지막 측정 시각과 두절 기간이 명시되어 있습니다. "언제 끊겼는지 모름" 답변 절대 금지. 마지막 측정 시각 = 통신 두절 시작 시점으로 보고 답변하세요.
+5. **환각 금지** — 위 표·섹션에 없는 데이터만 "확인되지 않음".
+6. **운영 친화** — 가능하면 "현장 점검 권장" 등 짧은 액션 한 줄.
+7. **포맷** — 마크다운 헤더(##) X. **굵게**(**TB24-5JN011**) 정도만.
 
 # 응답 예시 (이대로 따라할 것)
 
@@ -692,6 +704,10 @@ ${trendBlock}
 질문: "TB24-5JN042 추세는?"
 좋은 답변:
 > **TB24-5JN042** 의 MSE 는 12시간 전 0.41 → 현재 0.84 로 지속 상승 중입니다. 임계 0.85 직전이라 즉각 점검을 권장합니다.
+
+질문: "통신 장애는 언제부터 발생함?"
+좋은 답변:
+> **TB24-250429** 의 마지막 측정이 2026-04-28 01:00 입니다. 그 이후 480시간(약 20일) 통신 두절 상태로, 4/28 새벽에 단절된 것으로 보입니다. 현장 점검 (전원·안테나·맨홀 침수 확인) 즉시 필요합니다.
 
 질문: "방식전위"
 좋은 답변:
