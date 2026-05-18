@@ -15,11 +15,57 @@
 
 import express from "express";
 import path from "path";
+import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import mysql from "mysql2/promise";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
+
+// ── AI 설정 로드 (이두현 학습 결과) ────────────────
+// ai/config/device_thresholds.json  — 단말별 99 percentile MSE
+// ai/config/model_config.json       — 시퀀스 길이·피처·희생전류 단말 등
+// ai/config/eval_metrics.json       — 학습 시점 평가 통계
+let DEVICE_THRESHOLDS = {};   // { "TB24-250401": 0.00106..., ... }
+let MODEL_CONFIG = null;
+let EVAL_METRICS = null;
+{
+  const aiDir = path.join(__dirname, "..", "ai", "config");
+  const load = (file, fallback) => {
+    try {
+      const fp = path.join(aiDir, file);
+      if (existsSync(fp)) return JSON.parse(readFileSync(fp, "utf8"));
+    } catch (e) { console.warn(`[AI config ${file}]`, e.message); }
+    return fallback;
+  };
+  DEVICE_THRESHOLDS = load("device_thresholds.json", {});
+  MODEL_CONFIG      = load("model_config.json", null);
+  EVAL_METRICS      = load("eval_metrics.json", null);
+  console.log(`▶ AI cfg  thresholds=${Object.keys(DEVICE_THRESHOLDS).length}대 · model_config=${MODEL_CONFIG ? "OK" : "X"} · eval_metrics=${EVAL_METRICS ? "OK" : "X"}`);
+}
+
+// 단말 위험도 판정 (이두현 명세 — threshold 의 70%/100% 분기)
+//   정상  : mse < threshold × 0.70
+//   관찰  : threshold × 0.70 ≤ mse ≤ threshold × 1.00
+//   이상  : mse > threshold × 1.00
+function classifyMse(deviceId, mse) {
+  const th = DEVICE_THRESHOLDS[deviceId];
+  if (th == null || !Number.isFinite(Number(mse))) return null;
+  const ratio = Number(mse) / th;
+  let level = "정상";
+  if (ratio > 1.0) level = "이상";
+  else if (ratio >= 0.7) level = "관찰";
+  return {
+    deviceId,
+    threshold: th,
+    threshold70: Number((th * 0.7).toFixed(6)),
+    threshold100: Number(th.toFixed(6)),
+    mse: Number(Number(mse).toFixed(6)),
+    ratio: Number(ratio.toFixed(3)),
+    ratioPercent: Number((ratio * 100).toFixed(1)),
+    level,
+  };
+}
 
 const PORT         = process.env.PORT          || 5050;
 const OLLAMA_URL   = process.env.OLLAMA_URL    || "http://localhost:11434";
@@ -90,6 +136,7 @@ const CACHEABLE_TOOLS = new Set([
   "get_aggregate", "get_zone_summary", "compare_devices",
   "find_devices_by_value", "get_predictions",
   "search_devices_by_location", "geocode_location", "find_devices_near",
+  "get_ai_model_info",
 ]);
 
 // Haversine 거리 (km). 두 좌표 사이 대권 거리.
@@ -389,6 +436,19 @@ const TOOLS = [
         required: ["lat", "lng"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_ai_model_info",
+      description: "AI 모델 메타 (LSTM AutoEncoder 학습 정보). deviceId 주면 그 단말의 threshold + 분류 기준 반환. 없으면 전체 모델 config + 평가 통계. '이 단말 정상 한계는?', 'AI 모델 어떻게 학습됐어?' 등.",
+      parameters: {
+        type: "object",
+        properties: {
+          deviceId: { type: "string", description: "단말 ID. 없으면 전체 모델 메타" }
+        }
+      }
+    }
   }
 ];
 
@@ -512,6 +572,14 @@ async function execToolInternal(name, args) {
           if (s.measuredAt && (!lastMeasured || s.measuredAt > lastMeasured)) lastMeasured = s.measuredAt;
         }
         const hoursSilent = lastMeasured ? Math.floor((Date.now() - new Date(lastMeasured).getTime()) / 3600000) : null;
+        // AI threshold (있을 때만)
+        const aiTh = DEVICE_THRESHOLDS[deviceId];
+        const ai = aiTh != null ? {
+          threshold: aiTh,
+          threshold70: Number((aiTh * 0.7).toFixed(6)),
+          threshold100: Number(aiTh.toFixed(6)),
+          isSacrificial: MODEL_CONFIG?.sacrificial_devices?.includes(deviceId) || false,
+        } : null;
         return {
           ...meta[0],
           zone: zoneFromFacility(meta[0]?.facility),
@@ -519,6 +587,7 @@ async function execToolInternal(name, args) {
           lastMeasured,
           hoursSilent,
           status: hoursSilent != null && hoursSilent >= 24 ? "offline" : "normal",
+          ai,
         };
       }
 
@@ -835,13 +904,33 @@ async function execToolInternal(name, args) {
         sql += ` ORDER BY p.predicted_at DESC LIMIT ${limit}`;
         const [rows] = await pool.query(sql, params);
         if (rows.length === 0) {
+          // ai_predictions 비어있을 때 device_thresholds.json 정보로 fallback
+          const deviceId = args.deviceId;
+          if (deviceId && DEVICE_THRESHOLDS[deviceId] != null) {
+            const th = DEVICE_THRESHOLDS[deviceId];
+            return {
+              count: 0,
+              stub: true,
+              deviceId,
+              threshold: th,
+              threshold70: Number((th * 0.7).toFixed(6)),
+              threshold100: Number(th.toFixed(6)),
+              message: `LSTM 실시간 예측 MSE 는 아직 INSERT 안 됨. 그러나 학습 시점 threshold 는 알려진 값: ${th.toExponential(3)} (정상 한계). 실측 MSE 가 ${(th*0.7).toExponential(2)} 미만이면 정상, ${(th*0.7).toExponential(2)}~${th.toExponential(2)} 이면 관찰, 초과면 이상.`,
+            };
+          }
           return {
             count: 0,
-            message: "AI 예측 데이터 없음 (이두현 LSTM 백엔드 INSERT 대기 중 — 2026-05-18 기준)",
             stub: true,
+            message: "AI 예측 데이터 없음 (이두현 LSTM 백엔드 INSERT 대기). 단말별 threshold 는 get_ai_model_info(deviceId) 로 조회 가능.",
+            thresholdsAvailable: Object.keys(DEVICE_THRESHOLDS).length,
           };
         }
-        return { count: rows.length, predictions: rows };
+        // 실데이터 있을 때 — classifyMse 자동 적용해서 level 추가
+        const enriched = rows.map((r) => ({
+          ...r,
+          classification: r.mse != null && r.deviceId ? classifyMse(r.deviceId, r.mse) : null,
+        }));
+        return { count: enriched.length, predictions: enriched };
       }
 
       // 위치/지명 키워드 검색 (POSITION + facility number LIKE)
@@ -913,6 +1002,59 @@ async function execToolInternal(name, args) {
         } catch (e) {
           return { error: `geocode 실패: ${e.message}` };
         }
+      }
+
+      // AI 모델 메타 + 단말 threshold
+      case "get_ai_model_info": {
+        if (!MODEL_CONFIG && !Object.keys(DEVICE_THRESHOLDS).length) {
+          return { error: "AI 설정 파일을 로드하지 못했습니다 (ai/config/*.json)" };
+        }
+        const deviceId = args.deviceId;
+        if (deviceId) {
+          const th = DEVICE_THRESHOLDS[deviceId];
+          if (th == null) return { deviceId, error: `해당 단말 threshold 없음 (학습 대상 아님)` };
+          const isSacrificial = MODEL_CONFIG?.sacrificial_devices?.includes(deviceId) || false;
+          return {
+            deviceId,
+            threshold: th,
+            threshold70: Number((th * 0.7).toFixed(6)),
+            threshold100: Number(th.toFixed(6)),
+            isSacrificial,
+            note: `정상=MSE<${(th*0.7).toExponential(2)}, 관찰=${(th*0.7).toExponential(2)}~${th.toExponential(2)}, 이상=>${th.toExponential(2)}. MSE 는 LSTM AE 복원 오차.`,
+            modelConfig: MODEL_CONFIG ? {
+              timeSteps: MODEL_CONFIG.time_steps,
+              baseFeatures: MODEL_CONFIG.base_features,
+              commQualityThresholdDbm: MODEL_CONFIG.comm_quality_threshold_dbm,
+            } : null,
+          };
+        }
+        // 전체 메타
+        const allThresholds = Object.values(DEVICE_THRESHOLDS);
+        const avgTh = allThresholds.length ? allThresholds.reduce((a, b) => a + b, 0) / allThresholds.length : null;
+        const maxTh = allThresholds.length ? Math.max(...allThresholds) : null;
+        const minTh = allThresholds.length ? Math.min(...allThresholds) : null;
+        return {
+          model: "LSTM AutoEncoder",
+          deviceCount: Object.keys(DEVICE_THRESHOLDS).length,
+          thresholdStats: {
+            avg: avgTh != null ? Number(avgTh.toExponential(3)) : null,
+            max: maxTh != null ? Number(maxTh.toExponential(3)) : null,
+            min: minTh != null ? Number(minTh.toExponential(3)) : null,
+          },
+          modelConfig: MODEL_CONFIG,
+          evalMetrics: EVAL_METRICS,
+          classification: {
+            정상: "MSE < threshold × 0.70",
+            관찰: "threshold × 0.70 ≤ MSE ≤ threshold × 1.00",
+            이상: "MSE > threshold × 1.00",
+          },
+          training: {
+            time_steps: MODEL_CONFIG?.time_steps,
+            epochs: 50,
+            thresholdPercentile: 99,
+            note: "정상 데이터만 학습, AutoEncoder 복원 오차로 이상 탐지",
+          },
+        };
       }
 
       // 좌표 + 반경 검색 (Haversine 거리)
@@ -1829,10 +1971,18 @@ function buildSystemPrompt(ctx) {
 
 # 도메인 지식
 - **방식전위(P/S Potential)**: 매설배관 부식 보호 지표. -850mV 이하 양호, 초과 시 부식 진행 가능.
-- **희생전류(Sacrificial Current)**: 희생양극→배관 보호 전류. 점차 감소 시 양극 소모/접속부 불량. 1mA 이하 교체 검토.
+- **희생전류(Sacrificial Current)**: 희생양극→배관 보호 전류. 점차 감소 시 양극 소모/접속부 불량. 1mA 이하 교체 검토. (희생양극 단말은 TB24-250406, TB24-250407 2대만 해당)
 - **AC 유입**: 송전선·전철 유도 교류. 200mV 이상 가속 부식, 500mV 이상 즉각 차폐/배수장치 점검.
-- **통신 품질(dBm)**: -65 이상 양호, -75 이하 주의, -85 이하 두절 임박.
-- **MSE 임계**: 0.85 이상 = 위험(즉각 조치), 0.28~0.85 = 이상 의심(추세 모니터링).
+- **통신 품질(dBm)**: -65 이상 양호, -75 이하 주의, -85 이하 두절 임박, -115 이하 두절.
+
+# AI 모델 (LSTM AutoEncoder) — 위험도 판정 정확 명세
+- 모델은 단말별로 학습한 **정상 패턴 복원 오차(MSE)** 로 이상 탐지
+- 단말마다 **threshold** 가 다름 (학습 시점 정상 MSE 분포의 99 percentile). 자세한 값은 **get_ai_model_info(deviceId)** 도구로 조회
+- **3단계 분류 (비율 기준)**:
+  - **정상** — 현재 MSE < threshold × 0.70
+  - **관찰** — threshold × 0.70 ≤ 현재 MSE ≤ threshold × 1.00
+  - **이상** — 현재 MSE > threshold × 1.00
+- 답변 시 가능하면 "현재 MSE 가 threshold 의 N% 도달" 같이 비율로 설명 (절대값 단독은 의미 약함)
 
 # 위험 단계 (5단계)
 - 정상 / 위험(즉각 현장 점검) / 이상 의심 / 통신 장애
@@ -1858,7 +2008,7 @@ ${offlineBlock ? `# 통신 장애 노드 상세 (마지막 측정 시각 + 두�
 # 최근 12시간 MSE 추이 (1시간 간격, 가장 오래된 → 현재)
 ${trendBlock}
 
-# 도구(Tools) 사용 가이드 — 15 개 도구
+# 도구(Tools) 사용 가이드 — 16 개 도구
 위 "현재 시스템 상태" 와 "12h MSE 추이" 에 이미 있는 정보면 그대로 답변. 없는 정보(특정 단말 상세, 시리얼/설치일/위경도, 시계열 추이, 알람 이력 등)는 아래 도구를 직접 호출해서 조회:
 
 **기본 조회 (6)**
@@ -1881,6 +2031,9 @@ ${trendBlock}
 - **search_devices_by_location** — 지명 키워드로 단말 검색 (DB POSITION LIKE). "미룡동", "시청 앞", "버스터미널" 같은 DB 텍스트 매칭 가능한 경우 1차 시도.
 - **geocode_location** — 지명/랜드마크 → 좌표 (OpenStreetMap). 일반 지명(예: '은파호수공원', '군산교도소') 으로 좌표 모를 때.
 - **find_devices_near** — 좌표 + 반경(km) 안 단말. geocode 결과 받아서 사용. 반경 기본 2km.
+
+**AI 모델 (1)**
+- **get_ai_model_info** — LSTM AutoEncoder 학습 정보. deviceId 주면 그 단말 threshold + 분류 기준, 없으면 전체 모델 메타(학습 피처, time_steps, 평가 통계 등). "AI 어떻게 학습됐어?", "TB24-XXX 정상 한계는?" 류.
 
 위치 질문 흐름 (중요):
 1. "OO 단말" / "OO 앞 단말" → search_devices_by_location 1회로 충분한 경우 多
