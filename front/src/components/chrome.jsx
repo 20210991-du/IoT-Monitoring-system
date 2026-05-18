@@ -499,7 +499,7 @@ const API_STATUS_STYLE = {
   error:   { dot: "var(--err)",  text: "오프라인",   textColor: "var(--err)"   },
 };
 
-export function SubNav({ tab, setTab, apiStatus = "mock", user, pendingCount = 0 }) {
+export function SubNav({ tab, setTab, apiStatus = "mock", user, pendingCount = 0, demoMode = false, onToggleDemo }) {
   const weather = useWeather();
   const baseTabs = [
     { k: "dashboard", ko: "대시보드" },
@@ -547,6 +547,41 @@ export function SubNav({ tab, setTab, apiStatus = "mock", user, pendingCount = 0
         );
       })}
       <div style={{ flex: 1 }} />
+      {/* 데모 모드 배지 (ON 일 때만) */}
+      {demoMode && (
+        <span style={{
+          display: "inline-flex", alignItems: "center", gap: 5,
+          padding: "0 10px", height: 22, marginRight: 12, alignSelf: "center",
+          borderRadius: 11, fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5,
+          background: "linear-gradient(135deg, #ef4444, #dc2626)", color: "#fff",
+          boxShadow: "0 2px 6px rgba(239,68,68,0.45)",
+          animation: "pulse-dot 1.6s infinite",
+        }}>
+          🧪 DEMO MODE
+        </span>
+      )}
+      {/* 데모 모드 토글 (운영자만 보임 — viewer 도 OK) */}
+      {onToggleDemo && (
+        <button
+          onClick={onToggleDemo}
+          title={demoMode ? "데모 모드 끄기 (실데이터)" : "데모 모드 켜기 (가상 장비 10대 추가)"}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "0 10px", height: 24, marginRight: 16, alignSelf: "center",
+            borderRadius: 6, fontSize: 11, fontWeight: 700,
+            background: demoMode ? "rgba(239,68,68,0.12)" : "transparent",
+            border: `1px solid ${demoMode ? "rgba(239,68,68,0.45)" : "var(--line)"}`,
+            color: demoMode ? "#dc2626" : "var(--ink-3)",
+            cursor: "pointer",
+          }}
+        >
+          <span style={{
+            width: 8, height: 8, borderRadius: "50%",
+            background: demoMode ? "#ef4444" : "var(--ink-4)",
+          }} />
+          {demoMode ? "DEMO ON" : "DEMO OFF"}
+        </button>
+      )}
       <span style={{
         display: "flex", alignItems: "center", gap: 6,
         fontSize: 11, fontWeight: 700, color: st.textColor,

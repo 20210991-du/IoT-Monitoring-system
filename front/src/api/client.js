@@ -3,8 +3,17 @@
 //   개발 모드 (vite dev :5173) 에서는 VITE_API_BASE_URL=http://localhost:5050 권장
 const BASE = import.meta.env.VITE_API_BASE_URL || "";
 
+// 데모 모드 플래그 (App.jsx 에서 setApiDemoMode 로 갱신)
+let DEMO_FLAG = false;
+export function setApiDemoMode(on) { DEMO_FLAG = !!on; }
+export function getApiDemoMode() { return DEMO_FLAG; }
+function withDemo(path) {
+  if (!DEMO_FLAG) return path;
+  return path + (path.includes("?") ? "&" : "?") + "demo=1";
+}
+
 async function get(path) {
-  const res = await fetch(`${BASE}${path}`, { signal: AbortSignal.timeout(8000) });
+  const res = await fetch(`${BASE}${withDemo(path)}`, { signal: AbortSignal.timeout(8000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -15,7 +24,7 @@ export const fetchAnomalies = () => get("/api/anomalies");
 export const fetchInsights  = () => get("/api/insights");
 
 export async function predictDevice(deviceId) {
-  const res = await fetch(`${BASE}/api/predict/${deviceId}`, {
+  const res = await fetch(`${BASE}${withDemo(`/api/predict/${deviceId}`)}`, {
     method: "POST",
     signal: AbortSignal.timeout(15000),
   });

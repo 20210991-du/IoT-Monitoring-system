@@ -78,6 +78,127 @@ const SIWON_DB_PASS = process.env.SIWON_DB_PASS || "";
 const SIWON_DB_NAME = process.env.SIWON_DB_NAME || "siwon";
 const SITE_ID       = parseInt(process.env.SITE_ID || "2", 10);  // 군산도시가스
 
+// ─────────────────────────────────────────────────────
+// 데모 모드 — 발표/시연용 가상 장비 10대 (메모리 only, DB INSERT 안 함)
+//   토글 OFF 시 흔적 제로 / ON 시 KPI·지도·표·챗봇 모두에 추가 표시.
+//   클라이언트: GET ?demo=1 또는 POST body { demo: true }
+// ─────────────────────────────────────────────────────
+function isDemoMode(req) {
+  if (!req) return false;
+  if (req.query && String(req.query.demo) === "1") return true;
+  if (req.body && req.body.demo === true) return true;
+  return false;
+}
+
+// 시간 마커 — lastMeasured 가 호출 시점 기준 N시간 전 timestamp 가 되도록
+function nowMinusH(h) { return new Date(Date.now() - h * 3600_000).toISOString().slice(0, 19).replace("T", " "); }
+
+// 가상 장비 10대 (DB 충돌 회피용 음수 TRANSMITTER_ID).
+//   위험 3 + 이상의심 4 + 통신장애 3.
+//   좌표·시설번호·POSITION 모두 군산 자연스러운 위치로.
+function getDemoDevices() {
+  return [
+    // ── 위험 3대 (critical: 최근 알람 발생) ──
+    { deviceId: "DEMO-001", txid: -1, facility: "1-DEMO01", location: "시청 사거리 (데모)",
+      lat: 35.9676, lng: 126.7369, hoursSilent: 2, recentAlarms: 3, status: "critical",
+      sensors: { volt: -540, sacrificial: 0.6, ac: 312, battery: 3580, temp: 28.4, hum: 71, shock: 0, commDbm: -88 },
+      lastMeasured: nowMinusH(2),
+      mse: 0.0042, threshold: 0.0011, riskLevel: "위험", aiReliability: "신뢰" },
+    { deviceId: "DEMO-002", txid: -2, facility: "2-DEMO02", location: "대야 사거리 (데모)",
+      lat: 35.962, lng: 126.745, hoursSilent: 1, recentAlarms: 5, status: "critical",
+      sensors: { volt: -480, sacrificial: 0.3, ac: 540, battery: 3520, temp: 30.1, hum: 68, shock: 1, commDbm: -82 },
+      lastMeasured: nowMinusH(1),
+      mse: 0.0061, threshold: 0.0013, riskLevel: "위험", aiReliability: "신뢰" },
+    { deviceId: "DEMO-003", txid: -3, facility: "8-DEMO03", location: "소룡동 공단 입구 (데모)",
+      lat: 35.985, lng: 126.700, hoursSilent: 1, recentAlarms: 2, status: "critical",
+      sensors: { volt: -620, sacrificial: 0.8, ac: 280, battery: 3610, temp: 27.8, hum: 70, shock: 0, commDbm: -85 },
+      lastMeasured: nowMinusH(1),
+      mse: 0.0038, threshold: 0.0011, riskLevel: "위험", aiReliability: "신뢰" },
+    // ── 이상의심 4대 (warn) ──
+    { deviceId: "DEMO-101", txid: -101, facility: "4-DEMO11", location: "미룡동 교차로 (데모)",
+      lat: 35.937, lng: 126.696, hoursSilent: 1, recentAlarms: 0, status: "warn",
+      sensors: { volt: -780, sacrificial: 0.9, ac: 195, battery: 3700, temp: 26.5, hum: 65, shock: 0, commDbm: -78 },
+      lastMeasured: nowMinusH(1),
+      mse: 0.0019, threshold: 0.0011, riskLevel: "이상", aiReliability: "주의" },
+    { deviceId: "DEMO-102", txid: -102, facility: "9-DEMO12", location: "해망동 박물관 앞 (데모)",
+      lat: 35.990, lng: 126.704, hoursSilent: 1, recentAlarms: 0, status: "warn",
+      sensors: { volt: -810, sacrificial: 1.1, ac: 175, battery: 3680, temp: 27.0, hum: 67, shock: 0, commDbm: -76 },
+      lastMeasured: nowMinusH(1),
+      mse: 0.0016, threshold: 0.0011, riskLevel: "이상", aiReliability: "주의" },
+    { deviceId: "DEMO-103", txid: -103, facility: "3-DEMO13", location: "소룡동 현대자동차 옆 (데모)",
+      lat: 35.983, lng: 126.682, hoursSilent: 2, recentAlarms: 0, status: "warn",
+      sensors: { volt: -795, sacrificial: 1.0, ac: 188, battery: 3690, temp: 27.5, hum: 66, shock: 0, commDbm: -79 },
+      lastMeasured: nowMinusH(2),
+      mse: 0.0015, threshold: 0.0011, riskLevel: "이상", aiReliability: "주의" },
+    { deviceId: "DEMO-104", txid: -104, facility: "8-DEMO14", location: "대야 버스터미널 옆 (데모)",
+      lat: 35.946, lng: 126.810, hoursSilent: 1, recentAlarms: 0, status: "warn",
+      sensors: { volt: -805, sacrificial: 1.2, ac: 180, battery: 3675, temp: 27.2, hum: 68, shock: 0, commDbm: -77 },
+      lastMeasured: nowMinusH(1),
+      mse: 0.0014, threshold: 0.0011, riskLevel: "관찰", aiReliability: "주의" },
+    // ── 통신장애 3대 (offline) ──
+    { deviceId: "DEMO-201", txid: -201, facility: "1-DEMO21", location: "새만금방조제 5공구 (데모)",
+      lat: 35.819, lng: 126.477, hoursSilent: 72, recentAlarms: 0, status: "offline",
+      sensors: { volt: -1850, sacrificial: 0.8, ac: 95, battery: 3450, temp: 26.0, hum: 72, shock: 0, commDbm: -118 },
+      lastMeasured: nowMinusH(72),
+      mse: null, threshold: 0.0011, riskLevel: "관찰", aiReliability: "신뢰불가" },
+    { deviceId: "DEMO-202", txid: -202, facility: "8-DEMO22", location: "조촌동 (데모)",
+      lat: 35.975, lng: 126.741, hoursSilent: 120, recentAlarms: 0, status: "offline",
+      sensors: { volt: -1920, sacrificial: 0.9, ac: 102, battery: 3480, temp: 26.5, hum: 70, shock: 0, commDbm: -120 },
+      lastMeasured: nowMinusH(120),
+      mse: null, threshold: 0.0011, riskLevel: "관찰", aiReliability: "신뢰불가" },
+    { deviceId: "DEMO-203", txid: -203, facility: "9-DEMO23", location: "해망동 굴 입구 (데모)",
+      lat: 35.991, lng: 126.703, hoursSilent: 200, recentAlarms: 0, status: "offline",
+      sensors: { volt: -1880, sacrificial: 0.7, ac: 88, battery: 3420, temp: 26.2, hum: 73, shock: 0, commDbm: -119 },
+      lastMeasured: nowMinusH(200),
+      mse: null, threshold: 0.0011, riskLevel: "관찰", aiReliability: "신뢰불가" },
+  ];
+}
+
+// 데모 알람 (위험 3대 + 충격 1건)
+function getDemoAlarms() {
+  return [
+    { occurredAt: nowMinusH(2),  grade: "위험", gradeId: 1, deviceId: "DEMO-001", facility: "1-DEMO01", value: 312, contents: "AC 유입 임계 초과 (200mV)" },
+    { occurredAt: nowMinusH(1),  grade: "위험", gradeId: 1, deviceId: "DEMO-002", facility: "2-DEMO02", value: 540, contents: "AC 유입 임계 초과 (500mV 즉각 점검)" },
+    { occurredAt: nowMinusH(3),  grade: "경고", gradeId: 2, deviceId: "DEMO-002", facility: "2-DEMO02", value: 1,   contents: "충격 센서 감지" },
+    { occurredAt: nowMinusH(1),  grade: "위험", gradeId: 1, deviceId: "DEMO-003", facility: "8-DEMO03", value: -620, contents: "방식전위 -850 mV 미달 (부식 진행 가능)" },
+  ];
+}
+
+// 데모 시계열 — deviceId + kind 의 해시 기반 시드된 가짜 데이터 (재현 가능)
+function generateDemoHistory(deviceId, kind, hours) {
+  // deviceId+kind 해시 → mulberry32 시드
+  let seed = 0;
+  for (const ch of deviceId + kind) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
+  let s = seed >>> 0;
+  const rng = () => {
+    s |= 0; s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  // 도구 종류별 기본값·변동폭
+  const base = { volt: -650, sacrificial: 0.6, ac: 350, battery: 3550, temp: 28, hum: 70, commDbm: -85 }[kind] || 0;
+  const swing = { volt: 80, sacrificial: 0.2, ac: 100, battery: 50, temp: 2, hum: 5, commDbm: 5 }[kind] || 1;
+  const points = [];
+  const now = Date.now();
+  const stepMs = (hours * 3600_000) / Math.min(hours, 100);
+  const count = Math.min(hours, 100);
+  for (let i = 0; i < count; i++) {
+    const t = new Date(now - (count - i) * stepMs).toISOString().slice(0, 19).replace("T", " ");
+    const v = base + (rng() - 0.5) * 2 * swing;
+    points.push({ t, v: Number(v.toFixed(2)) });
+  }
+  return points;
+}
+
+// 데모 단말 ID 빠른 룩업
+function findDemoDevice(deviceId) {
+  return getDemoDevices().find((d) => d.deviceId === deviceId) || null;
+}
+function findDemoDeviceByTxid(txid) {
+  return getDemoDevices().find((d) => d.txid === txid) || null;
+}
+
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
@@ -471,10 +592,11 @@ async function getTransmitterIdByName(deviceId) {
 // execTool: wrapper — 캐시 hit / 실행 / 캐시 store / audit_log INSERT.
 //   캐시 가능한 도구만 캐시 (CACHEABLE_TOOLS).
 //   audit_log 는 모든 도구 (best-effort).
-async function execTool(name, args) {
+//   demoMode: 가상 장비 포함 여부. cache key 에 포함되어 demo/real 응답 분리.
+async function execTool(name, args, demoMode = false) {
   args = args || {};
   const cacheable = CACHEABLE_TOOLS.has(name);
-  const key = cacheable ? `${name}:${JSON.stringify(args)}` : null;
+  const key = cacheable ? `${name}:${demoMode ? "D" : "R"}:${JSON.stringify(args)}` : null;
   if (cacheable) {
     const cached = toolCacheGet(key);
     if (cached) {
@@ -483,7 +605,7 @@ async function execTool(name, args) {
     }
   }
   const t0 = Date.now();
-  const result = await execToolInternal(name, args);
+  const result = await execToolInternal(name, args, demoMode);
   const dt = Date.now() - t0;
   if (cacheable && !result?.error) toolCacheSet(key, result);
   logToolCall(name, args, !result?.error, dt, false);
@@ -491,7 +613,7 @@ async function execTool(name, args) {
 }
 
 // execToolInternal: 실제 도구 실행. switch dispatcher.
-async function execToolInternal(name, args) {
+async function execToolInternal(name, args, demoMode = false) {
   if (!pool) return { error: "DB pool 비활성" };
   try {
     switch (name) {
@@ -500,6 +622,12 @@ async function execToolInternal(name, args) {
       //         그래서 SQL 단에서 LIMIT 걸면 안 됨 → 전체 가져온 뒤 filter → slice.
       case "list_devices": {
         const limit = Math.min(Number(args.limit) || 20, 60);
+        // 데모 모드 단말 — 실제와 동일 shape 로 prepend (위험·warn·offline 우선 노출 위해)
+        const demoRows = demoMode ? getDemoDevices().map((d) => ({
+          deviceId: d.deviceId, facility: d.facility, location: d.location,
+          deviceStatus: 1, lastSeen: d.lastMeasured, recentAlarms: d.recentAlarms,
+          hoursSilent: d.hoursSilent, status: d.status, demo: true,
+        })) : [];
         let sql = `
           SELECT t.NAME AS deviceId, f.NUMBER AS facility, f.POSITION AS location,
                  t.DEVICE_STATUS AS deviceStatus,
@@ -534,11 +662,14 @@ async function execToolInternal(name, args) {
                        : "normal";
           return { ...r, hoursSilent, recentAlarms, status };
         });
-        const filtered = annotated.filter((r) => !args.status || args.status === "all" || r.status === args.status);
+        // 데모 단말은 status 가 이미 fixed → annotated 와 합쳐서 필터
+        const combined = [...demoRows, ...annotated];
+        const filtered = combined.filter((r) => !args.status || args.status === "all" || r.status === args.status);
         return {
-          totalScanned: annotated.length,
+          totalScanned: combined.length,
           count: Math.min(filtered.length, limit),
           devices: filtered.slice(0, limit),
+          demoMode,
         };
       }
 
@@ -546,6 +677,23 @@ async function execToolInternal(name, args) {
       case "get_device_detail": {
         const deviceId = args.deviceId;
         if (!deviceId) return { error: "deviceId 필수" };
+        // 데모 단말 우선 룩업
+        if (demoMode && deviceId.startsWith("DEMO-")) {
+          const d = findDemoDevice(deviceId);
+          if (!d) return { error: `데모 단말 없음: ${deviceId}` };
+          return {
+            deviceId: d.deviceId, serial: `DEMO-SER-${Math.abs(d.txid)}`, installDate: null,
+            deviceStatus: 1, periodSec: 3600,
+            facility: d.facility, location: d.location, lat: d.lat, lng: d.lng,
+            zone: zoneFromFacility(d.facility),
+            sensors: d.sensors,
+            lastMeasured: d.lastMeasured,
+            hoursSilent: d.hoursSilent,
+            status: d.status,
+            mse: d.mse, threshold: d.threshold, riskLevel: d.riskLevel, aiReliability: d.aiReliability,
+            demo: true,
+          };
+        }
         const txid = await getTransmitterIdByName(deviceId);
         if (!txid) return { error: `단말 없음: ${deviceId}` };
         const [meta] = await pool.query(`
@@ -598,6 +746,12 @@ async function execToolInternal(name, args) {
         const range    = args.range || "24h";
         const seq      = SENSOR_SEQ_KIND.indexOf(kind) + 1;
         if (seq < 1) return { error: `unknown kind: ${kind}` };
+        // 데모 단말 — seeded mock 시계열
+        if (demoMode && deviceId.startsWith("DEMO-")) {
+          const hours = range === "1h" ? 1 : range === "7d" ? 168 : range === "30d" ? 720 : 24;
+          const points = generateDemoHistory(deviceId, kind, hours);
+          return { deviceId, kind, range, count: points.length, sampled: points.length, points, demo: true };
+        }
         const txid = await getTransmitterIdByName(deviceId);
         if (!txid) return { error: `단말 없음: ${deviceId}` };
         const sensorId = await findSensorId(txid, seq);
@@ -637,7 +791,12 @@ async function execToolInternal(name, args) {
           WHERE ${where.join(" AND ")}
           ORDER BY a.GEN_DATE DESC LIMIT ${limit}
         `, params);
-        return { count: rows.length, alarms: rows };
+        // 데모 알람 prepend (최근순)
+        const demoAlarms = demoMode
+          ? getDemoAlarms().filter((a) => !args.gradeId || a.gradeId === Number(args.gradeId)).slice(0, limit)
+          : [];
+        const merged = [...demoAlarms, ...rows].slice(0, limit);
+        return { count: merged.length, alarms: merged, demoMode };
       }
 
       // KPI 카운트
@@ -666,6 +825,19 @@ async function execToolInternal(name, args) {
         const all = Number(total.all_) || 0;
         const offline = Number(silent.offline) || 0;
         const critical = Number(alm.critical) || 0;
+        // 데모 가산
+        if (demoMode) {
+          const d = getDemoDevices();
+          const dC = d.filter((x) => x.status === "critical").length;
+          const dW = d.filter((x) => x.status === "warn").length;
+          const dO = d.filter((x) => x.status === "offline").length;
+          return {
+            total: all + d.length,
+            normal: all - offline - critical,
+            critical: critical + dC, warn: dW, offline: offline + dO,
+            demoMode: true,
+          };
+        }
         return { total: all, normal: all - offline - critical, critical, warn: 0, offline };
       }
 
@@ -688,6 +860,17 @@ async function execToolInternal(name, args) {
           ) = ?
         `, [SITE_ID, seq]);
         const v = rows[0].result;
+        // 데모: DEMO_DEVICES sensors[metric] 합쳐서 재계산
+        if (demoMode) {
+          const demoVals = getDemoDevices().map((d) => d.sensors[metric]).filter((x) => x != null && isFinite(x));
+          if (demoVals.length > 0) {
+            const allVals = v != null ? [Number(v)].concat(demoVals) : demoVals;
+            // op 별 재계산 (실 v 는 이미 op 적용된 값이지만, DEMO 합쳐서 단순 op)
+            const merged = { avg: allVals.reduce((a, b) => a + b, 0) / allVals.length,
+                             max: Math.max(...allVals), min: Math.min(...allVals) }[op];
+            return { metric, op, result: Number(merged.toFixed(2)), demoMode: true };
+          }
+        }
         return { metric, op, result: v != null ? Number(v.toFixed(2)) : null };
       }
 
@@ -718,18 +901,23 @@ async function execToolInternal(name, args) {
           ORDER BY r.VALUE ${orderAsc}
           LIMIT ?
         `, [SITE_ID, seq, threshold, limit]);
-        return {
-          metric, op, threshold,
-          count: rows.length,
-          devices: rows.map((r) => ({
-            deviceId: r.deviceId,
-            facility: r.facility,
-            zone:     zoneFromFacility(r.facility),
-            location: r.location,
-            value:    r.value != null ? Number(Number(r.value).toFixed(2)) : null,
-            measuredAt: r.measuredAt,
-          })),
-        };
+        // 데모 단말도 조건 매칭
+        const cmp = { gte: (a,b)=>a>=b, lte: (a,b)=>a<=b, eq: (a,b)=>a===b, gt: (a,b)=>a>b, lt: (a,b)=>a<b }[op] || ((a,b)=>a>=b);
+        const demoMatches = demoMode
+          ? getDemoDevices()
+              .filter((d) => d.sensors[metric] != null && cmp(d.sensors[metric], threshold))
+              .map((d) => ({ deviceId: d.deviceId, facility: d.facility, zone: zoneFromFacility(d.facility),
+                location: d.location, value: Number(Number(d.sensors[metric]).toFixed(2)), measuredAt: d.lastMeasured, demo: true }))
+          : [];
+        const realMatches = rows.map((r) => ({
+          deviceId: r.deviceId, facility: r.facility, zone: zoneFromFacility(r.facility),
+          location: r.location, value: r.value != null ? Number(Number(r.value).toFixed(2)) : null,
+          measuredAt: r.measuredAt,
+        }));
+        const all = [...demoMatches, ...realMatches]
+          .sort((a, b) => (op === "lte" || op === "lt") ? a.value - b.value : b.value - a.value)
+          .slice(0, limit);
+        return { metric, op, threshold, count: all.length, devices: all, demoMode };
       }
 
       // 구역 요약
@@ -777,13 +965,35 @@ async function execToolInternal(name, args) {
             AND (SELECT COUNT(*) FROM kscg_sensor_info si2 WHERE si2.TRANSMITTER_ID = si.TRANSMITTER_ID AND si2.SENSOR_ID <= si.SENSOR_ID) = 8
         `, [txids]);
 
+        // 데모 단말 — facility prefix 의 첫 숫자가 zoneNum 와 일치하면 추가
+        let dNormal = 0, dCrit = 0, dOff = 0, dVolts = [], dRssi = [];
+        if (demoMode) {
+          for (const d of getDemoDevices()) {
+            const m2 = String(d.facility).match(/^(\d+)/);
+            if (!m2 || m2[1] !== zoneNum) continue;
+            if (d.status === "offline") dOff++;
+            else if (d.status === "critical") dCrit++;
+            else dNormal++;
+            if (d.sensors.volt    != null) dVolts.push(d.sensors.volt);
+            if (d.sensors.commDbm != null) dRssi.push(d.sensors.commDbm);
+          }
+        }
+        const realVolt = volt.avg != null ? Number(volt.avg) : null;
+        const realRssi = rssi.avg != null ? Number(rssi.avg) : null;
+        const avgVolt = dVolts.length || realVolt != null
+          ? Number(((realVolt != null ? realVolt * rows.length : 0) + dVolts.reduce((a,b)=>a+b,0)) / (rows.length + dVolts.length || 1)).toFixed(2)
+          : null;
+        const avgRssi = dRssi.length || realRssi != null
+          ? Number(((realRssi != null ? realRssi * rows.length : 0) + dRssi.reduce((a,b)=>a+b,0)) / (rows.length + dRssi.length || 1)).toFixed(2)
+          : null;
         return {
           zone: `제${zoneNum}구역`,
-          count: rows.length,
-          normal, critical, offline,
-          avgVolt: volt.avg != null ? Number(Number(volt.avg).toFixed(2)) : null,
-          avgRssi: rssi.avg != null ? Number(Number(rssi.avg).toFixed(2)) : null,
+          count: rows.length + dNormal + dCrit + dOff,
+          normal: normal + dNormal, critical: critical + dCrit, offline: offline + dOff,
+          avgVolt: avgVolt != null ? Number(avgVolt) : null,
+          avgRssi: avgRssi != null ? Number(avgRssi) : null,
           devices: rows.slice(0, 10).map((r) => r.deviceId),    // 미리보기 10대만
+          demoMode,
         };
       }
 
@@ -793,6 +1003,11 @@ async function execToolInternal(name, args) {
         if (ids.length === 0) return { error: "deviceIds (배열) 필수" };
         const results = [];
         for (const id of ids) {
+          // 데모 단말 우선 룩업
+          if (demoMode && id.startsWith("DEMO-")) {
+            const d = findDemoDevice(id);
+            if (d) { results.push({ deviceId: id, sensors: d.sensors, lastMeasured: d.lastMeasured, demo: true }); continue; }
+          }
           const txid = await getTransmitterIdByName(id);
           if (!txid) { results.push({ deviceId: id, error: "단말 없음" }); continue; }
           const [sensors] = await pool.query(`
@@ -812,7 +1027,7 @@ async function execToolInternal(name, args) {
           }
           results.push({ deviceId: id, sensors: sensorVals, lastMeasured });
         }
-        return { count: results.length, devices: results };
+        return { count: results.length, devices: results, demoMode };
       }
 
       // 최근 N시간 변화 통계
@@ -822,6 +1037,25 @@ async function execToolInternal(name, args) {
         const hours = Math.min(Math.max(Number(args.hours) || 24, 1), 720);
         const seq = SENSOR_SEQ_KIND.indexOf(kind) + 1;
         if (seq < 1) return { error: `unknown kind: ${kind}` };
+        // 데모 단말 — seeded mock 시계열 통계
+        if (demoMode && deviceId.startsWith("DEMO-")) {
+          const points = generateDemoHistory(deviceId, kind, hours);
+          const vals = points.map((p) => p.v);
+          const first = vals[0], last = vals[vals.length - 1];
+          const mn = Math.min(...vals), mx = Math.max(...vals);
+          const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+          const std = Math.sqrt(vals.reduce((s, v) => s + (v - mean) ** 2, 0) / vals.length);
+          const delta = last - first, pct = first !== 0 ? (delta / Math.abs(first)) * 100 : 0;
+          return {
+            deviceId, kind, hours, count: vals.length,
+            start: Number(first.toFixed(2)), end: Number(last.toFixed(2)),
+            delta: Number(delta.toFixed(2)), percentChange: Number(pct.toFixed(1)),
+            min: Number(mn.toFixed(2)), max: Number(mx.toFixed(2)),
+            mean: Number(mean.toFixed(2)), std: Number(std.toFixed(2)),
+            direction: delta > 0.01 ? "상승" : delta < -0.01 ? "하락" : "평탄",
+            demo: true,
+          };
+        }
         const txid = await getTransmitterIdByName(deviceId);
         if (!txid) return { error: `단말 없음: ${deviceId}` };
         const sensorId = await findSensorId(txid, seq);
@@ -930,6 +1164,20 @@ async function execToolInternal(name, args) {
           ...r,
           classification: r.mse != null && r.deviceId ? classifyMse(r.deviceId, r.mse) : null,
         }));
+        // 데모 단말 예측 합치기
+        if (demoMode) {
+          const demoPreds = getDemoDevices()
+            .filter((d) => !args.deviceId || d.deviceId === args.deviceId)
+            .map((d) => ({
+              txid: d.txid, deviceId: d.deviceId, predictedAt: d.lastMeasured,
+              mse: d.mse, threshold: d.threshold,
+              riskLevel: d.riskLevel, commStatus: d.status === "offline" ? "통신고장" : "정상통신",
+              aiReliability: d.aiReliability, isSacrificial: 0,
+              classification: { level: d.riskLevel, ratio: d.mse != null ? Number((d.mse / d.threshold).toFixed(3)) : null },
+              demo: true,
+            }));
+          return { count: enriched.length + demoPreds.length, predictions: [...demoPreds, ...enriched], demoMode };
+        }
         return { count: enriched.length, predictions: enriched };
       }
 
@@ -955,19 +1203,22 @@ async function execToolInternal(name, args) {
           LIMIT ${limit}
         `;
         const [rows] = await pool.query(sql, params);
-        return {
-          query,
-          count: rows.length,
-          devices: rows.map((r) => ({
-            deviceId: r.deviceId,
-            facility: r.facility,
-            zone:     zoneFromFacility(r.facility),
-            location: r.location,
-            lat:      r.lat,
-            lng:      r.lng,
-            lastSeen: r.lastSeen,
-          })),
-        };
+        const realDevs = rows.map((r) => ({
+          deviceId: r.deviceId, facility: r.facility, zone: zoneFromFacility(r.facility),
+          location: r.location, lat: r.lat, lng: r.lng, lastSeen: r.lastSeen,
+        }));
+        // 데모: location/facility/deviceId LIKE 매칭
+        const demoMatches = demoMode
+          ? getDemoDevices()
+              .filter((d) => tokens.every((tk) =>
+                String(d.location).includes(tk) || String(d.facility).includes(tk) || d.deviceId.includes(tk)))
+              .map((d) => ({
+                deviceId: d.deviceId, facility: d.facility, zone: zoneFromFacility(d.facility),
+                location: d.location, lat: d.lat, lng: d.lng, lastSeen: d.lastMeasured, demo: true,
+              }))
+          : [];
+        const out = [...demoMatches, ...realDevs].slice(0, limit);
+        return { query, count: out.length, devices: out, demoMode };
       }
 
       // 지명 → 좌표 (Nominatim, free OpenStreetMap)
@@ -1073,24 +1324,24 @@ async function execToolInternal(name, args) {
           LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
           WHERE f.LATITUDE IS NOT NULL AND f.LONGITUDE IS NOT NULL
         `, [SITE_ID]);
-        const withDist = rows.map((r) => ({
-          deviceId: r.deviceId,
-          facility: r.facility,
-          zone:     zoneFromFacility(r.facility),
-          location: r.location,
-          lat:      r.lat,
-          lng:      r.lng,
-          lastSeen: r.lastSeen,
+        const realDist = rows.map((r) => ({
+          deviceId: r.deviceId, facility: r.facility, zone: zoneFromFacility(r.facility),
+          location: r.location, lat: r.lat, lng: r.lng, lastSeen: r.lastSeen,
           distanceKm: Number(haversineKm(lat, lng, r.lat, r.lng).toFixed(3)),
-        })).filter((r) => r.distanceKm <= radiusKm)
-           .sort((a, b) => a.distanceKm - b.distanceKm)
-           .slice(0, limit);
-        return {
-          center: { lat, lng },
-          radiusKm,
-          count: withDist.length,
-          devices: withDist,
-        };
+        }));
+        const demoDist = demoMode
+          ? getDemoDevices().map((d) => ({
+              deviceId: d.deviceId, facility: d.facility, zone: zoneFromFacility(d.facility),
+              location: d.location, lat: d.lat, lng: d.lng, lastSeen: d.lastMeasured,
+              distanceKm: Number(haversineKm(lat, lng, d.lat, d.lng).toFixed(3)),
+              demo: true,
+            }))
+          : [];
+        const withDist = [...realDist, ...demoDist]
+          .filter((r) => r.distanceKm <= radiusKm)
+          .sort((a, b) => a.distanceKm - b.distanceKm)
+          .slice(0, limit);
+        return { center: { lat, lng }, radiusKm, count: withDist.length, devices: withDist, demoMode };
       }
 
       default:
@@ -1106,7 +1357,7 @@ async function execToolInternal(name, args) {
 //   - tool_calls 가 있으면 execTool 실행 후 messages 에 append → 다음 라운드
 //   - tool_calls 가 없으면 최종 응답 (content) 반환
 //   - toolTrace 로 어떤 도구가 호출됐는지 추적 (디버깅용)
-async function runChatWithTools(messages, signal) {
+async function runChatWithTools(messages, signal, demoMode = false) {
   const MAX_ROUNDS = 5;
   const working = [...messages];
   const toolTrace = [];
@@ -1141,8 +1392,8 @@ async function runChatWithTools(messages, signal) {
     for (const tc of toolCalls) {
       const name = tc.function?.name;
       const args = tc.function?.arguments || {};
-      console.log(`[tool] round ${round + 1} → ${name}(${JSON.stringify(args)})`);
-      const result = await execTool(name, args);
+      console.log(`[tool${demoMode ? " DEMO" : ""}] round ${round + 1} → ${name}(${JSON.stringify(args)})`);
+      const result = await execTool(name, args, demoMode);
       const ok = !result?.error;
       toolTrace.push({ round: round + 1, name, args, ok });
       working.push({
@@ -1187,11 +1438,12 @@ app.post("/api/chat", async (req, res) => {
 
   // 세션 영구화 (best-effort)
   const sid = await ensureChatSession(sessionId, message);
+  const demoMode = isDemoMode(req);
 
   try {
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), 120_000); // 120s (최대 5 tool 라운드 여유)
-    const result = await runChatWithTools(messages, ctrl.signal);
+    const result = await runChatWithTools(messages, ctrl.signal, demoMode);
     clearTimeout(timeout);
 
     const reply = (result.content || "(빈 응답)").trim();
@@ -1261,6 +1513,7 @@ app.post("/api/chat/stream", async (req, res) => {
   // 세션 영구화 (best-effort). 응답에 session 이벤트로 동봉.
   const sid = await ensureChatSession(sessionId, message);
   if (sid) send("session", { sessionId: sid });
+  const demoMode = isDemoMode(req);
 
   const MAX_ROUNDS = 5;
   const toolTrace = [];
@@ -1370,9 +1623,9 @@ app.post("/api/chat/stream", async (req, res) => {
       for (const tc of toolCalls) {
         const name = tc.function?.name;
         const args = tc.function?.arguments || {};
-        console.log(`[stream tool] round ${round + 1} → ${name}(${JSON.stringify(args)})`);
+        console.log(`[stream tool${demoMode ? " DEMO" : ""}] round ${round + 1} → ${name}(${JSON.stringify(args)})`);
         send("tool", { round: round + 1, name, args });
-        const result = await execTool(name, args);
+        const result = await execTool(name, args, demoMode);
         const ok = !result?.error;
         toolTrace.push({ round: round + 1, name, args, ok });
         working.push({
@@ -1436,8 +1689,9 @@ function mapStatus(_deviceStatus, hoursSilent, activeAlarmCount) {
 }
 
 // ── GET /api/summary — KPI 카운트 ─────────────────────
-app.get("/api/summary", dbRequired, async (_req, res) => {
+app.get("/api/summary", dbRequired, async (req, res) => {
   try {
+    const demoMode = isDemoMode(req);
     const [[counts]] = await pool.query(`
       SELECT
         COUNT(*) AS total,
@@ -1474,8 +1728,25 @@ app.get("/api/summary", dbRequired, async (_req, res) => {
     const total    = Number(counts.total) || 0;
     const offline  = Number(silent.offline) || 0;
     const critical = Number(alarmsRecent.critical) || 0;
-    const warn     = 0;  // TODO: LSTM 예측 → ai_predictions 연계 시 채우기
-    const normal   = total - offline - critical - warn;
+    let   warn     = 0;  // TODO: LSTM 예측 → ai_predictions 연계 시 채우기
+    let   normal   = total - offline - critical - warn;
+
+    // 데모 모드: 가상 장비 카운트 추가
+    let allCount = total;
+    if (demoMode) {
+      const demo = getDemoDevices();
+      const dCrit = demo.filter((d) => d.status === "critical").length;
+      const dWarn = demo.filter((d) => d.status === "warn").length;
+      const dOff  = demo.filter((d) => d.status === "offline").length;
+      allCount += demo.length;
+      return res.json({
+        ok: true, demoMode: true,
+        site_id: SITE_ID,
+        counts: {
+          all: allCount, normal, critical: critical + dCrit, warn: warn + dWarn, offline: offline + dOff,
+        },
+      });
+    }
 
     res.json({
       ok: true,
@@ -1489,8 +1760,9 @@ app.get("/api/summary", dbRequired, async (_req, res) => {
 });
 
 // ── GET /api/devices — 단말 55대 + 시설 + 최신 8 센서 ──
-app.get("/api/devices", dbRequired, async (_req, res) => {
+app.get("/api/devices", dbRequired, async (req, res) => {
   try {
+    const demoMode = isDemoMode(req);
     // 1. 단말 + 시설 메타
     const [devices] = await pool.query(`
       SELECT
@@ -1585,7 +1857,39 @@ app.get("/api/devices", dbRequired, async (_req, res) => {
       };
     });
 
-    res.json({ ok: true, site_id: SITE_ID, count: out.length, devices: out });
+    // 데모 모드: 가상 장비 10대 append
+    let finalOut = out;
+    if (demoMode) {
+      const demo = getDemoDevices().map((d) => ({
+        id:           d.txid,
+        deviceId:     d.deviceId,
+        facilityId:   d.facility,
+        zone:         zoneFromFacility(d.facility),
+        location:     d.location,
+        lat:          d.lat,
+        lng:          d.lng,
+        installDate:  null,
+        periodSec:    3600,
+        deviceStatus: 1,
+        status:       d.status,
+        volt:         d.sensors.volt,
+        sacrificial:  d.sensors.sacrificial,
+        ac:           d.sensors.ac,
+        battery:      d.sensors.battery,
+        temp:         d.sensors.temp,
+        hum:          d.sensors.hum,
+        shock:        d.sensors.shock,
+        commDbm:      d.sensors.commDbm,
+        commOk:       d.sensors.commDbm != null && d.sensors.commDbm > -115,
+        updatedAt:    d.lastMeasured,
+        hoursSilent:  d.hoursSilent,
+        recentAlarms: d.recentAlarms,
+        demo:         true,
+      }));
+      finalOut = [...out, ...demo];
+    }
+
+    res.json({ ok: true, demoMode, site_id: SITE_ID, count: finalOut.length, devices: finalOut });
   } catch (err) {
     console.error("[/api/devices]", err);
     res.status(500).json({ ok: false, error: err.message });
@@ -1596,13 +1900,26 @@ app.get("/api/devices", dbRequired, async (_req, res) => {
 //   query: range=1h|24h|7d  (default 24h)  kind=volt|ac|temp|hum|... (default volt)
 app.get("/api/devices/:id/history", dbRequired, async (req, res) => {
   try {
-    const id      = parseInt(req.params.id, 10);
+    const demoMode = isDemoMode(req);
+    const idRaw   = req.params.id;
+    const id      = parseInt(idRaw, 10);
     const range   = req.query.range || "24h";
     const kind    = req.query.kind  || "volt";
     const seq     = SENSOR_SEQ_KIND.indexOf(kind) + 1;
     if (seq < 1) return res.status(400).json({ ok: false, error: `unknown kind: ${kind}` });
 
     const hours   = range === "1h" ? 1 : range === "7d" ? 168 : 24;
+
+    // 데모 단말 (id 가 음수 또는 DEMO-* deviceId 면)
+    if (demoMode && (id < 0 || String(idRaw).startsWith("DEMO-"))) {
+      const demoDev = id < 0 ? findDemoDeviceByTxid(id) : findDemoDevice(idRaw);
+      if (!demoDev) return res.status(404).json({ ok: false, error: "데모 단말 없음" });
+      const points = generateDemoHistory(demoDev.deviceId, kind, hours);
+      return res.json({
+        ok: true, demo: true, device_id: id, deviceId: demoDev.deviceId,
+        kind, unit: "", range, count: points.length, points,
+      });
+    }
 
     // 단말의 해당 seq SENSOR_ID 찾기 (단말당 SENSOR_ID 정렬 후 seq 번째)
     const [sensorRows] = await pool.query(`
@@ -1637,6 +1954,7 @@ app.get("/api/devices/:id/history", dbRequired, async (req, res) => {
 //   query: limit=20 (default), days=7 (default)
 app.get("/api/alarms", dbRequired, async (req, res) => {
   try {
+    const demoMode = isDemoMode(req);
     const limit = Math.min(parseInt(req.query.limit || "20", 10), 100);
     const days  = parseInt(req.query.days  || "7", 10);
     const [rows] = await pool.query(`
@@ -1663,7 +1981,19 @@ app.get("/api/alarms", dbRequired, async (req, res) => {
       ORDER BY a.GEN_DATE DESC
       LIMIT ?
     `, [days, limit]);
-    res.json({ ok: true, count: rows.length, alarms: rows });
+    // 데모 알람 prepend
+    let merged = rows;
+    if (demoMode) {
+      const demoAl = getDemoAlarms().map((a, i) => ({
+        id: -100 - i, occurredAt: a.occurredAt, sentAt: a.occurredAt,
+        gradeId: a.gradeId, gradeText: a.grade, sensorId: null,
+        deviceId: a.deviceId, facilityNum: a.facility,
+        value: a.value, contents: a.contents, status: 0, notifyType: "DEMO",
+        demo: true,
+      }));
+      merged = [...demoAl, ...rows].slice(0, limit);
+    }
+    res.json({ ok: true, count: merged.length, alarms: merged, demoMode });
   } catch (err) {
     console.error("[/api/alarms]", err);
     res.status(500).json({ ok: false, error: err.message });
@@ -1673,8 +2003,9 @@ app.get("/api/alarms", dbRequired, async (req, res) => {
 // ── GET /api/anomalies — AI 탐지 (이상 의심 + 관찰) ──
 //   현재 LSTM 예측(ai_predictions) 미연동 → KSCG 알람 + 통신 두절로 임시 매핑.
 //   anomalies = 최근 7일 알람 발생 단말, watch = 24h 통신 두절 단말
-app.get("/api/anomalies", dbRequired, async (_req, res) => {
+app.get("/api/anomalies", dbRequired, async (req, res) => {
   try {
+    const demoMode = isDemoMode(req);
     // anomalies: 최근 7일 알람 → 위험·이상으로 매핑
     const [anomalyRows] = await pool.query(`
       SELECT
@@ -1713,9 +2044,26 @@ app.get("/api/anomalies", dbRequired, async (_req, res) => {
       LIMIT 20
     `, [SITE_ID]);
 
+    // 데모 anomalies (위험 3 + warn 4 = 7) / watch (offline 3)
+    let demoAnomalies = [], demoWatch = [];
+    if (demoMode) {
+      const dd = getDemoDevices();
+      demoAnomalies = dd.filter((d) => d.status === "critical" || d.status === "warn").map((d) => ({
+        node: d.deviceId, zone: zoneFromFacility(d.facility),
+        label: d.riskLevel, mse: d.mse, threshold: d.threshold,
+        contribution: [], ts: d.lastMeasured, demo: true,
+      }));
+      demoWatch = dd.filter((d) => d.status === "offline").map((d) => ({
+        node: d.deviceId, zone: zoneFromFacility(d.facility),
+        label: `통신 두절 ${d.hoursSilent}h`, mse: d.hoursSilent, threshold: 24,
+        contribution: [], demo: true,
+      }));
+    }
+
     res.json({
       ok: true,
-      anomalies: anomalyRows.map((r) => ({
+      demoMode,
+      anomalies: [...demoAnomalies, ...anomalyRows.map((r) => ({
         node:  r.node,
         zone:  zoneFromFacility(r.facility),
         label: r.label,
@@ -1723,15 +2071,15 @@ app.get("/api/anomalies", dbRequired, async (_req, res) => {
         threshold: -850,
         contribution: [],
         ts: r.ts,
-      })),
-      watch: watchRows.map((r) => ({
+      }))],
+      watch: [...demoWatch, ...watchRows.map((r) => ({
         node:  r.node,
         zone:  zoneFromFacility(r.facility),
         label: `통신 두절 ${r.hoursSilent}h`,
         mse:   r.hoursSilent,
         threshold: 24,
         contribution: [],
-      })),
+      }))],
     });
   } catch (err) {
     console.error("[/api/anomalies]", err);
@@ -1855,9 +2203,26 @@ app.delete("/api/chat/sessions/:id", dbRequired, async (req, res) => {
 //   id 파라미터는 TRANSMITTER_ID 숫자.
 app.post("/api/predict/:id", dbRequired, async (req, res) => {
   try {
-    const txid = parseInt(req.params.id, 10);
+    const demoMode = isDemoMode(req);
+    const idRaw = req.params.id;
+    const txid = parseInt(idRaw, 10);
     if (!Number.isFinite(txid)) {
       return res.status(400).json({ ok: false, error: "id 는 숫자(TRANSMITTER_ID) 여야 합니다" });
+    }
+    // 데모 단말 (음수 txid)
+    if (demoMode && txid < 0) {
+      const d = findDemoDeviceByTxid(txid);
+      if (!d) return res.status(404).json({ ok: false, error: "데모 단말 없음" });
+      return res.json({
+        ok: true,
+        prediction: {
+          id: txid, predicted_at: d.lastMeasured, mse: d.mse, threshold: d.threshold,
+          risk_level: d.riskLevel, comm_status: d.status === "offline" ? "통신고장" : "정상통신",
+          ai_reliability: d.aiReliability, feature_contributions: null,
+          is_sacrificial_device: 0, deviceId: d.deviceId,
+        },
+        demo: true,
+      });
     }
     const [rows] = await pool.query(`
       SELECT p.id, p.predicted_at, p.mse, p.threshold,
