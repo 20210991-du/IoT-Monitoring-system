@@ -2390,12 +2390,13 @@ app.post("/api/admin/propose-tools", dbRequired, async (req, res) => {
     const minOccurrences = Math.max(parseInt(req.body?.minOccurrences || 2, 10), 1);
 
     // 최근 N일 execute_safe_sql 호출 수집
+    // 주의: mysql2 prepared statement 는 INTERVAL ? DAY 안 됨. days 는 parseInt+clamp 후 직접 삽입.
     const [rows] = await pool.query(`
       SELECT metadata_json, created_at FROM audit_log
       WHERE action='tool_call' AND target_id='execute_safe_sql'
-        AND created_at > DATE_SUB(NOW(), INTERVAL ? DAY)
+        AND created_at > DATE_SUB(NOW(), INTERVAL ${days} DAY)
       ORDER BY created_at DESC LIMIT 200
-    `, [days]);
+    `);
     const sqls = rows
       .map((r) => {
         try {
