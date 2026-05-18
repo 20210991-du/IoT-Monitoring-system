@@ -104,6 +104,7 @@ export function Admin({ user, equipment, anomalies, watch, apiStatus }) {
         <div style={{ display: "flex", gap: 4, borderBottom: "1px solid var(--line)" }}>
           <SubTabBtn k="overview"  cur={section} set={setSection} label="요약" />
           <SubTabBtn k="operators" cur={section} set={setSection} label="운영자 관리" badge={counts.pending} />
+          <SubTabBtn k="chatbot"   cur={section} set={setSection} label="챗봇 통계" />
           <SubTabBtn k="settings"  cur={section} set={setSection} label="시스템 설정" />
         </div>
       </div>
@@ -123,6 +124,9 @@ export function Admin({ user, equipment, anomalies, watch, apiStatus }) {
             user={user} users={users} counts={counts}
             reload={reload} setToast={setToast}
           />
+        )}
+        {section === "chatbot" && (
+          <ChatbotStatsSection setToast={setToast} />
         )}
         {section === "settings" && (
           <SettingsSection apiStatus={apiStatus} setToast={setToast} />
@@ -1015,6 +1019,171 @@ function ResetPasswordModal({ target, pw, setPw, error, done, onGenerate, onConf
               >재설정</button>
             </div>
           </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────
+// 4) 챗봇 통계 — /api/admin/tool-stats + /api/chat/sessions 시각화
+// ─────────────────────────────────────────────────────
+function ChatbotStatsSection({ setToast }) {
+  const [stats, setStats] = useState(null);
+  const [sessions, setSessions] = useState([]);
+  const [days, setDays] = useState(7);
+  const [loading, setLoading] = useState(false);
+
+  const load = async (d = days) => {
+    setLoading(true);
+    try {
+      const [a, b] = await Promise.all([
+        fetch(`/api/admin/tool-stats?days=${d}`).then((r) => r.json()),
+        fetch(`/api/chat/sessions`).then((r) => r.json()),
+      ]);
+      if (a.ok) setStats(a);
+      if (b.ok) setSessions(b.sessions || []);
+    } catch (e) {
+      setToast && setToast({ kind: "error", text: `로드 실패: ${e.message}` });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(days); /* eslint-disable-line */ }, [days]);
+
+  const tools = stats?.tools || [];
+  const totals = stats?.totals || { calls: 0, ok: 0, cached: 0 };
+  const maxCalls = Math.max(1, ...tools.map((t) => t.calls));
+  const successRate = totals.calls > 0 ? Math.round((totals.ok / totals.calls) * 100) : 0;
+  const cacheRate   = totals.calls > 0 ? Math.round((totals.cached / totals.calls) * 100) : 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* 상단 KPI + 기간 토글 */}
+      <div style={{ display: "flex", gap: 12, alignItems: "stretch", justifyContent: "space-between" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, flex: 1 }}>
+          <KpiCard label="총 도구 호출"   value={totals.calls.toLocaleString()} hint={`최근 ${days}일`} tone="brand" />
+          <KpiCard label="성공률"        value={`${successRate}%`}    hint={`${totals.ok}/${totals.calls}`} tone="ok" />
+          <KpiCard label="캐시 hit"     value={`${cacheRate}%`}      hint={`${totals.cached}회`} tone="warn" />
+          <KpiCard label="대화 세션"    value={sessions.length}     hint="저장된 챗봇 대화" tone="anomaly" />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+          <div style={{ fontSize: 10, color: "var(--ink-4)" }}>기간</div>
+          <div style={{ display: "flex", gap: 4 }}>
+            {[1, 7, 30].map((d) => (
+              <button
+                key={d}
+                onClick={() => setDays(d)}
+                style={{
+                  padding: "4px 12px", fontSize: 11, fontWeight: 600,
+                  borderRadius: 6,
+                  border: "1px solid var(--line)",
+                  background: days === d ? "var(--brand)" : "transparent",
+                  color: days === d ? "#fff" : "var(--ink-3)",
+                  cursor: "pointer",
+                }}
+              >{d}일</button>
+            ))}
+            <button
+              onClick={() => load(days)}
+              title="새로고침"
+              style={{
+                padding: "4px 10px", fontSize: 11,
+                borderRadius: 6, border: "1px solid var(--line)",
+                background: "transparent", color: "var(--ink-3)", cursor: "pointer",
+              }}
+            ><Icons.refresh size={11} /></button>
+          </div>
+        </div>
+      </div>
+
+      {/* 도구별 호출 막대 + 통계 */}
+      <div style={{ background: "var(--bg-elev)", border: "1px solid var(--line)", borderRadius: 12, padding: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+          <Icons.activity size={14} color="var(--brand)" />
+          도구별 호출 통계 ({tools.length} 도구)
+        </div>
+        {loading && <div style={{ color: "var(--ink-4)", fontSize: 12 }}>로딩 중...</div>}
+        {!loading && tools.length === 0 && (
+          <div style={{ color: "var(--ink-4)", fontSize: 12 }}>해당 기간 도구 호출 없음</div>
+        )}
+        {!loading && tools.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {tools.map((t) => {
+              const pct = (t.calls / maxCalls) * 100;
+              const fail = t.calls - t.ok;
+              return (
+                <div key={t.tool} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{
+                    width: 200, fontSize: 11, fontWeight: 600,
+                    fontFamily: "JetBrains Mono, ui-monospace, monospace",
+                    color: "var(--ink-2)",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}>{t.tool}</div>
+                  <div style={{ flex: 1, position: "relative", height: 22, background: "var(--bg)", borderRadius: 4, border: "1px solid var(--line)", overflow: "hidden" }}>
+                    <div style={{
+                      width: `${pct}%`, height: "100%",
+                      background: fail > 0
+                        ? "linear-gradient(90deg, rgba(239,68,68,0.4) 0%, var(--brand) 100%)"
+                        : "linear-gradient(90deg, rgba(79,70,229,0.5) 0%, var(--brand) 100%)",
+                      transition: "width 220ms",
+                    }} />
+                    <div style={{
+                      position: "absolute", top: 0, left: 8, height: "100%",
+                      display: "flex", alignItems: "center",
+                      fontSize: 10, fontWeight: 700, color: pct > 30 ? "#fff" : "var(--ink-2)",
+                    }}>{t.calls.toLocaleString()}</div>
+                  </div>
+                  <div style={{ width: 120, display: "flex", gap: 8, fontSize: 10, color: "var(--ink-4)" }}>
+                    <span title="평균 응답시간">⏱ {t.avgMs ?? "-"}ms</span>
+                    {t.cached > 0 && <span title="캐시 hit">💾 {t.cached}</span>}
+                    {fail > 0 && <span style={{ color: "#dc2626" }} title="실패">⚠ {fail}</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 최근 대화 세션 */}
+      <div style={{ background: "var(--bg-elev)", border: "1px solid var(--line)", borderRadius: 12, padding: 20 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+          <Icons.sparkle size={14} color="var(--brand)" />
+          최근 챗봇 대화 (상위 {Math.min(sessions.length, 15)})
+        </div>
+        {sessions.length === 0 && (
+          <div style={{ color: "var(--ink-4)", fontSize: 12 }}>저장된 세션 없음</div>
+        )}
+        {sessions.length > 0 && (
+          <table style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--line)", color: "var(--ink-4)", fontSize: 10, textAlign: "left" }}>
+                <th style={{ padding: "8px 6px", width: 40 }}>#</th>
+                <th style={{ padding: "8px 6px" }}>제목 (첫 질문)</th>
+                <th style={{ padding: "8px 6px", width: 70, textAlign: "right" }}>메시지</th>
+                <th style={{ padding: "8px 6px", width: 150 }}>최종 갱신</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sessions.slice(0, 15).map((s) => {
+                const dt = s.updated_at ? new Date(s.updated_at) : null;
+                return (
+                  <tr key={s.id} style={{ borderBottom: "1px solid var(--line)" }}>
+                    <td style={{ padding: "8px 6px", fontFamily: "JetBrains Mono, monospace", color: "var(--ink-4)" }}>{s.id}</td>
+                    <td style={{ padding: "8px 6px", color: "var(--ink)" }}>
+                      {(s.title || "(제목 없음)").slice(0, 60)}
+                    </td>
+                    <td style={{ padding: "8px 6px", textAlign: "right", fontWeight: 600, color: "var(--ink-2)" }}>{s.messageCount || 0}</td>
+                    <td style={{ padding: "8px 6px", color: "var(--ink-4)", fontSize: 10 }}>
+                      {dt ? `${dt.toLocaleDateString("ko-KR")} ${dt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}` : "-"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         )}
       </div>
     </div>

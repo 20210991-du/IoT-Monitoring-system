@@ -863,6 +863,30 @@ function saveChatHistory(messages) {
   } catch { /* ignore quota */ }
 }
 
+// 세션 목록 fetch (헤더 드롭다운용)
+async function fetchChatSessions() {
+  try {
+    const r = await fetch("/api/chat/sessions");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    return d.ok ? (d.sessions || []) : [];
+  } catch { return []; }
+}
+async function fetchChatSession(id) {
+  try {
+    const r = await fetch(`/api/chat/sessions/${id}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    return d.ok ? d : null;
+  } catch { return null; }
+}
+async function deleteChatSession(id) {
+  try {
+    const r = await fetch(`/api/chat/sessions/${id}`, { method: "DELETE" });
+    return r.ok;
+  } catch { return false; }
+}
+
 function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
   const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
   const greeting = { role: "ai", text: "안녕하세요. AI 챗봇입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime };
@@ -873,7 +897,58 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
   const [sessionId, setSessionId] = useState(() => {
     try { const v = localStorage.getItem(CHAT_SESSION_KEY); return v ? Number(v) : null; } catch { return null; }
   });
+  const [showSessions, setShowSessions] = useState(false);
+  const [sessions, setSessions] = useState([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
   const listRef = useRef(null);
+
+  // 드롭다운 열기 → 세션 목록 로드
+  const openSessionsList = async () => {
+    setShowSessions((s) => !s);
+    if (!showSessions) {
+      setSessionsLoading(true);
+      const list = await fetchChatSessions();
+      setSessions(list);
+      setSessionsLoading(false);
+    }
+  };
+
+  // 세션 클릭 → 메시지 로드
+  const loadSession = async (sid) => {
+    setShowSessions(false);
+    if (sending) return;
+    const d = await fetchChatSession(sid);
+    if (!d) return;
+    const msgs = (d.messages || []).map((m) => {
+      const t = m.createdAt ? new Date(m.createdAt) : new Date();
+      return {
+        role: m.role,
+        text: m.text,
+        time: `${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}`,
+      };
+    });
+    if (msgs.length === 0) return;
+    setMessages(msgs);
+    setSessionId(sid);
+    try { localStorage.setItem(CHAT_SESSION_KEY, String(sid)); } catch {}
+    setLlmActive(true);   // 영구 저장된 세션은 LLM 기록
+  };
+
+  // 세션 삭제
+  const removeSession = async (sid, e) => {
+    if (e) { e.stopPropagation(); e.preventDefault(); }
+    if (!confirm(`세션 #${sid} 를 삭제하시겠습니까? (메시지 모두 삭제)`)) return;
+    const ok = await deleteChatSession(sid);
+    if (ok) {
+      setSessions((s) => s.filter((x) => x.id !== sid));
+      // 현재 세션이 삭제됐으면 새 세션 시작
+      if (sid === sessionId) {
+        setMessages([greeting]);
+        setSessionId(null);
+        try { localStorage.removeItem(CHAT_SESSION_KEY); } catch {}
+      }
+    }
+  };
 
   // 메시지 변할 때마다 저장 + 자동 스크롤
   useEffect(() => {
@@ -997,13 +1072,29 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
           const dot = isLlm  ? "#10b981"                : isMock ? "#f59e0b"               : "var(--brand)";
           const lbl = isLlm  ? "LLM 연결됨"             : isMock ? "mock fallback"         : "대기";
           return (
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, position: "relative" }}>
+              {/* 세션 목록 드롭다운 토글 */}
+              <button
+                onClick={openSessionsList}
+                title="이전 대화 세션 목록"
+                style={{
+                  display: "grid", placeItems: "center",
+                  width: 22, height: 22, borderRadius: 6,
+                  background: showSessions ? "var(--bg-elev)" : "transparent",
+                  border: "1px solid var(--line)",
+                  color: "var(--ink-3)", cursor: "pointer",
+                }}
+              >
+                <Icons.list size={11} />
+              </button>
+              {/* 새 대화 (초기화) */}
               <button
                 onClick={() => {
                   if (sending) return;
                   setMessages([greeting]);
                   setLlmActive(null);
                   setSessionId(null);
+                  setShowSessions(false);
                   try {
                     localStorage.removeItem(CHAT_STORAGE_KEY);
                     localStorage.removeItem(CHAT_SESSION_KEY);
@@ -1029,6 +1120,80 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
                 <span style={{ width: 6, height: 6, borderRadius: "50%", background: dot, animation: "pulse-dot 1.2s infinite" }} />
                 {lbl}
               </div>
+
+              {/* 세션 목록 드롭다운 */}
+              {showSessions && (
+                <div style={{
+                  position: "absolute", top: 30, right: 0, zIndex: 50,
+                  width: 280, maxHeight: 360, overflow: "auto",
+                  background: "var(--bg)",
+                  border: "1px solid var(--line)", borderRadius: 8,
+                  boxShadow: "0 8px 24px -6px rgba(0,0,0,0.18)",
+                }} className="scroll">
+                  <div style={{
+                    padding: "8px 10px", borderBottom: "1px solid var(--line)",
+                    fontSize: 11, fontWeight: 700, color: "var(--ink-3)",
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                  }}>
+                    <span>저장된 대화 세션</span>
+                    <button
+                      onClick={() => setShowSessions(false)}
+                      style={{ background: "transparent", border: "none", color: "var(--ink-4)", cursor: "pointer", padding: 0 }}
+                      title="닫기"
+                    ><Icons.close size={11} /></button>
+                  </div>
+                  {sessionsLoading && (
+                    <div style={{ padding: 12, fontSize: 11, color: "var(--ink-4)" }}>불러오는 중...</div>
+                  )}
+                  {!sessionsLoading && sessions.length === 0 && (
+                    <div style={{ padding: 12, fontSize: 11, color: "var(--ink-4)" }}>저장된 세션 없음</div>
+                  )}
+                  {!sessionsLoading && sessions.map((s) => {
+                    const isActive = s.id === sessionId;
+                    const dt = s.updated_at ? new Date(s.updated_at) : null;
+                    const dtLabel = dt ? `${dt.getMonth()+1}/${dt.getDate()} ${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}` : "";
+                    return (
+                      <div
+                        key={s.id}
+                        onClick={() => loadSession(s.id)}
+                        style={{
+                          padding: "8px 10px",
+                          borderBottom: "1px solid var(--line)",
+                          background: isActive ? "rgba(79,70,229,0.08)" : "transparent",
+                          cursor: "pointer",
+                          display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8,
+                        }}
+                        onMouseOver={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-elev)"; }}
+                        onMouseOut={(e)  => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                      >
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{
+                            fontSize: 12, fontWeight: isActive ? 700 : 500,
+                            color: isActive ? "var(--brand)" : "var(--ink)",
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          }}>
+                            {s.title || `세션 #${s.id}`}
+                          </div>
+                          <div style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>
+                            {dtLabel} · 메시지 {s.messageCount || 0}
+                          </div>
+                        </div>
+                        <button
+                          onClick={(e) => removeSession(s.id, e)}
+                          title="세션 삭제"
+                          style={{
+                            background: "transparent", border: "none",
+                            color: "var(--ink-4)", cursor: "pointer", padding: 2,
+                            opacity: 0.5,
+                          }}
+                          onMouseOver={(e) => { e.currentTarget.style.opacity = 1; e.currentTarget.style.color = "#dc2626"; }}
+                          onMouseOut={(e)  => { e.currentTarget.style.opacity = 0.5; e.currentTarget.style.color = "var(--ink-4)"; }}
+                        ><Icons.close size={10} /></button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           );
         })()}
