@@ -1,5 +1,18 @@
 # AI 기반 IoT 통합 관제 시스템
 
+## 🌐 라이브 데모
+
+운영 중 사이트 URL — Mac Studio + Cloudflare Tunnel 로 외부 노출. URL 변경 시 본 섹션 자동 갱신 (`~/work/sync/update-readme-url.sh`).
+
+<!-- TUNNEL_URL_START -->
+👉 **<https://block-commissioners-oriental-foster.trycloudflare.com>**
+
+- 헬스 체크: [`/api/health`](https://block-commissioners-oriental-foster.trycloudflare.com/api/health)
+- 마지막 확인: 2026-05-18 12:50 KST (수동 초기화)
+<!-- TUNNEL_URL_END -->
+
+> ⚠️ 임시 URL (`trycloudflare.com`). Mac Studio 재부팅·재가동 시 자동으로 새 URL 로 갱신됨. 도메인 구입 후 영구 URL 로 전환 예정 (발표 직전).
+
 ## 📌 Version
 Current Version: v2026.04.19
 
