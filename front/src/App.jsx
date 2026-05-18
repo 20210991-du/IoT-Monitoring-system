@@ -19,7 +19,7 @@ import {
   AI_WATCH    as MOCK_WATCH,
   AI_INSIGHTS as MOCK_INSIGHTS,
 } from "./data/mockData.js";
-import { fetchDevices, fetchAnomalies, fetchInsights, devicesToMarkers } from "./api/client.js";
+import { fetchDevices, fetchAnomalies, fetchInsights, devicesToMarkers, setApiDemoMode } from "./api/client.js";
 
 const TWEAK_DEFAULTS = { theme: "light", mapStyle: "light", autoPlay: true };
 const POLL_MS = 60_000;
@@ -384,6 +384,11 @@ export function App() {
   const [insights,  setInsights]  = useState(MOCK_INSIGHTS);
   const [apiStatus, setApiStatus] = useState("mock"); // "mock" | "loading" | "ok" | "error"
   const [aiEvents,  setAiEvents]  = useState([]);     // 실시간 로그로 전달되는 AI 이벤트
+  // ── 데모 모드 (발표용 가상 장비 10대) ─────────────
+  const [demoMode, setDemoMode] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("siwon.demo.mode") || "false"); }
+    catch { return false; }
+  });
 
   // ── AI 이벤트 생성 헬퍼 ────────────────────────────────────
   function makeAiLogEvents(devRes, anoRes) {
@@ -461,6 +466,14 @@ export function App() {
   useEffect(() => { localStorage.setItem("screen", screen); }, [screen]);
   useEffect(() => { localStorage.setItem("tab",    tab);    }, [tab]);
 
+  // 데모 모드 변경 시: API client flag 갱신 + localStorage 저장 + 즉시 리로드
+  useEffect(() => {
+    setApiDemoMode(demoMode);
+    try { localStorage.setItem("siwon.demo.mode", JSON.stringify(demoMode)); } catch {}
+    // 토글 즉시 데이터 새로고침
+    loadData();
+  }, [demoMode, loadData]);
+
   // admin 권한 사라지면 users 탭에서 자동 빠져나감 (탭 보호)
   useEffect(() => {
     if (tab === "users" && user?.role !== "admin") setTab("dashboard");
@@ -528,6 +541,8 @@ export function App() {
         apiStatus={apiStatus}
         user={user}
         pendingCount={user?.role === "admin" ? (listPending(user).users?.length || 0) : 0}
+        demoMode={demoMode}
+        onToggleDemo={() => setDemoMode((v) => !v)}
       />
       {bannerOpen && tab === "dashboard" && (() => {
         const criticalDevices = (equipment || []).filter((e) => e.status === "critical");
@@ -561,6 +576,7 @@ export function App() {
             anomalies={anomalies}
             watch={watch}
             aiEvents={aiEvents}
+            demoMode={demoMode}
           />
         )}
         {tab === "equipment" && <Equipment onOpen={setDrawer} equipment={equipment} />}

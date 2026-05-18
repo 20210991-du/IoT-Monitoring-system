@@ -767,13 +767,13 @@ async function callLLM(message, context, history) {
 //   onSession({sessionId})           — 서버가 부여한 chat_sessions.id
 //   onDone(payload)                  — 종료 콜백
 //   onError(err)                     — 에러
-async function callLLMStream(message, context, history, sessionId, { onDelta, onTool, onSession, onDone, onError, signal }) {
+async function callLLMStream(message, context, history, sessionId, demoMode, { onDelta, onTool, onSession, onDone, onError, signal }) {
   let acc = "";
   try {
     const res = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, context, history, sessionId: sessionId || undefined }),
+      body: JSON.stringify({ message, context, history, sessionId: sessionId || undefined, demo: !!demoMode }),
       signal,
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -887,7 +887,7 @@ async function deleteChatSession(id) {
   } catch { return false; }
 }
 
-function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
+function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demoMode = false }) {
   const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
   const greeting = { role: "ai", text: "안녕하세요. AI 챗봇입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime };
   const [messages, setMessages] = useState(() => loadChatHistory() || [greeting]);
@@ -979,7 +979,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi }) {
     let donePayload = null;
     const t0 = Date.now();
 
-    const stream = await callLLMStream(trimmed, ctx, historyForLLM, sessionId, {
+    const stream = await callLLMStream(trimmed, ctx, historyForLLM, sessionId, demoMode, {
       onSession: (info) => {
         // 서버가 새 세션 발급 또는 기존 세션 확인 — localStorage 에 저장
         if (info?.sessionId && info.sessionId !== sessionId) {
@@ -1927,7 +1927,7 @@ function DashboardEquipmentDrawer({ item, onClose }) {
   );
 }
 
-export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], aiEvents = [] }) {
+export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], aiEvents = [], demoMode = false }) {
   const [activeKpi, setActiveKpi] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [focused, setFocused] = useState(null); // {lat, lng, node, ts}
@@ -2115,7 +2115,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
 
         {/* (col 2, row 3) — AI 챗봇 */}
         <div style={{ gridColumn: 2, gridRow: 3, minHeight: 0 }}>
-          <ChatPanel equipment={equipment} weather={weather} onBotReply={fitToNodes} onAutoKpi={handleAutoKpi} />
+          <ChatPanel equipment={equipment} weather={weather} onBotReply={fitToNodes} onAutoKpi={handleAutoKpi} demoMode={demoMode} />
         </div>
       </div>
       <DashboardEquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
