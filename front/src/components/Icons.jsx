@@ -85,6 +85,7 @@ export const Icons = {
     <path d="M20 15v4a1 1 0 0 1-1 1h-4" />
   </>),
   close: ic(<><path d="M6 6l12 12M18 6 6 18" /></>),
+  list: ic(<><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></>),
   chevron_right: ic(<><path d="m9 6 6 6-6 6" /></>),
   arrow_up: ic(<><path d="M12 20V4M5 11l7-7 7 7" /></>),
   arrow_down: ic(<><path d="M12 4v16M19 13l-7 7-7-7" /></>),
