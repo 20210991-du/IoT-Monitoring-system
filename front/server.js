@@ -258,7 +258,13 @@ const CACHEABLE_TOOLS = new Set([
   "find_devices_by_value", "get_predictions",
   "search_devices_by_location", "geocode_location", "find_devices_near",
   "get_ai_model_info",
+  "describe_table",    // 스키마는 잘 안 바뀜 → 캐시 OK
+  // execute_safe_sql 은 캐시 X — 매번 동적 SQL 이라 hit 율 낮음 + audit 위해
 ]);
+
+// SQL 안전장치 정규식 — execute_safe_sql 용
+const SAFE_SQL_BLOCKED = /\b(INSERT|UPDATE|DELETE|REPLACE|MERGE|DROP|TRUNCATE|ALTER|CREATE|RENAME|GRANT|REVOKE|SHUTDOWN|FLUSH|RESET|KILL|SET\s+PASSWORD|SOURCE|LOAD\s+DATA|HANDLER|CALL|LOCK\s+TABLES|UNLOCK\s+TABLES|INTO\s+OUTFILE|INTO\s+DUMPFILE|XA\s+|SAVEPOINT|RELEASE\s+SAVEPOINT|COMMIT|ROLLBACK|START\s+TRANSACTION|BEGIN)\b/i;
+const SAFE_TABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 // Haversine 거리 (km). 두 좌표 사이 대권 거리.
 function haversineKm(lat1, lng1, lat2, lng2) {
@@ -568,6 +574,35 @@ const TOOLS = [
         properties: {
           deviceId: { type: "string", description: "단말 ID. 없으면 전체 모델 메타" }
         }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "execute_safe_sql",
+      description: "**자가확장 챗봇 핵심 도구.** 위의 16개 전용 도구로 답할 수 없는 복잡한 분석 질문에 자유 MySQL SELECT 작성. 안전장치: SELECT/WITH 만 허용 (INSERT/UPDATE/DELETE/DDL 차단), LIMIT 자동 1000 강제, 5초 timeout, 다중 statement 차단. siwon DB 모든 테이블 접근 가능 (kscg_* 미러 + 자체 7). 스키마 모르면 describe_table 먼저 호출.",
+      parameters: {
+        type: "object",
+        properties: {
+          sql:   { type: "string", description: "MySQL SELECT 또는 WITH 문. 한 statement 만." },
+          limit: { type: "integer", default: 100, description: "결과 row 최대 (max 1000). SQL 안에 LIMIT 있으면 그 값 우선." }
+        },
+        required: ["sql"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "describe_table",
+      description: "테이블 스키마 (컬럼·타입·인덱스) 조회. execute_safe_sql 전 자가 탐색용. siwon DB 모든 테이블 가능. 예: 'kscg_sensor_data', 'audit_log', 'chat_messages', 'kscg_alarm_log'. INFORMATION_SCHEMA 도 가능.",
+      parameters: {
+        type: "object",
+        properties: {
+          tableName: { type: "string", description: "테이블 이름 (스키마 접두 X)" }
+        },
+        required: ["tableName"]
       }
     }
   }
@@ -1342,6 +1377,104 @@ async function execToolInternal(name, args, demoMode = false) {
           .sort((a, b) => a.distanceKm - b.distanceKm)
           .slice(0, limit);
         return { center: { lat, lng }, radiusKm, count: withDist.length, devices: withDist, demoMode };
+      }
+
+      // ─── 자가확장 챗봇 (Self-Extending Chatbot) ───
+      // execute_safe_sql: 미리 정의된 16 도구로 답 못 하는 복잡 분석을 위한 자유 SQL.
+      //   5단 안전장치:
+      //     1) 첫 keyword 가 SELECT/WITH 만 허용
+      //     2) DML/DDL/admin keyword 정규식 차단 (SAFE_SQL_BLOCKED)
+      //     3) 다중 statement 차단 (세미콜론 후 비어있지 않으면 reject)
+      //     4) LIMIT 강제 (없으면 자동 추가, max 1000)
+      //     5) 5초 timeout (mysql2 timeout 옵션)
+      case "execute_safe_sql": {
+        let sql = String(args.sql || "").trim().replace(/;+\s*$/g, "");  // 끝 세미콜론 제거
+        if (!sql) return { error: "sql 필수" };
+        const limit = Math.min(Math.max(Number(args.limit) || 100, 1), 1000);
+
+        // [1] 첫 keyword 검사
+        const firstWord = (sql.match(/^\s*(\w+)/)?.[1] || "").toUpperCase();
+        if (!["SELECT", "WITH"].includes(firstWord)) {
+          return { error: `차단됨: SELECT/WITH 만 허용. 받은 첫 keyword: '${firstWord}'` };
+        }
+
+        // [2] 위험 keyword 정규식 차단 (큰따옴표·작은따옴표 안 문자열은 사전 제거 후 검사)
+        const stripped = sql
+          .replace(/'(?:\\.|[^'\\])*'/g, "''")
+          .replace(/"(?:\\.|[^"\\])*"/g, '""')
+          .replace(/`(?:[^`])*`/g, "``")
+          .replace(/--[^\n]*/g, "")        // 주석
+          .replace(/\/\*[\s\S]*?\*\//g, ""); // 블록 주석
+        if (SAFE_SQL_BLOCKED.test(stripped)) {
+          return { error: "차단됨: DML/DDL/관리 keyword 포함 (INSERT/UPDATE/DELETE/DDL 류). SELECT 만 가능" };
+        }
+
+        // [3] 다중 statement (세미콜론 뒤 비어있지 않음) — 위에서 끝 세미콜론 제거했으므로 중간 ; 만 검사
+        if (stripped.includes(";")) {
+          return { error: "차단됨: 다중 statement 금지 (한 SELECT 문만)" };
+        }
+
+        // [4] LIMIT 강제 추가 (없으면)
+        const hasLimit = /\blimit\s+\d+/i.test(sql);
+        const finalSql = hasLimit ? sql : `${sql} LIMIT ${limit}`;
+
+        // [5] 5초 timeout 실행
+        try {
+          const [rows] = await pool.query({ sql: finalSql, timeout: 5000 });
+          const arr = Array.isArray(rows) ? rows : [];
+          const truncated = arr.length > 1000;
+          return {
+            sql: finalSql,
+            rowCount: arr.length,
+            truncated,
+            rows: arr.slice(0, 1000),
+          };
+        } catch (e) {
+          return { error: `SQL 실행 오류: ${e.message}`, sql: finalSql };
+        }
+      }
+
+      // describe_table: 스키마 자가 탐색
+      case "describe_table": {
+        const tableName = String(args.tableName || "").trim();
+        if (!SAFE_TABLE_NAME.test(tableName)) {
+          return { error: "잘못된 테이블 이름 (영문/숫자/_만)" };
+        }
+        try {
+          const [cols] = await pool.query(`SHOW COLUMNS FROM \`${tableName}\``);
+          const [idx]  = await pool.query(`SHOW INDEX FROM \`${tableName}\``);
+          // 인덱스 그룹화
+          const indexMap = {};
+          for (const i of idx) {
+            const k = i.Key_name;
+            if (!indexMap[k]) indexMap[k] = { name: k, columns: [], unique: i.Non_unique === 0 };
+            indexMap[k].columns.push(i.Column_name);
+          }
+          // 대략적인 row 수 (INFORMATION_SCHEMA, 빠른 추정)
+          let rowEstimate = null;
+          try {
+            const [[r]] = await pool.query(
+              `SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+              [tableName],
+            );
+            rowEstimate = r?.TABLE_ROWS ?? null;
+          } catch (_) {}
+          return {
+            tableName,
+            rowEstimate,
+            columns: cols.map((c) => ({
+              name:    c.Field,
+              type:    c.Type,
+              null:    c.Null,
+              key:     c.Key,
+              default: c.Default,
+              extra:   c.Extra,
+            })),
+            indexes: Object.values(indexMap),
+          };
+        } catch (e) {
+          return { error: e.message };
+        }
       }
 
       default:
@@ -2374,7 +2507,7 @@ ${offlineBlock ? `# 통신 장애 노드 상세 (마지막 측정 시각 + 두�
 # 최근 12시간 MSE 추이 (1시간 간격, 가장 오래된 → 현재)
 ${trendBlock}
 
-# 도구(Tools) 사용 가이드 — 16 개 도구
+# 도구(Tools) 사용 가이드 — 18 개 도구 (자가확장 모드 ON)
 위 "현재 시스템 상태" 와 "12h MSE 추이" 에 이미 있는 정보면 그대로 답변. 없는 정보(특정 단말 상세, 시리얼/설치일/위경도, 시계열 추이, 알람 이력 등)는 아래 도구를 직접 호출해서 조회:
 
 **기본 조회 (6)**
@@ -2400,6 +2533,16 @@ ${trendBlock}
 
 **AI 모델 (1)**
 - **get_ai_model_info** — LSTM AutoEncoder 학습 정보. deviceId 주면 그 단말 threshold + 분류 기준, 없으면 전체 모델 메타(학습 피처, time_steps, 평가 통계 등). "AI 어떻게 학습됐어?", "TB24-XXX 정상 한계는?" 류.
+
+**자가확장 (2) — 위 17개로 답 안 되는 모든 분석 질문**
+- **describe_table** — siwon DB 임의 테이블 스키마 (컬럼·타입·인덱스·row 추정). 자유 SQL 작성 전 자가 탐색용. 예: 'kscg_sensor_data', 'audit_log', 'chat_messages'.
+- **execute_safe_sql** — 자유 MySQL SELECT/WITH. siwon DB 모든 테이블 접근. 5초 timeout / 1000 row cap / DML/DDL 차단 / 다중 statement 차단. **위 17개 도구로 안 되는 어떤 분석이든 SQL 로 직접 해결**:
+  - "월별 평균 방식전위" → GROUP BY DATE_FORMAT(WRITE_DATE, '%Y-%m')
+  - "TB24-250425 의 최근 1주일 일별 통계" → SELECT DATE, AVG, MIN, MAX
+  - "audit_log 에서 가장 자주 호출된 도구 TOP 5" → 자기성찰 메타 질의
+  - "센서값이 가장 많이 변동한 단말" → STDDEV 정렬
+  - "특정 시간대 (예: 새벽 2~4시) 측정 빈도" → HOUR() 필터
+  - 등등 모든 자유 분석. 모르는 컬럼/테이블은 describe_table 먼저.
 
 위치 질문 흐름 (중요):
 1. "OO 단말" / "OO 앞 단말" → search_devices_by_location 1회로 충분한 경우 多
