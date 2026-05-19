@@ -8,7 +8,7 @@
 👉 **<https://block-commissioners-oriental-foster.trycloudflare.com>**
 
 - 헬스 체크: [`/api/health`](https://block-commissioners-oriental-foster.trycloudflare.com/api/health)
-- 마지막 확인: 2026-05-19 19:22 KST (자동 갱신)
+- 마지막 확인: 2026-05-19 19:27 KST (자동 갱신)
 <!-- TUNNEL_URL_END -->
 
 > ⚠️ 임시 URL (`trycloudflare.com`). Mac Studio 재부팅·재가동 시 자동으로 새 URL 로 갱신됨. 도메인 구입 후 영구 URL 로 전환 예정 (발표 직전).
