@@ -276,68 +276,6 @@ function haversineKm(lat1, lng1, lat2, lng2) {
           + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
-
-// ─────────────────────────────────────────────────────
-// 자가확장 (Self-Extending) — tool_registry 동적 도구
-//   LLM 이 audit_log 의 execute_safe_sql 패턴 분석 → 도구 제안 (status='pending')
-//   운영자가 approve → status='approved' → 다음 reload 에서 TOOLS 에 합류
-// ─────────────────────────────────────────────────────
-let DYNAMIC_TOOLS = [];                    // TOOLS 와 동일 shape, OpenAI tools format
-const DYNAMIC_TOOLS_BY_NAME = new Map();   // name → { sql_template, param_order, id }
-
-async function loadDynamicTools() {
-  if (!pool) return;
-  try {
-    const [rows] = await pool.query(
-      `SELECT id, name, description, parameters_json, sql_template, param_order_json
-       FROM tool_registry WHERE status = 'approved'`,
-    );
-    DYNAMIC_TOOLS = rows.map((r) => ({
-      type: "function",
-      function: {
-        name: r.name,
-        description: `[자가확장] ${r.description}`,
-        parameters: r.parameters_json,
-      },
-    }));
-    DYNAMIC_TOOLS_BY_NAME.clear();
-    for (const r of rows) {
-      DYNAMIC_TOOLS_BY_NAME.set(r.name, {
-        id: r.id,
-        sql_template: r.sql_template,
-        param_order: r.param_order_json || [],
-      });
-    }
-    console.log(`▶ Dynamic tools loaded: ${DYNAMIC_TOOLS.length} approved`);
-  } catch (e) {
-    console.warn("[loadDynamicTools]", e.message);
-  }
-}
-
-// 동적 도구 실행 — sql_template 의 ? placeholder 에 param_order 순서로 인자 바인딩.
-// 안전: prepared statement 사용 → SQL injection 차단. SAFE_SQL_BLOCKED 도 재검사.
-async function execDynamicTool(name, args) {
-  const def = DYNAMIC_TOOLS_BY_NAME.get(name);
-  if (!def) return { error: `dynamic tool not found: ${name}` };
-  const sql = def.sql_template;
-  // 승인 시점에 한 번 검증됐지만 방어적으로 재검증
-  const firstWord = (sql.match(/^\s*(\w+)/)?.[1] || "").toUpperCase();
-  if (!["SELECT", "WITH"].includes(firstWord)) return { error: "dynamic tool SQL 검증 실패 (SELECT/WITH 아님)" };
-  if (SAFE_SQL_BLOCKED.test(sql)) return { error: "dynamic tool SQL 검증 실패 (위험 keyword)" };
-  // 인자 바인딩
-  const params = (def.param_order || []).map((p) => args?.[p] ?? null);
-  const final = /\blimit\s+\d+/i.test(sql) ? sql : `${sql} LIMIT 1000`;
-  try {
-    const [rows] = await pool.query({ sql: final, timeout: 5000 }, params);
-    // call_count 증가 (best-effort, fire-and-forget)
-    pool.query(`UPDATE tool_registry SET call_count = call_count + 1, last_called_at = NOW() WHERE id = ?`, [def.id])
-        .catch(() => {});
-    const arr = Array.isArray(rows) ? rows : [];
-    return { name, rowCount: arr.length, rows: arr.slice(0, 1000) };
-  } catch (e) {
-    return { error: `dynamic tool 실행 오류: ${e.message}`, sql: final };
-  }
-}
 function toolCacheGet(key) {
   const hit = TOOL_CACHE.get(key);
   if (!hit) return null;
@@ -1540,10 +1478,6 @@ async function execToolInternal(name, args, demoMode = false) {
       }
 
       default:
-        // 동적 도구 (tool_registry status='approved') 분기
-        if (DYNAMIC_TOOLS_BY_NAME.has(name)) {
-          return await execDynamicTool(name, args);
-        }
         return { error: `unknown tool: ${name}` };
     }
   } catch (err) {
@@ -1568,7 +1502,7 @@ async function runChatWithTools(messages, signal, demoMode = false) {
       body: JSON.stringify({
         model: OLLAMA_MODEL,
         messages: working,
-        tools: [...TOOLS, ...DYNAMIC_TOOLS],
+        tools: TOOLS,
         stream: false,
         think: false,
         options: { temperature: 0.3, num_predict: 1000 },
@@ -1742,7 +1676,7 @@ app.post("/api/chat/stream", async (req, res) => {
         body: JSON.stringify({
           model: OLLAMA_MODEL,
           messages: working,
-          tools: [...TOOLS, ...DYNAMIC_TOOLS],
+          tools: TOOLS,
           stream: true,
           think: false,
           options: { temperature: 0.3, num_predict: 1000 },
@@ -2333,230 +2267,6 @@ app.get("/api/admin/tool-stats", dbRequired, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────
-// 자가확장 (Self-Extending) — Tool Proposals API
-//   POST /api/admin/propose-tools      LLM 이 audit_log 분석 → 도구 후보 생성 → tool_registry INSERT (pending)
-//   GET  /api/admin/tool-proposals     pending/approved/rejected 목록
-//   POST /api/admin/tool-proposals/:id/approve   승인 + 즉시 reload
-//   POST /api/admin/tool-proposals/:id/reject    거부
-//   POST /api/admin/tool-proposals/reload        approved 즉시 재로드
-// ─────────────────────────────────────────────────────
-
-// LLM 호출 — Ollama, JSON mode (raw 출력) 시도
-async function llmGenerateProposals(prompt) {
-  try {
-    const res = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        messages: [
-          { role: "system", content: "You are an SQL pattern analyzer. Output ONLY a JSON array. No prose, no markdown headers, no explanations." },
-          { role: "user", content: prompt },
-        ],
-        stream: false,
-        think: false,
-        format: "json",
-        options: { temperature: 0.2, num_predict: 2500 },
-      }),
-      signal: AbortSignal.timeout(120_000),
-    });
-    if (!res.ok) return { error: `Ollama HTTP ${res.status}` };
-    const data = await res.json();
-    const content = data.message?.content || "";
-    // format:"json" 이면 raw JSON. 아니면 코드 블록 추출 시도.
-    let txt = content.trim();
-    const m = txt.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    if (m) txt = m[1].trim();
-    try {
-      const parsed = JSON.parse(txt);
-      // 객체로 감싸져 있으면 array 키 추출
-      if (Array.isArray(parsed)) return { proposals: parsed };
-      if (Array.isArray(parsed.proposals)) return { proposals: parsed.proposals };
-      if (Array.isArray(parsed.tools)) return { proposals: parsed.tools };
-      return { error: "응답이 array 형식 아님", raw: txt.slice(0, 300) };
-    } catch (e) {
-      return { error: `JSON 파싱 실패: ${e.message}`, raw: txt.slice(0, 300) };
-    }
-  } catch (e) {
-    return { error: `LLM 호출 실패: ${e.message}` };
-  }
-}
-
-// POST /api/admin/propose-tools — LLM 이 audit_log 의 execute_safe_sql 패턴 분석 → 도구 후보 생성
-app.post("/api/admin/propose-tools", dbRequired, async (req, res) => {
-  try {
-    const days = Math.min(Math.max(parseInt(req.body?.days || 7, 10), 1), 30);
-    const minOccurrences = Math.max(parseInt(req.body?.minOccurrences || 2, 10), 1);
-
-    // 최근 N일 execute_safe_sql 호출 수집
-    const [rows] = await pool.query(`
-      SELECT metadata_json, created_at FROM audit_log
-      WHERE action='tool_call' AND target_id='execute_safe_sql'
-        AND created_at > DATE_SUB(NOW(), INTERVAL ? DAY)
-      ORDER BY created_at DESC LIMIT 200
-    `, [days]);
-    const sqls = rows
-      .map((r) => {
-        try {
-          const args = JSON.parse(r.metadata_json)?.args;
-          return args?.sql || "";
-        } catch { return ""; }
-      })
-      .filter(Boolean);
-
-    if (sqls.length < minOccurrences) {
-      return res.json({
-        ok: true,
-        proposals: [],
-        message: `execute_safe_sql 호출이 부족 (최근 ${days}일 ${sqls.length}회, 최소 ${minOccurrences}회 필요)`,
-      });
-    }
-
-    // LLM 호출 — 도구 후보 추출
-    const sampleSqls = sqls.slice(0, 40).map((s, i) => `[${i + 1}] ${s.slice(0, 300)}`).join("\n");
-    const prompt = `Analyze these recent execute_safe_sql calls and propose reusable tools.
-
-# Recent SQL calls (last ${days} days, ${sqls.length} total):
-${sampleSqls}
-
-# Task
-1. Identify SQL patterns that appeared ≥ ${minOccurrences} times with similar structure.
-2. For each pattern, propose a reusable tool. Output JSON array.
-
-# Each tool MUST have this shape:
-{
-  "name": "snake_case_tool_name",
-  "description": "Korean one-line description",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "paramName": { "type": "string|integer|number", "description": "..." }
-    },
-    "required": ["paramName"]
-  },
-  "sql_template": "SELECT ... FROM ... WHERE ... = ? LIMIT 100",
-  "param_order": ["paramName"],
-  "rationale": "Why this tool — cite specific calls (e.g. '12 calls similar to [3] [7]')"
-}
-
-# Rules
-- SQL must be SELECT or WITH only. No INSERT/UPDATE/DELETE/DDL.
-- Use ? placeholder for parameters (mysql2 prepared statement format).
-- param_order array MUST match ? order.
-- Include LIMIT clause when results can be large.
-- Skip patterns with < ${minOccurrences} occurrences.
-- Skip if no clear pattern (output empty array []).
-
-Output: JSON array of tool objects. No prose.`;
-
-    const llmResp = await llmGenerateProposals(prompt);
-    if (llmResp.error) {
-      return res.status(500).json({ ok: false, error: llmResp.error, raw: llmResp.raw });
-    }
-    const proposals = llmResp.proposals || [];
-
-    // tool_registry INSERT (status='pending')
-    const inserted = [];
-    for (const p of proposals) {
-      if (!p.name || !p.description || !p.sql_template || !p.parameters) continue;
-      // 안전 사전검증 — sql_template 도 SELECT/WITH 만
-      const firstWord = (p.sql_template.match(/^\s*(\w+)/)?.[1] || "").toUpperCase();
-      if (!["SELECT", "WITH"].includes(firstWord)) continue;
-      if (SAFE_SQL_BLOCKED.test(p.sql_template)) continue;
-      try {
-        const [r] = await pool.query(`
-          INSERT INTO tool_registry
-            (name, description, parameters_json, sql_template, param_order_json,
-             status, source, rationale, proposal_basis_json)
-          VALUES (?, ?, ?, ?, ?, 'pending', 'llm-proposal', ?, ?)
-        `, [
-          p.name, p.description,
-          JSON.stringify(p.parameters),
-          p.sql_template,
-          JSON.stringify(p.param_order || []),
-          p.rationale || null,
-          JSON.stringify({ totalAuditCalls: sqls.length, days }),
-        ]);
-        inserted.push({ id: r.insertId, name: p.name, description: p.description });
-      } catch (e) {
-        // 중복 name (UNIQUE) 또는 기타 — 무시하고 다음
-        console.warn(`[propose-tools] insert skip: ${e.message}`);
-      }
-    }
-
-    res.json({
-      ok: true,
-      analyzedCalls: sqls.length,
-      llmReturned: proposals.length,
-      inserted,
-      message: inserted.length === 0
-        ? "새 제안 없음 (중복 또는 검증 실패)"
-        : `${inserted.length} 건 제안 (status=pending). /api/admin/tool-proposals 확인 후 approve.`,
-    });
-  } catch (err) {
-    console.error("[propose-tools]", err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// GET /api/admin/tool-proposals?status=pending
-app.get("/api/admin/tool-proposals", dbRequired, async (req, res) => {
-  try {
-    const status = req.query.status || "pending";
-    const [rows] = await pool.query(`
-      SELECT id, name, description, parameters_json, sql_template, param_order_json,
-             status, rationale, call_count, created_at, approved_at, approved_by
-      FROM tool_registry WHERE status = ?
-      ORDER BY created_at DESC LIMIT 50
-    `, [status]);
-    res.json({ ok: true, status, count: rows.length, proposals: rows });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// POST /api/admin/tool-proposals/:id/approve
-app.post("/api/admin/tool-proposals/:id/approve", dbRequired, async (req, res) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "id 숫자" });
-    const by = String(req.body?.approvedBy || "pjh").slice(0, 64);
-    const [r] = await pool.query(
-      `UPDATE tool_registry SET status='approved', approved_at=NOW(), approved_by=? WHERE id=? AND status='pending'`,
-      [by, id],
-    );
-    if (r.affectedRows === 0) return res.status(404).json({ ok: false, error: "pending 상태인 제안 없음" });
-    await loadDynamicTools();   // 즉시 활성화
-    res.json({ ok: true, id, approvedBy: by, dynamicToolsCount: DYNAMIC_TOOLS.length });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// POST /api/admin/tool-proposals/:id/reject
-app.post("/api/admin/tool-proposals/:id/reject", dbRequired, async (req, res) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "id 숫자" });
-    const [r] = await pool.query(
-      `UPDATE tool_registry SET status='rejected' WHERE id=? AND status IN ('pending','approved')`,
-      [id],
-    );
-    if (r.affectedRows === 0) return res.status(404).json({ ok: false, error: "대상 제안 없음" });
-    await loadDynamicTools();   // 거부된 도구는 즉시 비활성
-    res.json({ ok: true, id, dynamicToolsCount: DYNAMIC_TOOLS.length });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// POST /api/admin/tool-proposals/reload — 수동 reload
-app.post("/api/admin/tool-proposals/reload", dbRequired, async (_req, res) => {
-  await loadDynamicTools();
-  res.json({ ok: true, dynamicToolsCount: DYNAMIC_TOOLS.length, names: DYNAMIC_TOOLS.map((t) => t.function.name) });
-});
-
 // ── 챗봇 세션 관리 ───────────────────────────────────
 // GET    /api/chat/sessions          — 세션 목록 (최근 30)
 // GET    /api/chat/sessions/:id      — 세션 + 메시지
@@ -2695,12 +2405,10 @@ app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "dist", "index.html"));
 });
 
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`▶ Server  http://localhost:${PORT}`);
   console.log(`▶ Ollama  ${OLLAMA_URL}`);
   console.log(`▶ Model   ${OLLAMA_MODEL}`);
-  // 자가확장 동적 도구 로드 (status='approved' in tool_registry)
-  await loadDynamicTools();
 });
 
 // ─────────────────────────────────────────────────────
