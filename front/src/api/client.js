@@ -34,11 +34,13 @@ export async function predictDevice(deviceId) {
 
 // ──────────────────────────────────────────────────────────────
 // 장비 배열 → MapPanel용 markers 배열 변환
-// 백엔드 좌표: lat 37.5±0.175, lng 127.0±0.3
-// 맵 좌표: x/y 정규화 [0, 1]
+// 백엔드 좌표: 군산 (lat 35.80~36.00, lng 126.45~126.83)
+//   - 새만금방조제 (lng 126.477) ~ 대야 (lng 126.810)
+//   - 단말 lat/lng 가 있으면 leaflet 이 그대로 사용 → 아래 정규화는 fallback
+// 맵 좌표: x/y 정규화 [0, 1]  (mock data shape 호환용)
 // ──────────────────────────────────────────────────────────────
-const LAT_MIN = 37.15, LAT_MAX = 37.85;
-const LNG_MIN = 126.4, LNG_MAX = 127.6;
+const LAT_MIN = 35.80, LAT_MAX = 36.00;
+const LNG_MIN = 126.45, LNG_MAX = 126.83;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const avg   = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
 
