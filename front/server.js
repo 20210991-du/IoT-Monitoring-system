@@ -2399,10 +2399,9 @@ app.post("/api/admin/propose-tools", dbRequired, async (req, res) => {
     `);
     const sqls = rows
       .map((r) => {
-        // mysql2 가 JSON 컬럼을 이미 객체로 파싱해서 줌 (string 아님). string 케이스도 대비.
         try {
-          const meta = typeof r.metadata_json === "string" ? JSON.parse(r.metadata_json) : r.metadata_json;
-          return meta?.args?.sql || "";
+          const args = JSON.parse(r.metadata_json)?.args;
+          return args?.sql || "";
         } catch { return ""; }
       })
       .filter(Boolean);
