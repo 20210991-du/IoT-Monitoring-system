@@ -16,7 +16,11 @@ const TILES = {
   },
 };
 
-const LAT_MIN = 37.15, LAT_MAX = 37.85, LNG_MIN = 126.4, LNG_MAX = 127.6;
+// 군산 영역 — 시범 운영 사이트 (SITE_ID=2). 새만금 서쪽 ~ 대야 동쪽까지.
+const LAT_MIN = 35.80, LAT_MAX = 36.00, LNG_MIN = 126.45, LNG_MAX = 126.83;
+// 초기 지도 중심 — 군산 시청 부근 (대다수 단말 분포 중심)
+const MAP_INITIAL_CENTER = [35.96, 126.70];
+const MAP_INITIAL_ZOOM   = 11;
 function toLatLng(m) {
   if (m.lat != null && m.lng != null) return [m.lat, m.lng];
   return [
@@ -152,6 +156,7 @@ export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger, bound
   const leafletMarkers  = useRef([]);
   const markerByNode    = useRef(new Map());
   const mapStyleRef     = useRef(mapStyle);
+  const hasInitialFit   = useRef(false);   // markers 첫 로드 시 1회 fitBounds 트리거
 
   // 맵 초기화 (한 번만)
   useEffect(() => {
@@ -159,8 +164,8 @@ export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger, bound
     if (!el || mapRef.current) return;
 
     const map = L.map(el, {
-      center: [37.5665, 126.9780],
-      zoom: 11,
+      center: MAP_INITIAL_CENTER,   // 군산 시청 부근 (5/20 수정 — 이전 서울 좌표 버그)
+      zoom: MAP_INITIAL_ZOOM,
       zoomControl: false,
     });
     mapRef.current = map;
@@ -206,6 +211,17 @@ export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger, bound
       }
       leafletMarkers.current.push(lm);
     });
+
+    // markers 가 처음 채워진 시점에 1회 fitBounds — 군산 단말이 다 화면 안에 들어오게
+    if (!hasInitialFit.current && markers.length > 0) {
+      const positions = markers.map(toLatLng).filter(([la, ln]) => la != null && ln != null);
+      if (positions.length > 0) {
+        try {
+          map.fitBounds(positions, { padding: [40, 40], maxZoom: 13 });
+          hasInitialFit.current = true;
+        } catch {}
+      }
+    }
   }, [markers, onMarker]);
 
   // 외부 focus 요청 → flyTo + 매칭 single 마커 popup

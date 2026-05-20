@@ -194,8 +194,10 @@ export const EQUIPMENT = (() => {
       updatedAt,
       nextCollectMin: 60 - minAgo,
       zone: pick(["제1구역", "제2구역", "제3구역", "제4구역"]),
-      lng: 127 + (rand() - 0.5) * 0.6,
-      lat: 37.5 + (rand() - 0.5) * 0.35,
+      // 군산 시범 운영 사이트 좌표 (5/20 수정 — 이전 서울 좌표 버그)
+      // 새만금방조제(서) ~ 대야(동), 미룡동(남) ~ 해망동(북) 범위
+      lng: 126.65 + (rand() - 0.5) * 0.36,
+      lat: 35.94 + (rand() - 0.5) * 0.20,
     });
   }
   return out;
