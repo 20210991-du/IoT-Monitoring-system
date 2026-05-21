@@ -55,7 +55,7 @@ const iconBtn = {
   color: "var(--ink-3)",
 };
 
-export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, setMapStyle }) {
+export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, setMapStyle, demoMode = false, onToggleDemo }) {
   const now = useClock();
   const [open, setOpen] = useState(false);          // 사용자 카드 드롭다운
   const [settingsOpen, setSettingsOpen] = useState(false); // 설정 드롭다운
@@ -235,6 +235,30 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
                   onClick={toggleBeep}
                 />
               </div>
+
+              {/* 데모 모드 (옴니 5/22 피드백 — SubNav 토글 → 설정창 이동) */}
+              {onToggleDemo && (
+                <>
+                  <div style={{
+                    padding: "10px 14px 8px",
+                    fontSize: 11, fontWeight: 700, letterSpacing: "0.04em",
+                    color: "var(--ink-3)", textTransform: "uppercase",
+                    borderTop: "1px solid var(--line)",
+                    borderBottom: "1px solid var(--line)",
+                  }}>
+                    데모 모드
+                  </div>
+                  <div style={{ padding: 6 }}>
+                    <ToggleRow
+                      icon={<span style={{ fontSize: 12 }}>🧪</span>}
+                      label="가상 장비 추가"
+                      hint={demoMode ? "켜짐 · 10대 추가 표시" : "꺼짐 · 실데이터만"}
+                      on={demoMode}
+                      onClick={onToggleDemo}
+                    />
+                  </div>
+                </>
+              )}
 
             </div>
           )}
@@ -560,28 +584,8 @@ export function SubNav({ tab, setTab, apiStatus = "mock", user, pendingCount = 0
           🧪 DEMO MODE
         </span>
       )}
-      {/* 데모 모드 토글 (운영자만 보임 — viewer 도 OK) */}
-      {onToggleDemo && (
-        <button
-          onClick={onToggleDemo}
-          title={demoMode ? "데모 모드 끄기 (실데이터)" : "데모 모드 켜기 (가상 장비 10대 추가)"}
-          style={{
-            display: "inline-flex", alignItems: "center", gap: 6,
-            padding: "0 10px", height: 24, marginRight: 16, alignSelf: "center",
-            borderRadius: 6, fontSize: 11, fontWeight: 700,
-            background: demoMode ? "rgba(239,68,68,0.12)" : "transparent",
-            border: `1px solid ${demoMode ? "rgba(239,68,68,0.45)" : "var(--line)"}`,
-            color: demoMode ? "#dc2626" : "var(--ink-3)",
-            cursor: "pointer",
-          }}
-        >
-          <span style={{
-            width: 8, height: 8, borderRadius: "50%",
-            background: demoMode ? "#ef4444" : "var(--ink-4)",
-          }} />
-          {demoMode ? "DEMO ON" : "DEMO OFF"}
-        </button>
-      )}
+      {/* 데모 모드 토글은 헤더 설정 드롭다운(⚙️) 으로 이동 — 옴니 5/22 피드백 반영
+          이전 SubNav 토글은 제거. ON 상태는 위 'DEMO MODE' 배지로 명시. */}
       <span style={{
         display: "flex", alignItems: "center", gap: 6,
         fontSize: 11, fontWeight: 700, color: st.textColor,
