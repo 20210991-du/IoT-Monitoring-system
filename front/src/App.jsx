@@ -530,6 +530,8 @@ export function App() {
         setTheme={(t) => setTweakState((s) => ({ ...s, theme: t }))}
         mapStyle={tweakState.mapStyle}
         setMapStyle={setMapStyle}
+        demoMode={demoMode}
+        onToggleDemo={() => setDemoMode((v) => !v)}
       />
       <SubNav
         tab={tab}
@@ -542,7 +544,7 @@ export function App() {
         user={user}
         pendingCount={user?.role === "admin" ? (listPending(user).users?.length || 0) : 0}
         demoMode={demoMode}
-        onToggleDemo={() => setDemoMode((v) => !v)}
+        /* onToggleDemo 제거 — 헤더 설정창으로 이동 (옴니 5/22 피드백) */
       />
       {bannerOpen && tab === "dashboard" && (() => {
         const criticalDevices = (equipment || []).filter((e) => e.status === "critical");
