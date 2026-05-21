@@ -1938,6 +1938,15 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
   const [autoKpiSec, setAutoKpiSec] = useState(0);           // AI 자동 필터 잔여 초 (0 = 비활성)
   const autoKpiTimer = useRef(null);                         // setTimeout 핸들
   const autoKpiTick  = useRef(null);                         // setInterval 핸들 (1초)
+  const [logOpen, setLogOpen]   = useState(false);           // 시스템 로그 드로어 토글 (옴니 5/22 피드백 반영 — 챗봇 영역 확장)
+
+  // ESC 로 로그 드로어 닫기
+  useEffect(() => {
+    if (!logOpen) return;
+    const onKey = (e) => { if (e.key === "Escape") setLogOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [logOpen]);
 
   const counts = useMemo(() => {
     const c = { all: equipment.length, normal: 0, critical: 0, anomaly: 0, warn: 0, offline: 0 };
@@ -2058,12 +2067,13 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
         AI 탐지가 row 1+2 를 span 하여 우측 분기점이 좌측의 지도/표 분기점과 정확히 일치.
       */}
       {/*
-        원래 배치 복원:
-          row 1 (112px 고정)       — 좌: KPI                / 우: AI 탐지(span 1-2)
-          row 2 (1.2fr, min 300)   — 좌: 지도               / 우: AI 탐지 이어짐
-          row 3 (1fr, min 240)     — 좌: 표+로그            / 우: AI 챗봇
-
-        KPI row 를 fixed 112px 로 박아 viewport 부족 시에도 압축되지 않게.
+        2026-05-22 옴니솔루션 피드백 반영 — 챗봇 영역 확장 (사이즈 작다는 의견):
+          row 1 (112px 고정)       — 좌: KPI                / 우: AI 챗봇 (span 1-3, 거대)
+          row 2 (1.2fr, min 300)   — 좌: 지도               /     AI 챗봇 이어짐
+          row 3 (1fr, min 240)     — 좌: 표 + AI 탐지       /     AI 챗봇 이어짐
+        실시간 시스템 로그 → 우상단 floating 버튼 토글로 분리 (드로어).
+        AI 탐지 → 옛 LogPanel 자리(좌측 row 3 우측 영역) 로 이동.
+        AI 챗봇 → 우측 전체 column 차지 (옛 AIPanels + 옛 ChatPanel 자리 합쳐서).
       */}
       <div style={{
         position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
@@ -2080,9 +2090,9 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
           <KPIRow active={activeKpi} setActive={handleKpiClick} counts={counts} />
         </div>
 
-        {/* (col 2, row 1+2) — AI 탐지 (span) */}
-        <div style={{ gridColumn: 2, gridRow: "1 / span 2", minHeight: 0 }}>
-          <AIPanels anomalies={anomalies} watch={watch} onAnalyze={handleAnalyze} />
+        {/* (col 2, row 1~3) — AI 챗봇 (전체 우측 column · 옴니 5/22 확장) */}
+        <div style={{ gridColumn: 2, gridRow: "1 / span 3", minHeight: 0 }}>
+          <ChatPanel equipment={equipment} weather={weather} onBotReply={fitToNodes} onAutoKpi={handleAutoKpi} demoMode={demoMode} />
         </div>
 
         {/* (col 1, row 2) — 지도 */}
@@ -2102,7 +2112,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
           />
         </div>
 
-        {/* (col 1, row 3) — 표 + 로그 */}
+        {/* (col 1, row 3) — 표 + AI 탐지 (옛 LogPanel 자리 → AIPanels 이동) */}
         <div style={{
           gridColumn: 1, gridRow: 3,
           display: "grid",
@@ -2110,14 +2120,51 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
           gap: 16, minHeight: 0,
         }}>
           <TableSummary data={tableData} onRowClick={handleRowClick} activeKpi={activeKpi} />
-          <LogPanel lines={lines} />
-        </div>
-
-        {/* (col 2, row 3) — AI 챗봇 */}
-        <div style={{ gridColumn: 2, gridRow: 3, minHeight: 0 }}>
-          <ChatPanel equipment={equipment} weather={weather} onBotReply={fitToNodes} onAutoKpi={handleAutoKpi} demoMode={demoMode} />
+          <AIPanels anomalies={anomalies} watch={watch} onAnalyze={handleAnalyze} />
         </div>
       </div>
+
+      {/* 우상단 floating 토글 — 시스템 로그 드로어 */}
+      <button
+        onClick={() => setLogOpen((v) => !v)}
+        title={logOpen ? "시스템 로그 닫기 (ESC)" : "실시간 시스템 로그 열기"}
+        style={{
+          position: "fixed", top: 168, right: logOpen ? 432 : 24, zIndex: 60,
+          display: "inline-flex", alignItems: "center", gap: 6,
+          padding: "8px 14px", borderRadius: 999,
+          background: logOpen ? "var(--brand)" : "var(--bg-elev)",
+          color: logOpen ? "#fff" : "var(--ink)",
+          border: `1px solid ${logOpen ? "var(--brand)" : "var(--line)"}`,
+          fontSize: 12, fontWeight: 700, letterSpacing: "0.02em",
+          cursor: "pointer", boxShadow: "var(--shadow-card)",
+          transition: "right 220ms cubic-bezier(.4,0,.2,1), background 160ms, color 160ms",
+        }}
+      >
+        <span style={{
+          width: 7, height: 7, borderRadius: "50%",
+          background: logOpen ? "#fff" : "var(--ok)",
+          animation: "pulse-dot 1.2s infinite",
+        }} />
+        {logOpen ? "로그 닫기" : "시스템 로그"}
+        <span className="mono" style={{ opacity: 0.7, fontSize: 10, marginLeft: 4 }}>{lines.length}</span>
+      </button>
+
+      {/* 우측 슬라이드 드로어 — 시스템 로그 */}
+      <div style={{
+        position: "fixed", top: 0, right: 0, bottom: 0, width: 400, zIndex: 55,
+        background: "var(--bg)",
+        borderLeft: "1px solid var(--line)",
+        boxShadow: logOpen ? "-10px 0 30px -10px rgba(0,0,0,0.4)" : "none",
+        transform: logOpen ? "translateX(0)" : "translateX(100%)",
+        transition: "transform 260ms cubic-bezier(.4,0,.2,1)",
+        display: "flex", flexDirection: "column",
+        paddingTop: 144,    // header + subnav + emergency banner 만큼 비움
+      }}>
+        <div style={{ padding: 16, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <LogPanel lines={lines} />
+        </div>
+      </div>
+
       <DashboardEquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
     </>
   );
