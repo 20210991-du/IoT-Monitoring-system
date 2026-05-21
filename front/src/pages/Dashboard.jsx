@@ -900,29 +900,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
   const [showSessions, setShowSessions] = useState(false);
   const [sessions, setSessions] = useState([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
-  // 서버·DB 연결 상태 (헤더 배지) — null=확인 중, true=OK, false=끊김
-  const [dbActive, setDbActive] = useState(null);
-  const [dbInfo,   setDbInfo]   = useState(null);   // { rows, model }
   const listRef = useRef(null);
-
-  // 마운트 시 /api/health 1회 호출 → DB·Ollama 상태 파악
-  useEffect(() => {
-    let aborted = false;
-    fetch("/api/health", { signal: AbortSignal.timeout(6000) })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (aborted) return;
-        const ok = d?.db?.ok === true;
-        setDbActive(ok);
-        setDbInfo({
-          rows:  d?.db?.sensor_data_rows ?? null,
-          model: d?.model ?? null,
-          ollama: !!d?.ollama,
-        });
-      })
-      .catch(() => { if (!aborted) setDbActive(false); });
-    return () => { aborted = true; };
-  }, []);
 
   // 드롭다운 열기 → 세션 목록 로드
   const openSessionsList = async () => {
@@ -1142,29 +1120,6 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
                 <span style={{ width: 6, height: 6, borderRadius: "50%", background: dot, animation: "pulse-dot 1.2s infinite" }} />
                 {lbl}
               </div>
-              {/* DB 연결 상태 — null=확인 중 / true=OK / false=끊김 */}
-              {(() => {
-                const isDbOk   = dbActive === true;
-                const isDbBad  = dbActive === false;
-                const dbBg  = isDbOk ? "rgba(16,185,129,0.10)" : isDbBad ? "rgba(239,68,68,0.10)" : "rgba(79,70,229,0.10)";
-                const dbFg  = isDbOk ? "#047857"               : isDbBad ? "#b91c1c"               : "var(--brand)";
-                const dbDot = isDbOk ? "#10b981"                : isDbBad ? "#dc2626"               : "var(--brand)";
-                const dbLbl = isDbOk ? "DB 연결됨"             : isDbBad ? "DB 끊김"               : "DB 확인 중";
-                const tip   = dbInfo && isDbOk
-                  ? `siwon MySQL · 시계열 ${dbInfo.rows?.toLocaleString() || "?"} row${dbInfo.ollama ? " · Ollama OK" : ""}`
-                  : isDbBad ? "/api/health 실패 — 서버·DB 점검 필요" : "/api/health 확인 중";
-                return (
-                  <div title={tip} style={{
-                    display: "flex", alignItems: "center", gap: 6,
-                    padding: "2px 10px", borderRadius: 999,
-                    background: dbBg, color: dbFg,
-                    fontSize: 10, fontWeight: 700,
-                  }}>
-                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: dbDot, animation: "pulse-dot 1.2s infinite" }} />
-                    {dbLbl}
-                  </div>
-                );
-              })()}
 
               {/* 세션 목록 드롭다운 */}
               {showSessions && (

@@ -523,7 +523,7 @@ const API_STATUS_STYLE = {
   error:   { dot: "var(--err)",  text: "오프라인",   textColor: "var(--err)"   },
 };
 
-export function SubNav({ tab, setTab, apiStatus = "mock", user, pendingCount = 0, demoMode = false, onToggleDemo }) {
+export function SubNav({ tab, setTab, apiStatus = "mock", dbStatus = null, dbInfo = null, user, pendingCount = 0, demoMode = false, onToggleDemo }) {
   const weather = useWeather();
   const baseTabs = [
     { k: "dashboard", ko: "대시보드" },
@@ -598,6 +598,30 @@ export function SubNav({ tab, setTab, apiStatus = "mock", user, pendingCount = 0
         }} />
         {st.text}
       </span>
+      {/* DB 연결 상태 (AI 연동됨 옆) — null=확인 중, true=OK, false=끊김 */}
+      {(() => {
+        const isOk  = dbStatus === true;
+        const isBad = dbStatus === false;
+        const color = isOk ? "var(--ok)" : isBad ? "var(--err)" : "var(--warn)";
+        const text  = isOk ? "DB 연결됨" : isBad ? "DB 끊김" : "DB 확인 중";
+        const tip   = isOk && dbInfo
+          ? `siwon MySQL · 시계열 ${dbInfo.rows?.toLocaleString() || "?"} row${dbInfo.ollama ? " · Ollama OK" : ""}`
+          : isBad ? "/api/health 실패 — Mac Studio·DB 점검 필요" : "/api/health 확인 중";
+        return (
+          <span title={tip} style={{
+            display: "flex", alignItems: "center", gap: 6,
+            fontSize: 11, fontWeight: 700, color,
+            fontFamily: "JetBrains Mono, monospace",
+            marginRight: 16,
+          }}>
+            <span style={{
+              width: 6, height: 6, borderRadius: "50%", background: color,
+              animation: isOk ? "pulse-dot 2s infinite" : "none",
+            }} />
+            {text}
+          </span>
+        );
+      })()}
       <span
         style={{
           display: "flex", alignItems: "center", gap: 6,
