@@ -383,6 +383,9 @@ export function App() {
   const [watch,     setWatch]     = useState(MOCK_WATCH);
   const [insights,  setInsights]  = useState(MOCK_INSIGHTS);
   const [apiStatus, setApiStatus] = useState("mock"); // "mock" | "loading" | "ok" | "error"
+  // DB 연결 상태 (SubNav 의 "AI 연동됨" 옆 배지로 노출) — null=확인 중, true=OK, false=끊김
+  const [dbStatus, setDbStatus] = useState(null);
+  const [dbInfo,   setDbInfo]   = useState(null);   // { rows, model, ollama }
   const [aiEvents,  setAiEvents]  = useState([]);     // 실시간 로그로 전달되는 AI 이벤트
   // ── 데모 모드 (발표용 가상 장비 10대) ─────────────
   const [demoMode, setDemoMode] = useState(() => {
@@ -463,6 +466,31 @@ export function App() {
     return () => clearInterval(id);
   }, [loadData]);
 
+  // /api/health 폴링 — DB·Ollama 가동 상태 (SubNav 배지용)
+  //   60초 간격 (loadData 와 같은 주기). DB 끊김도 자동 감지.
+  useEffect(() => {
+    let stop = false;
+    const check = async () => {
+      try {
+        const r = await fetch("/api/health", { signal: AbortSignal.timeout(6000) });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (stop) return;
+        setDbStatus(d?.db?.ok === true);
+        setDbInfo({
+          rows:   d?.db?.sensor_data_rows ?? null,
+          model:  d?.model ?? null,
+          ollama: !!d?.ollama,
+        });
+      } catch {
+        if (!stop) setDbStatus(false);
+      }
+    };
+    check();
+    const id = setInterval(check, POLL_MS);
+    return () => { stop = true; clearInterval(id); };
+  }, []);
+
   useEffect(() => { localStorage.setItem("screen", screen); }, [screen]);
   useEffect(() => { localStorage.setItem("tab",    tab);    }, [tab]);
 
@@ -541,6 +569,8 @@ export function App() {
           setTab(k);
         }}
         apiStatus={apiStatus}
+        dbStatus={dbStatus}
+        dbInfo={dbInfo}
         user={user}
         pendingCount={user?.role === "admin" ? (listPending(user).users?.length || 0) : 0}
         demoMode={demoMode}
