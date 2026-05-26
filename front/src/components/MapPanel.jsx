@@ -143,7 +143,7 @@ function popupHtml(m) {
     const bd  = i === 0 ? sd.bd : "#e2e8f0";
     return `<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:${bg};color:${col};border:1px solid ${bd}">${c.sensor} ${c.pct}%</span>`;
   }).join("");
-  return `<div style="min-width:190px;font-family:system-ui,sans-serif">
+  return `<div data-popup-node="${m.node}" style="min-width:190px;font-family:system-ui,sans-serif;cursor:pointer" title="클릭하면 단말 상세 사이드바 열림">
     <div style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;color:${color}">${m.node}</div>
     <div style="font-size:12px;font-weight:600;margin-top:4px;color:#555">${m.label || (m.status === "normal" ? "정상 작동" : "")}</div>
     <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
@@ -152,6 +152,7 @@ function popupHtml(m) {
       <div><div style="font-size:9px;color:#888;margin-bottom:1px">상태</div><div style="font-weight:700;font-size:12px;color:${color}">${sd.ko}</div></div>
     </div>
     ${contrib ? `<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">${contrib}</div>` : ""}
+    <div style="margin-top:10px;padding:6px 10px;border-radius:6px;background:#4f46e5;color:#fff;font-size:10px;font-weight:700;text-align:center">상세 보기 →</div>
   </div>`;
 }
 

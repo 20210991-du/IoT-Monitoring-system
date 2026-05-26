@@ -1163,7 +1163,7 @@ async function deleteChatSession(id) {
   } catch { return false; }
 }
 
-function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demoMode = false }) {
+function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demoMode = false, autoMessage = null, onAutoConsumed }) {
   const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
   const greeting = { role: "ai", text: "안녕하세요. AI 챗봇입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime };
   const [messages, setMessages] = useState(() => loadChatHistory() || [greeting]);
@@ -1439,6 +1439,15 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
       onAutoKpi(kpi);
     }
   };
+
+  // 외부 (AI 탐지 카드 클릭 등) 에서 autoMessage 가 들어오면 자동 전송. send 후 onAutoConsumed 호출로 부모 reset.
+  useEffect(() => {
+    if (autoMessage && !sending) {
+      send(null, autoMessage);
+      onAutoConsumed && onAutoConsumed();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoMessage]);
 
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0, position: "relative" }}>
@@ -2240,29 +2249,9 @@ function buildTrendPath(mse, threshold) {
   };
 }
 
-// AnalysisModal — AI 탐지 카드 클릭 시 진입점.
-// anomaly/watch item 을 받아 equipment 매칭 후 DashboardEquipmentDrawer 로 통합 표시 (5/26 사용자 결정).
-// equipment 매칭 되면 실시간 측정값 + 시계열 + AI 분석 모두 표시.
-// 매칭 안 되면 _aiOnly 모드 — AI 분석 섹션만 표시.
-export function AnalysisModal({ item, equipment = [], onClose }) {
-  if (!item) return null;
-  const eq = (equipment || []).find((e) => e.deviceId === item.node);
-  const isOfflineLabel = typeof item.label === "string" && item.label.startsWith("통신 두절");
-  const drawerItem = eq
-    ? { ...eq, _ai: item }
-    : {
-        deviceId:   item.node,
-        facilityId: item.facility || "-",
-        zone:       item.zone || "-",
-        location:   "",
-        status:     isOfflineLabel ? "offline" : (item._kind === "warn" ? "warn" : "anomaly"),
-        hoursSilent: isOfflineLabel ? item.mse : null,
-        updatedAt:  item.ts || null,
-        _ai:        item,
-        _aiOnly:    true,
-      };
-  return <DashboardEquipmentDrawer item={drawerItem} onClose={onClose} />;
-}
+// AnalysisModal 폐기 (5/26) — AI 탐지 카드 클릭은 챗봇 메시지 푸쉬로 대체.
+// App.jsx 에서도 import + 호출 제거됨. 호환을 위해 빈 컴포넌트 export 유지 (안 쓰이지만).
+export function AnalysisModal() { return null; }
 
 // ────────────────────────────────────────────────
 // 방식전위 트렌드 차트 (6시간, 30분 간격 × 13점)
@@ -2404,297 +2393,88 @@ function VoltTrendChart({ item }) {
   );
 }
 
-// AI 분석 섹션 — 드로어 안에서 챗봇 SSE 자동 호출 + 스트리밍 typewriter
-// 매번 호출 (캐시 없음), 두 섹션 '## 분석 요약' / '## 권장 조치' 헤더로 split
-function splitAnalysisSections(text) {
-  if (!text) return { summary: "", action: "" };
-  // 구분자: ## 권장 조치 (앞에 ##분석 요약 부분은 그 이전)
-  const actIdx = text.search(/##\s*권장\s*조치/);
-  if (actIdx === -1) {
-    // 아직 권장 조치 부분 안 도착 — 전체가 요약 (스트리밍 중간)
-    return { summary: text.replace(/^##\s*분석\s*요약\s*\n?/, "").trim(), action: "" };
-  }
-  const before = text.slice(0, actIdx);
-  const after = text.slice(actIdx);
-  return {
-    summary: before.replace(/^##\s*분석\s*요약\s*\n?/, "").trim(),
-    action: after.replace(/^##\s*권장\s*조치\s*\n?/, "").trim(),
-  };
-}
-
-function AIAnalysisSection({ deviceId, aiInfo, status }) {
-  const [text, setText] = useState("");
-  const [streaming, setStreaming] = useState(true);
-  const [error, setError] = useState(null);
-  const [toolCalls, setToolCalls] = useState([]);
-  const ctrlRef = useRef(null);
-
-  useEffect(() => {
-    if (!deviceId) return;
-    setText(""); setStreaming(true); setError(null); setToolCalls([]);
-    const ctrl = new AbortController();
-    ctrlRef.current = ctrl;
-    const prompt = `${deviceId} 단말의 현재 상태를 분석해줘. 반드시 아래 두 섹션 헤더를 그대로 포함해서 답변:
-
-## 분석 요약
-2~3 문장. 현재 측정값/상태/위험 요인.
-
-## 권장 조치
-3 항목. 각 항목 앞에 [즉시] / [24시간] / [장기] 시급도 라벨.`;
-
-    callLLMStream(prompt, {}, [], null, false, {
-      onDelta: (_p, acc) => setText(acc),
-      onTool: (info) => setToolCalls((tc) => [...tc, info]),
-      onDone: () => setStreaming(false),
-      onError: (err) => { setError(err.message || "분석 실패"); setStreaming(false); },
-      signal: ctrl.signal,
-    });
-
-    return () => { try { ctrl.abort(); } catch {} };
-  }, [deviceId]);
-
-  const { summary, action } = splitAnalysisSections(text);
-  const isOffline = status === "offline";
-
-  return (
-    <div style={{ marginBottom: 20 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 13 }}>🤖</span>
-          AI 분석
-          {streaming && <span style={{ fontSize: 10, color: "var(--brand)" }}>· 생성 중</span>}
-        </div>
-        {toolCalls.length > 0 && (
-          <div style={{ fontSize: 10, color: "var(--ink-4)" }} title={toolCalls.map((t) => t.name).join(", ")}>
-            도구 {toolCalls.length}회 호출
-          </div>
-        )}
-      </div>
-
-      {/* 분석 요약 박스 */}
-      <div style={{
-        padding: 14, borderRadius: 10,
-        background: "rgba(99,102,241,0.06)",
-        border: "1px solid rgba(99,102,241,0.22)",
-        marginBottom: 10, minHeight: 70,
-      }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: "var(--brand)", marginBottom: 6, letterSpacing: "0.04em" }}>
-          분석 요약
-        </div>
-        <div style={{ fontSize: 12.5, lineHeight: 1.65, color: "var(--ink)", whiteSpace: "pre-wrap" }}>
-          {summary
-            ? renderInlineMD(summary)
-            : <span style={{ color: "var(--ink-4)" }}>{streaming ? "분석 중..." : "(응답 없음)"}</span>}
-          {streaming && summary && (
-            <span style={{
-              display: "inline-block", width: 5, height: 12, marginLeft: 2,
-              verticalAlign: "text-bottom", background: "var(--brand)",
-              animation: "blink 0.9s step-start infinite",
-            }} />
-          )}
-        </div>
-      </div>
-
-      {/* 권장 조치 박스 */}
-      <div style={{
-        padding: 14, borderRadius: 10,
-        background: "rgba(16,185,129,0.06)",
-        border: "1px solid rgba(16,185,129,0.22)",
-        minHeight: 70,
-      }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: "var(--ok)", marginBottom: 6, letterSpacing: "0.04em" }}>
-          권장 조치
-        </div>
-        <div style={{ fontSize: 12.5, lineHeight: 1.65, color: "var(--ink)", whiteSpace: "pre-wrap" }}>
-          {action
-            ? renderInlineMD(action)
-            : <span style={{ color: "var(--ink-4)" }}>{streaming ? "대기 중..." : "(응답 없음)"}</span>}
-          {streaming && action && (
-            <span style={{
-              display: "inline-block", width: 5, height: 12, marginLeft: 2,
-              verticalAlign: "text-bottom", background: "var(--ok)",
-              animation: "blink 0.9s step-start infinite",
-            }} />
-          )}
-        </div>
-      </div>
-
-      {error && (
-        <div style={{ marginTop: 8, fontSize: 11, color: "var(--err)" }}>
-          분석 실패: {error}
-        </div>
-      )}
-    </div>
-  );
-}
-
+// 사이드바 — 마커 popup 클릭 시 지도 영역 안 우측에 슬라이드 인 (5/26 사용자 결정).
+// 백드롭 없음 — 지도/챗봇 보면서 동시 확인 가능.
+// AI 분석 / 위험도 / 기여도 등 모두 제거 — 챗봇 패널이 그 역할 담당.
 function DashboardEquipmentDrawer({ item, onClose }) {
   if (!item) return null;
   const c = statusChip(item.status);
-  const ai = item._ai;                 // anomaly/watch 정보 (있을 때만)
-  const aiOnly = item._aiOnly;         // equipment 매칭 안 됨 — 실시간측정/시계열 숨김
   return (
-    <div style={{ position: "absolute", inset: 0, zIndex: 90, pointerEvents: "none" }}>
-      <div
-        onClick={onClose}
-        style={{
-          position: "absolute", inset: 0,
-          background: "rgba(10,15,30,0.3)",
-          backdropFilter: "blur(2px)",
-          pointerEvents: "auto",
-          animation: "slide-in-up 180ms ease",
-        }}
-      />
+    <div style={{
+      position: "absolute", right: 0, top: 0, bottom: 0, width: 420, zIndex: 30,
+      background: "var(--bg-elev)",
+      borderLeft: "1px solid var(--line)",
+      boxShadow: "-10px 0 30px -10px rgba(0,0,0,0.25)",
+      display: "flex", flexDirection: "column",
+      animation: "slide-in-up 220ms ease",
+    }}>
       <div style={{
-        position: "absolute", right: 0, top: 0, bottom: 0, width: 520,
-        background: "var(--bg-elev)",
-        borderLeft: "1px solid var(--line)",
-        boxShadow: "var(--shadow-lg)",
-        pointerEvents: "auto",
-        display: "flex", flexDirection: "column",
-        animation: "slide-in-up 220ms ease",
+        padding: 18, borderBottom: "1px solid var(--line-soft)",
+        display: "flex", justifyContent: "space-between", alignItems: "start",
       }}>
-        <div style={{
-          padding: 24, borderBottom: "1px solid var(--line-soft)",
-          display: "flex", justifyContent: "space-between", alignItems: "start",
-        }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-              <span className="mono" style={{ fontSize: 18, fontWeight: 800 }}>{item.deviceId}</span>
-              <span style={{
-                padding: "3px 10px", borderRadius: 6, fontSize: 11, fontWeight: 700,
-                background: c.bg, color: c.fg, border: `1px solid ${c.bd}`,
-              }}>
-                {c.ko}
-              </span>
-            </div>
-            <div className="mono" style={{ fontSize: 12, color: "var(--ink-3)" }}>{item.facilityId} · {item.zone}</div>
-            {item.location && <div style={{ fontSize: 13, color: "var(--ink-2)", marginTop: 10 }}>{item.location}</div>}
-            {/* offline 한 줄 — 통신 두절 시간 + 마지막 측정 */}
-            {item.status === "offline" && (
-              <div style={{
-                marginTop: 12, padding: "8px 12px", borderRadius: 8,
-                background: "rgba(100,116,139,0.10)",
-                border: "1px solid rgba(100,116,139,0.25)",
-                fontSize: 12, color: "var(--ink)",
-              }}>
-                <strong style={{ color: "var(--err)" }}>통신 두절 {fmtHoursShort(item.hoursSilent ?? (ai && ai.mse))}</strong>
-                {item.updatedAt && <> · 마지막 측정 {new Date(item.updatedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</>}
-              </div>
-            )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+            <span className="mono" style={{ fontSize: 16, fontWeight: 800 }}>{item.deviceId}</span>
+            <span style={{
+              padding: "3px 10px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+              background: c.bg, color: c.fg, border: `1px solid ${c.bd}`,
+            }}>
+              {c.ko}
+            </span>
           </div>
-          <button onClick={onClose} style={{ color: "var(--ink-3)" }}><Icons.close size={18} /></button>
+          <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>{item.facilityId} · {item.zone}</div>
+          {item.location && <div style={{ fontSize: 12, color: "var(--ink-2)", marginTop: 6 }}>{item.location}</div>}
         </div>
-        <div className="scroll" style={{ padding: 24, overflowY: "auto", flex: 1 }}>
-          {/* AI 분석 메타 (위험도/임계값/판정/기여도) — AI 정보 있을 때만 */}
-          {ai && (
-            <>
-              {/* 위험도/임계/판정 카드 — anomaly/warn/critical (offline 은 두절 시간이 핵심) */}
-              {(item.status === "anomaly" || item.status === "warn" || item.status === "critical") && ai.threshold && (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
-                  <div style={{ padding: "10px 12px", borderRadius: 8, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
-                    <div style={{ fontSize: 10, color: "var(--ink-3)" }}>위험도</div>
-                    <div className="mono" style={{ fontSize: 20, fontWeight: 700, color: "var(--err)" }}>
-                      {riskPct(ai.mse, ai.threshold) ?? "—"}%
-                    </div>
-                  </div>
-                  <div style={{ padding: "10px 12px", borderRadius: 8, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
-                    <div style={{ fontSize: 10, color: "var(--ink-3)" }}>이상 임계</div>
-                    <div className="mono" style={{ fontSize: 16, fontWeight: 700 }}>{Number(ai.threshold).toFixed(3)}</div>
-                    <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>현재 {Number(ai.mse).toFixed(3)}</div>
-                  </div>
-                  <div style={{ padding: "10px 12px", borderRadius: 8, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
-                    <div style={{ fontSize: 10, color: "var(--ink-3)" }}>판정</div>
-                    <div style={{
-                      fontSize: 16, fontWeight: 700, marginTop: 2,
-                      color: item.status === "critical" || item.status === "anomaly" ? "var(--err)" : "var(--warn)",
-                    }}>
-                      {item.status === "critical" ? "위험" : item.status === "anomaly" ? "이상" : "이상 의심"}
-                    </div>
-                  </div>
+        <button onClick={onClose} style={{ color: "var(--ink-3)" }}><Icons.close size={16} /></button>
+      </div>
+      <div className="scroll" style={{ padding: 18, overflowY: "auto", flex: 1 }}>
+        {item.volt != null && (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-3)", marginBottom: 8 }}>실시간 측정값</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 18 }}>
+              {[
+                { l: "방식전위", v: `${item.volt}mV` },
+                { l: "AC 유입", v: `${(item.ac ?? 0).toLocaleString()}mV` },
+                { l: "희생전류",  v: `${item.sacrificial ?? 0}mA` },
+                { l: "온도",     v: `${item.temp ?? "-"}°C` },
+                { l: "습도",     v: `${item.hum ?? "-"}%` },
+                { l: "통신품질", v: item.commOk ? `${item.commDbm}dBm` : "단절", a: !item.commOk ? "var(--err)" : null },
+              ].map((s) => (
+                <div key={s.l} style={{ padding: "10px 12px", borderRadius: 8, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
+                  <div style={{ fontSize: 10, color: "var(--ink-3)" }}>{s.l}</div>
+                  <div className="mono" style={{ fontSize: 17, fontWeight: 700, marginTop: 2, color: s.a || "var(--ink)" }}>{s.v}</div>
                 </div>
-              )}
-              {/* 센서별 이상 기여도 막대 — anomaly only */}
-              {Array.isArray(ai.contribution) && ai.contribution.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", marginBottom: 8 }}>센서별 이상 기여도</div>
-                  {ai.contribution.map((cc, i) => (
-                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-                      <div style={{ fontSize: 11, width: 70, color: "var(--ink-3)" }}>{cc.sensor}</div>
-                      <div style={{ flex: 1, height: 7, background: "var(--bg-sunk)", borderRadius: 3, overflow: "hidden" }}>
-                        <div style={{
-                          width: `${Math.min(Number(cc.pct) || 0, 100)}%`, height: "100%",
-                          background: i === 0 ? "var(--err)" : i === 1 ? "var(--warn)" : "var(--ink-4)",
-                          transition: "width 220ms ease",
-                        }} />
-                      </div>
-                      <div className="mono" style={{ fontSize: 10, width: 36, textAlign: "right", color: i === 0 ? "var(--err)" : "var(--ink-3)" }}>{cc.pct}%</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {/* AI 분석 요약 + 권장 조치 (챗봇 SSE 스트리밍) */}
-              <AIAnalysisSection deviceId={item.deviceId} aiInfo={ai} status={item.status} />
-            </>
-          )}
+              ))}
+            </div>
+          </>
+        )}
 
-          {/* 실시간 측정값 — equipment 매칭 됐을 때만 (_aiOnly 면 숨김) */}
-          {!aiOnly && item.volt != null && (
-            <>
-              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", marginBottom: 10 }}>실시간 측정값</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
-                {[
-                  { l: "방식전위", v: `${item.volt}mV`, a: item.status === "anomaly" && (item.label === "방식전위 이탈" || item.label === "위상차 급변") ? "var(--err)" : "var(--ok)" },
-                  { l: "AC 유입", v: `${(item.ac ?? 0).toLocaleString()}mV`, a: item.status === "anomaly" && item.label === "AC 유입 과다" ? "var(--err)" : null },
-                  { l: "희생전류",  v: `${item.sacrificial ?? 0}mA`, a: item.status === "anomaly" && item.label === "희생전류 저하" ? "var(--err)" : null },
-                  { l: "온도",     v: `${item.temp ?? "-"}°C` },
-                  { l: "습도",     v: `${item.hum ?? "-"}%` },
-                  { l: "통신품질", v: item.commOk ? `${item.commDbm}dBm` : "단절", a: !item.commOk || (item.commOk && item.commDbm < -75) ? "var(--err)" : null },
-                ].map((s) => (
-                  <div key={s.l} style={{ padding: "12px 14px", borderRadius: 10, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
-                    <div style={{ fontSize: 10, color: "var(--ink-3)" }}>{s.l}</div>
-                    <div className="mono" style={{ fontSize: 20, fontWeight: 700, marginTop: 2, color: s.a || "var(--ink)" }}>{s.v}</div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
+        {item.volt != null && item.status !== "offline" && (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-3)", marginBottom: 8 }}>방식전위 트렌드 (6시간)</div>
+            <div style={{ padding: "8px 4px 4px", borderRadius: 10, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)", height: 160 }}>
+              <VoltTrendChart item={item} />
+            </div>
+          </>
+        )}
 
-          {/* 시계열 차트 — equipment 매칭 + 데이터 있을 때만 */}
-          {!aiOnly && item.volt != null && item.status !== "offline" && (
-            <>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)" }}>방식전위 트렌드 (6시간)</div>
-                <div style={{ display: "flex", gap: 10, fontSize: 9, color: "var(--ink-4)" }}>
-                  {[
-                    { cc: "rgba(239,68,68,0.4)",   l: "부족 (> -850)" },
-                    { cc: "rgba(16,185,129,0.4)",  l: "정상" },
-                    { cc: "rgba(245,158,11,0.4)",  l: "과방식 (< -1200)" },
-                  ].map(({ cc, l }) => (
-                    <span key={l} style={{ display: "flex", alignItems: "center", gap: 3 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 2, background: cc, flexShrink: 0 }} />{l}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <div style={{
-                padding: "8px 4px 4px", borderRadius: 10,
-                background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
-                height: 170,
-              }}>
-                <VoltTrendChart item={item} />
-              </div>
-            </>
-          )}
-
-          {/* 상세 리포트 버튼 제거 (5/26 사용자 결정) — 챗봇이 모든 분석 자동 제공 */}
-        </div>
+        {item.status === "offline" && (
+          <div style={{
+            padding: "12px 14px", borderRadius: 10,
+            background: "rgba(100,116,139,0.10)",
+            border: "1px solid rgba(100,116,139,0.25)",
+            fontSize: 12, color: "var(--ink-2)",
+          }}>
+            통신 두절 단말 — 실시간 측정 데이터 없음
+            {item.updatedAt && <><br/>마지막 측정: {new Date(item.updatedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</>}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], aiEvents = [], demoMode = false, logOpen = false, onLogClose, onToggleLog }) {
+export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], aiEvents = [], demoMode = false, logOpen = false, onLogClose, onToggleLog }) {
   const [activeKpi, setActiveKpi] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [focused, setFocused] = useState(null); // {lat, lng, node, ts}
@@ -2754,11 +2534,36 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
     }
   };
 
-  // AI 탐지 카드 클릭: 분석 모달 + 지도 포커스
+  // 챗봇에 자동 전송할 메시지 (AI 탐지 카드 클릭 → "TB24-XXX 분석" 푸쉬, 5/26)
+  const [chatAutoMessage, setChatAutoMessage] = useState(null);
+  // 마커 popup 클릭 → 지도 영역 안 사이드바에 표시할 단말 (5/26)
+  const [sidebarDevice, setSidebarDevice] = useState(null);
+
+  // AI 탐지 카드 클릭: 챗봇 패널에 분석 메시지 자동 푸쉬 + 지도 포커스
   const handleAnalyze = (item) => {
-    onAnalyze && onAnalyze(item);
-    if (item && item.node) focusByNode(item.node);
+    if (!item || !item.node) return;
+    setChatAutoMessage(`${item.node} 의 현재 상태, 위험 요인, 권장 조치를 정리해줘`);
+    focusByNode(item.node);
   };
+
+  // 지도 마커 클릭: popup 표시 (Leaflet 자동). popup 클릭은 별도 delegation 으로 사이드바 열기.
+  const handleMarkerClick = (m) => {
+    // 마커 클릭 자체는 popup 만. 사이드바는 popup 클릭 delegation 에서 처리.
+    if (m && m.node) focusByNode(m.node);
+  };
+
+  // popup 클릭 delegation — popup HTML 의 data-popup-node 감지
+  useEffect(() => {
+    const onClick = (e) => {
+      const target = e.target.closest && e.target.closest("[data-popup-node]");
+      if (!target) return;
+      const node = target.getAttribute("data-popup-node");
+      const eq = equipment.find((x) => x.deviceId === node);
+      if (eq) setSidebarDevice(eq);
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, [equipment]);
 
   // 사용자가 KPI 직접 클릭: 활성 토글 + 지도 fit + AI 자동 타이머 취소
   const handleKpiClick = (newActive) => {
@@ -2851,14 +2656,22 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
 
         {/* (col 2, row 1~3) — AI 챗봇 (전체 우측 column · 옴니 5/22 확장) */}
         <div style={{ gridColumn: 2, gridRow: "1 / span 3", minHeight: 0 }}>
-          <ChatPanel equipment={equipment} weather={weather} onBotReply={fitToNodes} onAutoKpi={handleAutoKpi} demoMode={demoMode} />
+          <ChatPanel
+            equipment={equipment}
+            weather={weather}
+            onBotReply={fitToNodes}
+            onAutoKpi={handleAutoKpi}
+            demoMode={demoMode}
+            autoMessage={chatAutoMessage}
+            onAutoConsumed={() => setChatAutoMessage(null)}
+          />
         </div>
 
-        {/* (col 1, row 2) — 지도 */}
-        <div style={{ gridColumn: 1, gridRow: 2, minHeight: 0 }}>
+        {/* (col 1, row 2) — 지도 + 사이드바 (5/26 마커 popup 클릭 시 사이드바 슬라이드인) */}
+        <div style={{ gridColumn: 1, gridRow: 2, minHeight: 0, position: "relative" }}>
           <MapPanelWrap
             markers={filteredMarkers}
-            onMarker={() => {}}
+            onMarker={handleMarkerClick}
             mapStyle={mapStyle}
             setMapStyle={setMapStyle}
             focus={focused}
@@ -2869,6 +2682,9 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
             autoKpiSec={autoKpiSec}
             onCancelAutoKpi={cancelAutoKpi}
           />
+          {sidebarDevice && (
+            <DashboardEquipmentDrawer item={sidebarDevice} onClose={() => setSidebarDevice(null)} />
+          )}
         </div>
 
         {/* (col 1, row 3) — 표 + (AI 탐지 ⇄ 시스템 로그 swap, 5/26)
