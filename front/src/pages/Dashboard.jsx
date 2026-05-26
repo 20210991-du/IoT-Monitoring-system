@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, Fragment } from "react";
 import { Icons } from "../components/Icons.jsx";
 import { MapPanel } from "../components/MapPanel.jsx";
 import { devicesToMarkers } from "../api/client.js";
@@ -843,7 +843,35 @@ function detectKpiFromReply(text) {
 // 채팅 히스토리 localStorage 키 + 한도
 const CHAT_STORAGE_KEY = "siwon.chat.history";
 const CHAT_SESSION_KEY = "siwon.chat.session_id";
+const CHAT_LAST_ACTIVE_KEY = "siwon.chat.last_active_date";   // 자정 자동 새 세션용 (YYYY-MM-DD)
 const CHAT_MAX_KEEP = 60; // 최근 60개 메시지만 보관
+
+// 로컬(브라우저 timezone) YYYY-MM-DD 키
+function localDateKey(d) {
+  const x = d instanceof Date ? d : new Date(d);
+  return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+}
+function todayKey() { return localDateKey(new Date()); }
+
+// 세션 목록을 updated_at 기준 5 카테고리로 분류 (ChatGPT 사이드바 패턴)
+//   오늘 / 어제 / 이번 주 / 이번 달 / 이전
+function groupSessionsByDate(sessions) {
+  const now = new Date();
+  const todayStart     = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const yesterdayStart = todayStart - 86_400_000;
+  const weekStart      = todayStart - 6 * 86_400_000;   // 오늘 포함 최근 7일
+  const monthStart     = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const groups = { "오늘": [], "어제": [], "이번 주": [], "이번 달": [], "이전": [] };
+  for (const s of sessions) {
+    const t = s.updated_at ? new Date(s.updated_at).getTime() : 0;
+    if      (t >= todayStart)     groups["오늘"].push(s);
+    else if (t >= yesterdayStart) groups["어제"].push(s);
+    else if (t >= weekStart)      groups["이번 주"].push(s);
+    else if (t >= monthStart)     groups["이번 달"].push(s);
+    else                          groups["이전"].push(s);
+  }
+  return groups;
+}
 
 function loadChatHistory() {
   try {
@@ -897,10 +925,34 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
   const [sessionId, setSessionId] = useState(() => {
     try { const v = localStorage.getItem(CHAT_SESSION_KEY); return v ? Number(v) : null; } catch { return null; }
   });
+  const [lastActiveDate, setLastActiveDate] = useState(() => {
+    try { return localStorage.getItem(CHAT_LAST_ACTIVE_KEY) || null; } catch { return null; }
+  });
   const [showSessions, setShowSessions] = useState(false);
   const [sessions, setSessions] = useState([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const listRef = useRef(null);
+
+  // B1. 자정 자동 새 세션 — 마운트 시 한 번 체크
+  //   localStorage 의 last_active_date 가 오늘과 다르면 = 다음 날 챗봇 첫 진입
+  //   → sessionId / messages 리셋 후 오늘 키 저장
+  useEffect(() => {
+    const today = todayKey();
+    if (lastActiveDate && lastActiveDate !== today) {
+      // 다른 날 → 새 세션 시작
+      setMessages([greeting]);
+      setSessionId(null);
+      try {
+        localStorage.removeItem(CHAT_SESSION_KEY);
+        localStorage.removeItem(CHAT_STORAGE_KEY);
+      } catch {}
+    }
+    if (lastActiveDate !== today) {
+      setLastActiveDate(today);
+      try { localStorage.setItem(CHAT_LAST_ACTIVE_KEY, today); } catch {}
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 드롭다운 열기 → 세션 목록 로드
   const openSessionsList = async () => {
@@ -925,6 +977,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
         role: m.role,
         text: m.text,
         time: `${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}`,
+        dateKey: localDateKey(t),    // C1. day-divider 용
       };
     });
     if (msgs.length === 0) return;
@@ -961,13 +1014,30 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     e && e.preventDefault();
     const trimmed = (q != null ? q : input).trim();
     if (!trimmed || sending) return;
+
+    // B1. 자정 가드 (send 중 자정 넘긴 경우 대비) — 새 날이면 sessionId 리셋
+    const today = todayKey();
+    const isNewDay = !!lastActiveDate && lastActiveDate !== today;
+    if (isNewDay && sessionId) {
+      setSessionId(null);
+      try { localStorage.removeItem(CHAT_SESSION_KEY); } catch {}
+    }
+    if (lastActiveDate !== today) {
+      setLastActiveDate(today);
+      try { localStorage.setItem(CHAT_LAST_ACTIVE_KEY, today); } catch {}
+    }
+
     const now = new Date();
     const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-    const newUserMsg = { role: "user", text: trimmed, time };
+    const newUserMsg = { role: "user", text: trimmed, time, dateKey: today };
     const r = new Date();
     const rtime = `${String(r.getHours()).padStart(2, "0")}:${String(r.getMinutes()).padStart(2, "0")}`;
     // 사용자 메시지 + 빈 AI 메시지(스트리밍 채워질 자리) 동시 추가
-    setMessages((m) => [...m, newUserMsg, { role: "ai", text: "", time: rtime, streaming: true }]);
+    //   isNewDay 면 base = [greeting] 로 (이전 메시지 자르고 새 세션 시작)
+    setMessages((m) => {
+      const base = isNewDay ? [greeting] : m;
+      return [...base, newUserMsg, { role: "ai", text: "", time: rtime, streaming: true, dateKey: today }];
+    });
     setInput("");
     setSending(true);
 
@@ -1178,47 +1248,65 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
                   {!sessionsLoading && sessions.length === 0 && (
                     <div style={{ padding: 12, fontSize: 11, color: "var(--ink-4)" }}>저장된 세션 없음</div>
                   )}
-                  {!sessionsLoading && sessions.map((s) => {
-                    const isActive = s.id === sessionId;
-                    const dt = s.updated_at ? new Date(s.updated_at) : null;
-                    const dtLabel = dt ? `${dt.getMonth()+1}/${dt.getDate()} ${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}` : "";
+                  {/* A1. 일자 그룹화 — 오늘 / 어제 / 이번 주 / 이번 달 / 이전 */}
+                  {!sessionsLoading && sessions.length > 0 && Object.entries(groupSessionsByDate(sessions)).map(([label, items]) => {
+                    if (items.length === 0) return null;
                     return (
-                      <div
-                        key={s.id}
-                        onClick={() => loadSession(s.id)}
-                        style={{
-                          padding: "8px 10px",
-                          borderBottom: "1px solid var(--line)",
-                          background: isActive ? "rgba(79,70,229,0.08)" : "transparent",
-                          cursor: "pointer",
-                          display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8,
-                        }}
-                        onMouseOver={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-elev)"; }}
-                        onMouseOut={(e)  => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
-                      >
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{
-                            fontSize: 12, fontWeight: isActive ? 700 : 500,
-                            color: isActive ? "var(--brand)" : "var(--ink)",
-                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                          }}>
-                            {s.title || `세션 #${s.id}`}
-                          </div>
-                          <div style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>
-                            {dtLabel} · 메시지 {s.messageCount || 0}
-                          </div>
+                      <div key={label}>
+                        <div style={{
+                          position: "sticky", top: 0, zIndex: 1,
+                          padding: "6px 10px 4px",
+                          fontSize: 10, fontWeight: 700, color: "var(--ink-3)",
+                          letterSpacing: "0.05em", textTransform: "uppercase",
+                          background: "var(--bg)",
+                          borderBottom: "1px solid var(--line-soft)",
+                        }}>
+                          {label} <span style={{ opacity: 0.5, fontWeight: 500 }}>({items.length})</span>
                         </div>
-                        <button
-                          onClick={(e) => removeSession(s.id, e)}
-                          title="세션 삭제"
-                          style={{
-                            background: "transparent", border: "none",
-                            color: "var(--ink-4)", cursor: "pointer", padding: 2,
-                            opacity: 0.5,
-                          }}
-                          onMouseOver={(e) => { e.currentTarget.style.opacity = 1; e.currentTarget.style.color = "#dc2626"; }}
-                          onMouseOut={(e)  => { e.currentTarget.style.opacity = 0.5; e.currentTarget.style.color = "var(--ink-4)"; }}
-                        ><Icons.close size={10} /></button>
+                        {items.map((s) => {
+                          const isActive = s.id === sessionId;
+                          const dt = s.updated_at ? new Date(s.updated_at) : null;
+                          const dtLabel = dt ? `${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}` : "";
+                          return (
+                            <div
+                              key={s.id}
+                              onClick={() => loadSession(s.id)}
+                              style={{
+                                padding: "8px 10px",
+                                borderBottom: "1px solid var(--line)",
+                                background: isActive ? "rgba(79,70,229,0.08)" : "transparent",
+                                cursor: "pointer",
+                                display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8,
+                              }}
+                              onMouseOver={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-elev)"; }}
+                              onMouseOut={(e)  => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                            >
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{
+                                  fontSize: 12, fontWeight: isActive ? 700 : 500,
+                                  color: isActive ? "var(--brand)" : "var(--ink)",
+                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                }}>
+                                  {s.title || `세션 #${s.id}`}
+                                </div>
+                                <div style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>
+                                  {dtLabel} · 메시지 {s.messageCount || 0}
+                                </div>
+                              </div>
+                              <button
+                                onClick={(e) => removeSession(s.id, e)}
+                                title="세션 삭제"
+                                style={{
+                                  background: "transparent", border: "none",
+                                  color: "var(--ink-4)", cursor: "pointer", padding: 2,
+                                  opacity: 0.5,
+                                }}
+                                onMouseOver={(e) => { e.currentTarget.style.opacity = 1; e.currentTarget.style.color = "#dc2626"; }}
+                                onMouseOut={(e)  => { e.currentTarget.style.opacity = 0.5; e.currentTarget.style.color = "var(--ink-4)"; }}
+                              ><Icons.close size={10} /></button>
+                            </div>
+                          );
+                        })}
                       </div>
                     );
                   })}
@@ -1240,7 +1328,16 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
         background: "var(--bg-sunk)",
         display: "flex", flexDirection: "column", gap: 8,
       }}>
-        {messages.map((m, i) => <ChatMessage key={i} message={m} />)}
+        {messages.map((m, i) => {
+          const prevKey = i > 0 ? messages[i - 1]?.dateKey : null;
+          const showDivider = m.dateKey && prevKey && m.dateKey !== prevKey;
+          return (
+            <Fragment key={i}>
+              {showDivider && <DayDivider dateKey={m.dateKey} />}
+              <ChatMessage message={m} />
+            </Fragment>
+          );
+        })}
         {/* 스트리밍 중엔 마지막 AI 메시지의 깜빡 커서가 visual feedback 역할 — 별도 typing indicator 불필요 */}
         {sending && messages[messages.length - 1]?.role !== "ai" && <ChatTyping />}
       </div>
@@ -1291,6 +1388,29 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
         </button>
       </form>
     </Panel>
+  );
+}
+
+// C1. 메시지 day-divider — 같은 세션 안에서 날짜 변경 지점 표시.
+//   라벨: "5월 26일 (수)" 가운데 + 좌우 회색 라인.
+function DayDivider({ dateKey }) {
+  if (!dateKey) return null;
+  const d = new Date(dateKey + "T00:00:00");
+  if (isNaN(d.getTime())) return null;
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  const dow = "일월화수목금토"[d.getDay()];
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8,
+      padding: "6px 4px 2px",
+      fontSize: 10, fontWeight: 700, color: "var(--ink-4)",
+      letterSpacing: "0.04em",
+    }}>
+      <div style={{ flex: 1, height: 1, background: "var(--line-soft)" }} />
+      <span>{m}월 {day}일 ({dow})</span>
+      <div style={{ flex: 1, height: 1, background: "var(--line-soft)" }} />
+    </div>
   );
 }
 
