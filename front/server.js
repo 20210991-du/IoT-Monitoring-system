@@ -2317,10 +2317,17 @@ app.post("/api/admin/merge-yesterday-sessions", dbRequired, async (_req, res) =>
         AND id NOT IN (SELECT DISTINCT session_id FROM chat_messages)
     `, [target]);
 
-    // target title 갱신
+    // target title 갱신 + updated_at 도 메시지 마지막 시각으로 강제
+    //   (그냥 UPDATE title 만 하면 ON UPDATE CURRENT_TIMESTAMP 가 발동되어
+    //    어제 세션 updated_at 이 자정 시각으로 갱신 → 그룹 분류 '오늘' 로 잘못 떨어짐)
     await pool.query(
-      `UPDATE chat_sessions SET title = ? WHERE id = ?`,
-      [`📚 ${yKey} 대화 통합`, target],
+      `UPDATE chat_sessions SET title = ?,
+         updated_at = COALESCE(
+           (SELECT MAX(m.created_at) FROM chat_messages m WHERE m.session_id = ?),
+           updated_at
+         )
+       WHERE id = ?`,
+      [`📚 ${yKey} 대화 통합`, target, target],
     );
 
     console.log(`[merge-yesterday] dateKey=${yKey} target=${target} deleted=${delResult.affectedRows}`);
