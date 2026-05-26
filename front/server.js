@@ -2267,6 +2267,181 @@ app.get("/api/admin/tool-stats", dbRequired, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────
+// 🤖 AI 자동 분석 (cron) — 매시 정각 launchd 가 호출
+//   1. 군산 날씨 fetch (Open-Meteo)
+//   2. 도구 5개 호출로 시스템 현황 수집
+//   3. LLM 한 번 호출 → C 톤 풍부 메시지 생성
+//   4. "AI 자동 분석 — YYYY-MM-DD" 일일 세션에 system role 로 INSERT
+// ─────────────────────────────────────────────────────
+
+// 서버측 군산 날씨 fetch (Open-Meteo)
+const WMO_KO = {
+  0:"맑음",1:"대체로 맑음",2:"부분 흐림",3:"흐림",45:"안개",48:"안개",
+  51:"약한 이슬비",53:"이슬비",55:"강한 이슬비",
+  61:"약한 비",63:"비",65:"강한 비",
+  71:"약한 눈",73:"눈",75:"강한 눈",77:"눈알갱이",
+  80:"소나기",81:"소나기",82:"강한 소나기",
+  85:"눈 소나기",86:"눈 소나기",
+  95:"뇌우",96:"뇌우(우박)",99:"강한 뇌우",
+};
+async function fetchGunsanWeather() {
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=35.9678&longitude=126.7369&current=temperature_2m,weather_code,precipitation,relative_humidity_2m&timezone=Asia%2FSeoul`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!j.current) return null;
+    const code = j.current.weather_code;
+    return {
+      temp:     Math.round(j.current.temperature_2m),
+      ko:       WMO_KO[code] || "-",
+      code,
+      precip:   j.current.precipitation,
+      humidity: j.current.relative_humidity_2m != null ? Math.round(j.current.relative_humidity_2m) : null,
+      time:     j.current.time,
+    };
+  } catch (e) {
+    console.warn("[fetchGunsanWeather]", e.message);
+    return null;
+  }
+}
+
+// "AI 자동 분석 — YYYY-MM-DD" 세션 ensure (오늘 세션 없으면 생성)
+async function ensureAutoInsightSession(dateKey) {
+  if (!pool) return null;
+  const title = `🤖 AI 자동 분석 — ${dateKey}`;
+  try {
+    const [rows] = await pool.query(
+      `SELECT id FROM chat_sessions WHERE title = ? ORDER BY created_at DESC LIMIT 1`,
+      [title],
+    );
+    if (rows.length) return Number(rows[0].id);
+    const [r] = await pool.query(`INSERT INTO chat_sessions (title) VALUES (?)`, [title]);
+    return r.insertId;
+  } catch (e) {
+    console.warn("[ensureAutoInsightSession]", e.message);
+    return null;
+  }
+}
+
+// 자동 분석 prompt 빌더 (C 톤 풍부 형식 강제)
+function buildAutoInsightPrompt(weather, dataBundle) {
+  const { summary, offlineList, criticalList, lowVolt, recentAlarms } = dataBundle;
+  const now = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+  const weatherLine = weather
+    ? `${weather.ko} · ${weather.temp}°C${weather.precip != null ? ` · 강수 ${weather.precip}mm` : ""}${weather.humidity != null ? ` · 습도 ${weather.humidity}%` : ""}`
+    : "(데이터 없음)";
+  return `당신은 매설배관 IoT 통합관제 시스템의 AI 분석 엔진입니다.
+운영자가 챗봇에 접속할 때마다 자동으로 push 되는 시간별 분석 메시지를 작성합니다.
+한국어 존댓말. 답변 외 메타·설명 X. 메시지 본문만 출력.
+
+# 현재 시각
+${now}
+
+# 현재 군산 날씨 (Open-Meteo)
+${weatherLine}
+
+# 시스템 KPI
+${JSON.stringify(summary)}
+
+# 통신 두절 단말 목록 (상위 5)
+${JSON.stringify(offlineList)}
+
+# 위험 단말 목록 (최근 7일 알람 발생, 상위 5)
+${JSON.stringify(criticalList)}
+
+# 방식전위 -800 mV 이상 단말 (부식 진행 가능)
+${JSON.stringify(lowVolt)}
+
+# 최근 24시간 알람
+${JSON.stringify(recentAlarms)}
+
+# 출력 형식 (반드시 이대로)
+
+🤖 자동 분석 · {시각} ── 분석 엔진 가동중
+
+🌦 군산 현재 — {날씨 한 줄}
+
+🔔 즉각 조치
+{즉시 조치가 필요한 단말 1~2건. 날씨 영향 고려. 데이터 근거 명시.
+ 없으면 "현재 즉각 조치 대상 없음. 모니터링 지속."}
+
+📈 트렌드 예측
+{향후 N시간 변화 예측 + [추정] 확률. 날씨가 향후에 미칠 영향 1줄.}
+
+✓ 우선 점검 권고
+1. {단말 또는 구역} ── {긴급도 (즉시/24시간/1주)}
+2. ...
+3. ...
+
+다음 분석 {다음 시각}
+
+# 규칙
+- 수치는 도구 데이터 그대로 인용. 추측 결론은 [추정] 라벨
+- 데이터 없는 항목은 "없음" 명시 (만들지 말 것)
+- 마크다운 **굵게** 만 사용 (헤더 ## X)
+- 5문장 이상 길게 쓰지 말 것 (각 섹션 2~4문장)`;
+}
+
+app.post("/api/admin/run-auto-insight", dbRequired, async (_req, res) => {
+  const t0 = Date.now();
+  try {
+    // 1. 날씨
+    const weather = await fetchGunsanWeather();
+
+    // 2. 데이터 수집 (도구 직접 호출 — 캐시 hit 도 OK)
+    const [summary, offlineList, criticalList, lowVolt, recentAlarms] = await Promise.all([
+      execTool("get_summary", {}),
+      execTool("list_devices", { status: "offline", limit: 5 }),
+      execTool("list_devices", { status: "critical", limit: 5 }),
+      execTool("find_devices_by_value", { metric: "volt", op: "gte", threshold: -800, limit: 5 }),
+      execTool("get_alarms", { days: 1, limit: 5 }),
+    ]);
+
+    // 3. LLM 호출 (도구 X — 데이터는 이미 prompt 에 포함)
+    const systemPrompt = buildAutoInsightPrompt(weather, { summary, offlineList, criticalList, lowVolt, recentAlarms });
+    const ollamaRes = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user",   content: "지금 분석 메시지를 작성하세요." },
+        ],
+        stream: false,
+        think: false,
+        options: { temperature: 0.4, num_predict: 800 },
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!ollamaRes.ok) throw new Error(`Ollama HTTP ${ollamaRes.status}`);
+    const data = await ollamaRes.json();
+    const text = String(data.message?.content || "").trim();
+    if (!text) throw new Error("LLM empty response");
+
+    // 4. 자동 분석 세션 ensure + INSERT
+    const now = new Date();
+    const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const sid = await ensureAutoInsightSession(dateKey);
+    if (!sid) throw new Error("session ensure failed");
+    await persistMessage(
+      sid, "system", text,
+      { auto: true, weather, summary, hourlyTrigger: now.toISOString() },
+      { prompt: data.prompt_eval_count, completion: data.eval_count },
+      OLLAMA_MODEL,
+    );
+
+    const elapsedMs = Date.now() - t0;
+    console.log(`[ai-insight] session=${sid} · ${elapsedMs}ms · ${text.length} chars`);
+    res.json({ ok: true, sessionId: sid, dateKey, text, weather, elapsedMs });
+  } catch (err) {
+    console.error("[run-auto-insight]", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── 챗봇 세션 관리 ───────────────────────────────────
 // GET    /api/chat/sessions          — 세션 목록 (최근 30)
 // GET    /api/chat/sessions/:id      — 세션 + 메시지
@@ -2439,9 +2614,9 @@ function buildSystemPrompt(ctx) {
       return `  · ${o.deviceId} (${o.zone || "-"}, ${o.location || "-"}): 마지막 측정 ${last} · 두절 ${hrs}시간 (≈${days}일)`;
     }).join("\n");
 
-  // 날씨 라인 (있을 때만)
+  // 날씨 라인 (있을 때만) — 군산 (SITE_ID=2 대상 지역)
   const weatherLine = weather
-    ? `${weather.ko} · ${weather.temp}°C (서울, ${weather.time})`
+    ? `${weather.ko} · ${weather.temp}°C${weather.precip != null ? ` · 강수 ${weather.precip}mm` : ""}${weather.humidity != null ? ` · 습도 ${weather.humidity}%` : ""} (군산, ${weather.time})`
     : "(데이터 없음)";
 
   // 12시간 추이 텍스트 표 (위험·이상 의심만)
@@ -2489,7 +2664,7 @@ function buildSystemPrompt(ctx) {
 # 현재 시각
 ${nowText}
 
-# 현재 날씨 (서울)
+# 현재 날씨 (군산 — SITE_ID=2 대상 지역)
 ${weatherLine}
 
 날씨가 매설배관에 미치는 영향 (참고):

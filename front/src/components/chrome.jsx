@@ -655,7 +655,7 @@ export function SubNav({ tab, setTab, apiStatus = "mock", dbStatus = null, dbInf
           fontSize: 13, fontWeight: 600, color: "var(--ink-2)",
           opacity: weather?.stale ? 0.55 : 1,
         }}
-        title={weather?.time ? `Open-Meteo · 서울 · ${weather.time}` : "날씨 로드 중"}
+        title={weather?.time ? `Open-Meteo · 군산 · ${weather.time}${weather.precip != null ? ` · 강수 ${weather.precip}mm` : ""}${weather.humidity != null ? ` · 습도 ${weather.humidity}%` : ""}` : "날씨 로드 중"}
       >
         <span style={{ fontSize: 16 }}>{weather?.icon || "⛅"}</span>
         <span>{weather?.ko || "흐림"}</span>
