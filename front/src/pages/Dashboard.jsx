@@ -663,54 +663,7 @@ function LogPanel({ lines, onToggleLog }) {
   const allVisible = hiddenKinds.size === 0;
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      {/* kind 필터 칩 — 패널 최상단 */}
-      <div style={{
-        padding: "8px 12px", borderBottom: "1px solid var(--line-soft)",
-        background: "var(--bg-sunk)",
-        display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap",
-      }}>
-        {LOG_KINDS.map(({ k, label, color }) => {
-          const on = !hiddenKinds.has(k);
-          const n = kindCounts[k] || 0;
-          return (
-            <button
-              key={k}
-              onClick={() => toggleKind(k)}
-              title={on ? `${label} 숨기기` : `${label} 표시`}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 4,
-                padding: "2px 8px", borderRadius: 999,
-                fontSize: 10, fontWeight: 700, lineHeight: 1.4,
-                background: on ? "rgba(0,0,0,0.04)" : "transparent",
-                border: `1px solid ${on ? color : "var(--line)"}`,
-                color: on ? color : "var(--ink-4)",
-                cursor: "pointer",
-                opacity: on ? 1 : 0.5,
-                transition: "all 140ms ease",
-              }}
-            >
-              <span style={{
-                width: 6, height: 6, borderRadius: "50%",
-                background: on ? color : "var(--ink-4)",
-              }} />
-              {label}
-              <span className="mono" style={{ opacity: 0.7 }}>{n}</span>
-            </button>
-          );
-        })}
-        {!allVisible && (
-          <button
-            onClick={() => setHiddenKinds(new Set())}
-            style={{
-              marginLeft: "auto",
-              background: "transparent", border: "none",
-              color: "var(--ink-4)", cursor: "pointer",
-              fontSize: 10, fontWeight: 600,
-            }}
-          >전체 표시</button>
-        )}
-      </div>
-      {/* PanelHeader — 칩 다음 */}
+      {/* PanelHeader — 제목 | 필터 칩 (가운데) | ← AI 탐지로 (우측) */}
       <PanelHeader
         right={onToggleLog ? (
           <button
@@ -723,22 +676,70 @@ function LogPanel({ lines, onToggleLog }) {
               border: "1px solid var(--brand)",
               color: "#fff",
               fontSize: 10, fontWeight: 700,
-              cursor: "pointer",
+              cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
             }}
           >
             ← AI 탐지로
           </button>
         ) : null}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+          {/* 좌: 제목 + 카운트 */}
           <span style={{
             width: 8, height: 8, borderRadius: "50%", background: "var(--ok)",
-            animation: "pulse-dot 1.2s infinite",
+            animation: "pulse-dot 1.2s infinite", flexShrink: 0,
           }} />
-          <div style={{ fontSize: 13, fontWeight: 700 }}>실시간 시스템 로그</div>
-          <span className="mono" style={{ fontSize: 10, color: "var(--ink-3)", marginLeft: 4 }}>
-            {query ? `${filtered.length} / ${lines.length}` : `${lines.length}`} EVENTS
+          <div style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>실시간 시스템 로그</div>
+          <span className="mono" style={{ fontSize: 10, color: "var(--ink-3)", whiteSpace: "nowrap" }}>
+            {query ? `${filtered.length}/${lines.length}` : `${lines.length}`}
           </span>
+          {/* 우: 필터 칩 (가운데~우측 영역, ← AI 탐지로 직전) */}
+          <div style={{
+            marginLeft: "auto",
+            display: "flex", alignItems: "center", gap: 3, flexWrap: "wrap",
+          }}>
+            {LOG_KINDS.map(({ k, label, color }) => {
+              const on = !hiddenKinds.has(k);
+              const n = kindCounts[k] || 0;
+              return (
+                <button
+                  key={k}
+                  onClick={() => toggleKind(k)}
+                  title={on ? `${label} 숨기기` : `${label} 표시`}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 3,
+                    padding: "2px 7px", borderRadius: 999,
+                    fontSize: 10, fontWeight: 700, lineHeight: 1.3,
+                    background: on ? "rgba(0,0,0,0.04)" : "transparent",
+                    border: `1px solid ${on ? color : "var(--line)"}`,
+                    color: on ? color : "var(--ink-4)",
+                    cursor: "pointer",
+                    opacity: on ? 1 : 0.5,
+                    transition: "all 140ms ease",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  <span style={{
+                    width: 5, height: 5, borderRadius: "50%",
+                    background: on ? color : "var(--ink-4)",
+                  }} />
+                  {label}
+                  <span className="mono" style={{ opacity: 0.65 }}>{n}</span>
+                </button>
+              );
+            })}
+            {!allVisible && (
+              <button
+                onClick={() => setHiddenKinds(new Set())}
+                title="전체 표시"
+                style={{
+                  background: "transparent", border: "none",
+                  color: "var(--ink-4)", cursor: "pointer",
+                  fontSize: 11, lineHeight: 1, padding: "2px 4px",
+                }}
+              >↻</button>
+            )}
+          </div>
         </div>
       </PanelHeader>
       {/* 검색 입력창 */}
