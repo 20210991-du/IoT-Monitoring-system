@@ -2240,219 +2240,28 @@ function buildTrendPath(mse, threshold) {
   };
 }
 
-export function AnalysisModal({ item, onClose }) {
+// AnalysisModal — AI 탐지 카드 클릭 시 진입점.
+// anomaly/watch item 을 받아 equipment 매칭 후 DashboardEquipmentDrawer 로 통합 표시 (5/26 사용자 결정).
+// equipment 매칭 되면 실시간 측정값 + 시계열 + AI 분석 모두 표시.
+// 매칭 안 되면 _aiOnly 모드 — AI 분석 섹션만 표시.
+export function AnalysisModal({ item, equipment = [], onClose }) {
   if (!item) return null;
-
-  const isAnomaly = item._kind !== "warn";
-  const color     = isAnomaly ? "var(--err)" : "var(--warn)";
-  const { lineD, areaD, lastX, lastY, yW, yA, thW, thA } = buildTrendPath(item.mse, item.threshold);
-  const mainSensor = item.contribution?.[0]?.sensor || "-";
-
-  const statCards = [
-    { label: "이상 스코어",  value: item.mse.toFixed(3),        accent: color },
-    { label: "이상 임계값",  value: item.threshold?.toFixed(3) ?? "0.409", accent: "var(--ink-2)" },
-    { label: "주요 센서",    value: mainSensor,                  accent: "var(--brand)" },
-    { label: "판정",         value: isAnomaly ? "위험" : "이상 의심", accent: color },
-  ];
-
-  return (
-    <div
-      style={{
-        position: "absolute", inset: 0, zIndex: 100,
-        background: "rgba(10, 15, 30, 0.55)",
-        backdropFilter: "blur(4px)",
-        display: "grid", placeItems: "center",
-        animation: "slide-in-up 200ms ease",
-      }}
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: "var(--bg-elev)", borderRadius: 20,
-          border: "1px solid var(--line)",
-          boxShadow: "var(--shadow-lg)",
-          width: 760, maxHeight: "calc(100% - 80px)", overflow: "hidden",
-          display: "flex", flexDirection: "column",
-        }}
-      >
-        <div style={{
-          padding: "18px 24px",
-          borderBottom: "1px solid var(--line-soft)",
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-        }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <div style={{
-              width: 40, height: 40, borderRadius: 12,
-              background: isAnomaly
-                ? "linear-gradient(135deg, var(--err), #ea580c)"
-                : "linear-gradient(135deg, var(--warn), #d97706)",
-              display: "grid", placeItems: "center", color: "#fff",
-              boxShadow: isAnomaly
-                ? "0 6px 14px -4px rgba(239,68,68,0.5)"
-                : "0 6px 14px -4px rgba(245,158,11,0.5)",
-            }}>
-              <Icons.alert size={18} />
-            </div>
-            <div>
-              <div className="mono" style={{ fontSize: 16, fontWeight: 700 }}>{item.node}</div>
-              <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 2 }}>{item.label} · {item.zone}</div>
-            </div>
-          </div>
-          <button onClick={onClose} style={{ color: "var(--ink-3)", padding: 6 }}><Icons.close size={18} /></button>
-        </div>
-
-        <div className="scroll" style={{ padding: 24, overflowY: "auto" }}>
-          {/* AI 데이터 기반 스탯 카드 */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 20 }}>
-            {statCards.map((s) => (
-              <div key={s.label} style={{
-                padding: "12px 14px", borderRadius: 12,
-                background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
-              }}>
-                <div style={{ fontSize: 10, color: "var(--ink-3)", fontWeight: 600 }}>{s.label}</div>
-                <div className="num" style={{ fontSize: 22, fontWeight: 700, marginTop: 4, color: s.accent }}>{s.value}</div>
-              </div>
-            ))}
-          </div>
-
-          {/* MSE 추이 차트 (item 데이터 기반) */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-              <div style={{ fontSize: 13, fontWeight: 700 }}>MSE 추이 (이상 감지 직전 24시간)</div>
-              <div style={{ display: "flex", gap: 10, fontSize: 10, color: "var(--ink-3)" }}>
-                {[
-                  { c: "rgba(16,185,129,0.35)", l: "정상" },
-                  { c: "rgba(245,158,11,0.35)", l: `이상 의심 ≥${thW.toFixed(3)}` },
-                  { c: "rgba(239,68,68,0.35)",  l: `위험 ≥${thA.toFixed(3)}` },
-                ].map(({ c, l }) => (
-                  <span key={l} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                    <span style={{ width: 10, height: 3, background: c }} />{l}
-                  </span>
-                ))}
-              </div>
-            </div>
-            <div style={{
-              padding: 16, borderRadius: 12,
-              background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
-              height: 200,
-            }}>
-              <svg viewBox="0 0 640 140" style={{ width: "100%", height: "100%" }}>
-                <defs>
-                  <linearGradient id="trend-grad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor={isAnomaly ? "#ef4444" : "#f59e0b"} stopOpacity="0.4" />
-                    <stop offset="100%" stopColor={isAnomaly ? "#ef4444" : "#f59e0b"} stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-                {/* 3-band 배경 */}
-                <rect x="0" y="0"       width="640" height={yA}          fill="rgba(239,68,68,0.07)" />
-                <rect x="0" y={yA}      width="640" height={yW - yA}     fill="rgba(245,158,11,0.07)" />
-                <rect x="0" y={yW}      width="640" height={140 - yW}    fill="rgba(16,185,129,0.06)" />
-                {/* Y축 레이블 */}
-                <text x="4" y="12"   fontSize="9" fill="var(--ink-4)" fontFamily="JetBrains Mono">1.0</text>
-                <text x="4" y={yA + 4} fontSize="9" fill="var(--err)"   fontFamily="JetBrains Mono" fontWeight="700">{thA.toFixed(3)} ── 위험</text>
-                <text x="4" y={yW + 4} fontSize="9" fill="var(--warn)"  fontFamily="JetBrains Mono" fontWeight="700">{thW.toFixed(3)} ── 이상 의심</text>
-                <text x="4" y="136"  fontSize="9" fill="var(--ink-4)" fontFamily="JetBrains Mono">0.0</text>
-                {/* 임계선 */}
-                <line x1="0" y1={yA} x2="640" y2={yA} stroke="var(--err)"  strokeWidth="1" strokeDasharray="4 4" opacity="0.5" />
-                <line x1="0" y1={yW} x2="640" y2={yW} stroke="var(--warn)" strokeWidth="1" strokeDasharray="4 4" opacity="0.5" />
-                {/* 추이 선 */}
-                <path d={areaD} fill="url(#trend-grad)" />
-                <path d={lineD} fill="none" stroke={isAnomaly ? "var(--err)" : "var(--warn)"} strokeWidth="2" />
-                {/* 현재 MSE 포인트 */}
-                <circle cx={lastX} cy={lastY} r="5" fill={isAnomaly ? "var(--err)" : "var(--warn)"} />
-                <circle cx={lastX} cy={lastY} r="10" fill="none"
-                  stroke={isAnomaly ? "var(--err)" : "var(--warn)"} strokeWidth="1.5" opacity="0.5">
-                  <animate attributeName="r" values="5;14;5" dur="1.6s" repeatCount="indefinite" />
-                  <animate attributeName="opacity" values="0.8;0;0.8" dur="1.6s" repeatCount="indefinite" />
-                </circle>
-                {/* 현재값 레이블 */}
-                <rect x={lastX - 28} y={lastY - 22} width="56" height="16" rx="4"
-                  fill={isAnomaly ? "var(--err)" : "var(--warn)"} />
-                <text x={lastX} y={lastY - 11} fontSize="9" fontFamily="JetBrains Mono" fontWeight="700"
-                  fill="#fff" textAnchor="middle">
-                  MSE {item.mse.toFixed(3)}
-                </text>
-              </svg>
-            </div>
-          </div>
-
-          {item.contribution && item.contribution.length > 0 && (
-            <div style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>센서별 이상 기여도</div>
-              <div style={{
-                padding: 16, borderRadius: 12,
-                background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
-                display: "flex", flexDirection: "column", gap: 10,
-              }}>
-                {item.contribution.map((c, i) => (
-                  <div key={c.sensor}>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: i === 0 ? "var(--err)" : "var(--ink-2)" }}>{c.sensor}</span>
-                      <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: i === 0 ? "var(--err)" : "var(--ink-2)" }}>{c.pct}%</span>
-                    </div>
-                    <div style={{ height: 6, background: "var(--bg-elev)", borderRadius: 3, overflow: "hidden" }}>
-                      <div style={{
-                        width: `${c.pct}%`, height: "100%",
-                        background: i === 0 ? "var(--err)" : i === 1 ? "var(--warn)" : "var(--ink-3)",
-                        transition: "width 400ms",
-                      }} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div style={{
-            padding: 16, borderRadius: 12,
-            background: "var(--brand-wash)",
-            border: "1px solid rgba(79,70,229,0.2)",
-            marginBottom: 14,
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <Icons.sparkle size={14} color="var(--brand)" />
-              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--brand)" }}>AI 분석 요약</div>
-            </div>
-            <div style={{ fontSize: 13, color: "var(--ink-2)", lineHeight: 1.6 }}>{item.summary}</div>
-          </div>
-          <div style={{
-            padding: 16, borderRadius: 12,
-            background: "rgba(16,185,129,0.06)",
-            border: "1px solid rgba(16,185,129,0.2)",
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <Icons.check size={14} color="var(--ok)" />
-              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ok)" }}>권장 조치</div>
-            </div>
-            <div style={{ fontSize: 13, color: "var(--ink-2)", lineHeight: 1.6 }}>{item.action}</div>
-          </div>
-        </div>
-
-        <div style={{
-          padding: "14px 24px",
-          borderTop: "1px solid var(--line-soft)",
-          display: "flex", gap: 10, justifyContent: "flex-end",
-        }}>
-          <button onClick={onClose} style={{
-            padding: "10px 18px", borderRadius: 10,
-            background: "var(--bg-sunk)", border: "1px solid var(--line)",
-            fontSize: 13, fontWeight: 600, color: "var(--ink-2)",
-          }}>
-            닫기
-          </button>
-          <button style={{
-            padding: "10px 18px", borderRadius: 10,
-            background: "var(--brand)", color: "#fff",
-            fontSize: 13, fontWeight: 700,
-            boxShadow: "0 6px 14px -4px rgba(79,70,229,0.5)",
-          }}>
-            점검 워크오더 생성 →
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+  const eq = (equipment || []).find((e) => e.deviceId === item.node);
+  const isOfflineLabel = typeof item.label === "string" && item.label.startsWith("통신 두절");
+  const drawerItem = eq
+    ? { ...eq, _ai: item }
+    : {
+        deviceId:   item.node,
+        facilityId: item.facility || "-",
+        zone:       item.zone || "-",
+        location:   "",
+        status:     isOfflineLabel ? "offline" : (item._kind === "warn" ? "warn" : "anomaly"),
+        hoursSilent: isOfflineLabel ? item.mse : null,
+        updatedAt:  item.ts || null,
+        _ai:        item,
+        _aiOnly:    true,
+      };
+  return <DashboardEquipmentDrawer item={drawerItem} onClose={onClose} />;
 }
 
 // ────────────────────────────────────────────────
@@ -2595,9 +2404,135 @@ function VoltTrendChart({ item }) {
   );
 }
 
+// AI 분석 섹션 — 드로어 안에서 챗봇 SSE 자동 호출 + 스트리밍 typewriter
+// 매번 호출 (캐시 없음), 두 섹션 '## 분석 요약' / '## 권장 조치' 헤더로 split
+function splitAnalysisSections(text) {
+  if (!text) return { summary: "", action: "" };
+  // 구분자: ## 권장 조치 (앞에 ##분석 요약 부분은 그 이전)
+  const actIdx = text.search(/##\s*권장\s*조치/);
+  if (actIdx === -1) {
+    // 아직 권장 조치 부분 안 도착 — 전체가 요약 (스트리밍 중간)
+    return { summary: text.replace(/^##\s*분석\s*요약\s*\n?/, "").trim(), action: "" };
+  }
+  const before = text.slice(0, actIdx);
+  const after = text.slice(actIdx);
+  return {
+    summary: before.replace(/^##\s*분석\s*요약\s*\n?/, "").trim(),
+    action: after.replace(/^##\s*권장\s*조치\s*\n?/, "").trim(),
+  };
+}
+
+function AIAnalysisSection({ deviceId, aiInfo, status }) {
+  const [text, setText] = useState("");
+  const [streaming, setStreaming] = useState(true);
+  const [error, setError] = useState(null);
+  const [toolCalls, setToolCalls] = useState([]);
+  const ctrlRef = useRef(null);
+
+  useEffect(() => {
+    if (!deviceId) return;
+    setText(""); setStreaming(true); setError(null); setToolCalls([]);
+    const ctrl = new AbortController();
+    ctrlRef.current = ctrl;
+    const prompt = `${deviceId} 단말의 현재 상태를 분석해줘. 반드시 아래 두 섹션 헤더를 그대로 포함해서 답변:
+
+## 분석 요약
+2~3 문장. 현재 측정값/상태/위험 요인.
+
+## 권장 조치
+3 항목. 각 항목 앞에 [즉시] / [24시간] / [장기] 시급도 라벨.`;
+
+    callLLMStream(prompt, {}, [], null, false, {
+      onDelta: (_p, acc) => setText(acc),
+      onTool: (info) => setToolCalls((tc) => [...tc, info]),
+      onDone: () => setStreaming(false),
+      onError: (err) => { setError(err.message || "분석 실패"); setStreaming(false); },
+      signal: ctrl.signal,
+    });
+
+    return () => { try { ctrl.abort(); } catch {} };
+  }, [deviceId]);
+
+  const { summary, action } = splitAnalysisSections(text);
+  const isOffline = status === "offline";
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 13 }}>🤖</span>
+          AI 분석
+          {streaming && <span style={{ fontSize: 10, color: "var(--brand)" }}>· 생성 중</span>}
+        </div>
+        {toolCalls.length > 0 && (
+          <div style={{ fontSize: 10, color: "var(--ink-4)" }} title={toolCalls.map((t) => t.name).join(", ")}>
+            도구 {toolCalls.length}회 호출
+          </div>
+        )}
+      </div>
+
+      {/* 분석 요약 박스 */}
+      <div style={{
+        padding: 14, borderRadius: 10,
+        background: "rgba(99,102,241,0.06)",
+        border: "1px solid rgba(99,102,241,0.22)",
+        marginBottom: 10, minHeight: 70,
+      }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: "var(--brand)", marginBottom: 6, letterSpacing: "0.04em" }}>
+          분석 요약
+        </div>
+        <div style={{ fontSize: 12.5, lineHeight: 1.65, color: "var(--ink)", whiteSpace: "pre-wrap" }}>
+          {summary
+            ? renderInlineMD(summary)
+            : <span style={{ color: "var(--ink-4)" }}>{streaming ? "분석 중..." : "(응답 없음)"}</span>}
+          {streaming && summary && (
+            <span style={{
+              display: "inline-block", width: 5, height: 12, marginLeft: 2,
+              verticalAlign: "text-bottom", background: "var(--brand)",
+              animation: "blink 0.9s step-start infinite",
+            }} />
+          )}
+        </div>
+      </div>
+
+      {/* 권장 조치 박스 */}
+      <div style={{
+        padding: 14, borderRadius: 10,
+        background: "rgba(16,185,129,0.06)",
+        border: "1px solid rgba(16,185,129,0.22)",
+        minHeight: 70,
+      }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: "var(--ok)", marginBottom: 6, letterSpacing: "0.04em" }}>
+          권장 조치
+        </div>
+        <div style={{ fontSize: 12.5, lineHeight: 1.65, color: "var(--ink)", whiteSpace: "pre-wrap" }}>
+          {action
+            ? renderInlineMD(action)
+            : <span style={{ color: "var(--ink-4)" }}>{streaming ? "대기 중..." : "(응답 없음)"}</span>}
+          {streaming && action && (
+            <span style={{
+              display: "inline-block", width: 5, height: 12, marginLeft: 2,
+              verticalAlign: "text-bottom", background: "var(--ok)",
+              animation: "blink 0.9s step-start infinite",
+            }} />
+          )}
+        </div>
+      </div>
+
+      {error && (
+        <div style={{ marginTop: 8, fontSize: 11, color: "var(--err)" }}>
+          분석 실패: {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DashboardEquipmentDrawer({ item, onClose }) {
   if (!item) return null;
   const c = statusChip(item.status);
+  const ai = item._ai;                 // anomaly/watch 정보 (있을 때만)
+  const aiOnly = item._aiOnly;         // equipment 매칭 안 됨 — 실시간측정/시계열 숨김
   return (
     <div style={{ position: "absolute", inset: 0, zIndex: 90, pointerEvents: "none" }}>
       <div
@@ -2623,7 +2558,7 @@ function DashboardEquipmentDrawer({ item, onClose }) {
           padding: 24, borderBottom: "1px solid var(--line-soft)",
           display: "flex", justifyContent: "space-between", alignItems: "start",
         }}>
-          <div>
+          <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
               <span className="mono" style={{ fontSize: 18, fontWeight: 800 }}>{item.deviceId}</span>
               <span style={{
@@ -2634,61 +2569,125 @@ function DashboardEquipmentDrawer({ item, onClose }) {
               </span>
             </div>
             <div className="mono" style={{ fontSize: 12, color: "var(--ink-3)" }}>{item.facilityId} · {item.zone}</div>
-            <div style={{ fontSize: 13, color: "var(--ink-2)", marginTop: 10 }}>{item.location}</div>
+            {item.location && <div style={{ fontSize: 13, color: "var(--ink-2)", marginTop: 10 }}>{item.location}</div>}
+            {/* offline 한 줄 — 통신 두절 시간 + 마지막 측정 */}
+            {item.status === "offline" && (
+              <div style={{
+                marginTop: 12, padding: "8px 12px", borderRadius: 8,
+                background: "rgba(100,116,139,0.10)",
+                border: "1px solid rgba(100,116,139,0.25)",
+                fontSize: 12, color: "var(--ink)",
+              }}>
+                <strong style={{ color: "var(--err)" }}>통신 두절 {fmtHoursShort(item.hoursSilent ?? (ai && ai.mse))}</strong>
+                {item.updatedAt && <> · 마지막 측정 {new Date(item.updatedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</>}
+              </div>
+            )}
           </div>
           <button onClick={onClose} style={{ color: "var(--ink-3)" }}><Icons.close size={18} /></button>
         </div>
         <div className="scroll" style={{ padding: 24, overflowY: "auto", flex: 1 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", marginBottom: 10 }}>실시간 측정값</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
-            {[
-              { l: "방식전위", v: `${item.volt}mV`, a: item.status === "anomaly" && (item.label === "방식전위 이탈" || item.label === "위상차 급변") ? "var(--err)" : "var(--ok)" },
-              { l: "AC 유입", v: `${item.ac.toLocaleString()}mV`, a: item.status === "anomaly" && item.label === "AC 유입 과다" ? "var(--err)" : null },
-              { l: "희생전류",  v: `${item.sacrificial}mA`, a: item.status === "anomaly" && item.label === "희생전류 저하" ? "var(--err)" : null },
-              { l: "온도",     v: `${item.temp}°C` },
-              { l: "습도",     v: `${item.hum}%` },
-              { l: "통신품질", v: item.commOk ? `${item.commDbm}dBm` : "단절", a: !item.commOk || (item.commOk && item.commDbm < -75) ? "var(--err)" : null },
-            ].map((s) => (
-              <div
-                key={s.l}
-                style={{
-                  padding: "12px 14px", borderRadius: 10,
-                  background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
-                }}
-              >
-                <div style={{ fontSize: 10, color: "var(--ink-3)" }}>{s.l}</div>
-                <div className="mono" style={{ fontSize: 20, fontWeight: 700, marginTop: 2, color: s.a || "var(--ink)" }}>{s.v}</div>
+          {/* AI 분석 메타 (위험도/임계값/판정/기여도) — AI 정보 있을 때만 */}
+          {ai && (
+            <>
+              {/* 위험도/임계/판정 카드 — anomaly/warn/critical (offline 은 두절 시간이 핵심) */}
+              {(item.status === "anomaly" || item.status === "warn" || item.status === "critical") && ai.threshold && (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
+                  <div style={{ padding: "10px 12px", borderRadius: 8, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
+                    <div style={{ fontSize: 10, color: "var(--ink-3)" }}>위험도</div>
+                    <div className="mono" style={{ fontSize: 20, fontWeight: 700, color: "var(--err)" }}>
+                      {riskPct(ai.mse, ai.threshold) ?? "—"}%
+                    </div>
+                  </div>
+                  <div style={{ padding: "10px 12px", borderRadius: 8, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
+                    <div style={{ fontSize: 10, color: "var(--ink-3)" }}>이상 임계</div>
+                    <div className="mono" style={{ fontSize: 16, fontWeight: 700 }}>{Number(ai.threshold).toFixed(3)}</div>
+                    <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>현재 {Number(ai.mse).toFixed(3)}</div>
+                  </div>
+                  <div style={{ padding: "10px 12px", borderRadius: 8, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
+                    <div style={{ fontSize: 10, color: "var(--ink-3)" }}>판정</div>
+                    <div style={{
+                      fontSize: 16, fontWeight: 700, marginTop: 2,
+                      color: item.status === "critical" || item.status === "anomaly" ? "var(--err)" : "var(--warn)",
+                    }}>
+                      {item.status === "critical" ? "위험" : item.status === "anomaly" ? "이상" : "이상 의심"}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {/* 센서별 이상 기여도 막대 — anomaly only */}
+              {Array.isArray(ai.contribution) && ai.contribution.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", marginBottom: 8 }}>센서별 이상 기여도</div>
+                  {ai.contribution.map((cc, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+                      <div style={{ fontSize: 11, width: 70, color: "var(--ink-3)" }}>{cc.sensor}</div>
+                      <div style={{ flex: 1, height: 7, background: "var(--bg-sunk)", borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{
+                          width: `${Math.min(Number(cc.pct) || 0, 100)}%`, height: "100%",
+                          background: i === 0 ? "var(--err)" : i === 1 ? "var(--warn)" : "var(--ink-4)",
+                          transition: "width 220ms ease",
+                        }} />
+                      </div>
+                      <div className="mono" style={{ fontSize: 10, width: 36, textAlign: "right", color: i === 0 ? "var(--err)" : "var(--ink-3)" }}>{cc.pct}%</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* AI 분석 요약 + 권장 조치 (챗봇 SSE 스트리밍) */}
+              <AIAnalysisSection deviceId={item.deviceId} aiInfo={ai} status={item.status} />
+            </>
+          )}
+
+          {/* 실시간 측정값 — equipment 매칭 됐을 때만 (_aiOnly 면 숨김) */}
+          {!aiOnly && item.volt != null && (
+            <>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", marginBottom: 10 }}>실시간 측정값</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
+                {[
+                  { l: "방식전위", v: `${item.volt}mV`, a: item.status === "anomaly" && (item.label === "방식전위 이탈" || item.label === "위상차 급변") ? "var(--err)" : "var(--ok)" },
+                  { l: "AC 유입", v: `${(item.ac ?? 0).toLocaleString()}mV`, a: item.status === "anomaly" && item.label === "AC 유입 과다" ? "var(--err)" : null },
+                  { l: "희생전류",  v: `${item.sacrificial ?? 0}mA`, a: item.status === "anomaly" && item.label === "희생전류 저하" ? "var(--err)" : null },
+                  { l: "온도",     v: `${item.temp ?? "-"}°C` },
+                  { l: "습도",     v: `${item.hum ?? "-"}%` },
+                  { l: "통신품질", v: item.commOk ? `${item.commDbm}dBm` : "단절", a: !item.commOk || (item.commOk && item.commDbm < -75) ? "var(--err)" : null },
+                ].map((s) => (
+                  <div key={s.l} style={{ padding: "12px 14px", borderRadius: 10, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
+                    <div style={{ fontSize: 10, color: "var(--ink-3)" }}>{s.l}</div>
+                    <div className="mono" style={{ fontSize: 20, fontWeight: 700, marginTop: 2, color: s.a || "var(--ink)" }}>{s.v}</div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)" }}>방식전위 트렌드 (6시간)</div>
-            <div style={{ display: "flex", gap: 10, fontSize: 9, color: "var(--ink-4)" }}>
-              {[
-                { c: "rgba(239,68,68,0.4)",   l: "부족 (> -850)" },
-                { c: "rgba(16,185,129,0.4)",  l: "정상" },
-                { c: "rgba(245,158,11,0.4)",  l: "과방식 (< -1200)" },
-              ].map(({ c, l }) => (
-                <span key={l} style={{ display: "flex", alignItems: "center", gap: 3 }}>
-                  <span style={{ width: 8, height: 8, borderRadius: 2, background: c, flexShrink: 0 }} />{l}
-                </span>
-              ))}
-            </div>
-          </div>
-          <div style={{
-            padding: "8px 4px 4px", borderRadius: 10,
-            background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
-            height: 170, marginBottom: 20,
-          }}>
-            <VoltTrendChart item={item} />
-          </div>
-          <button style={{
-            width: "100%", padding: "12px", borderRadius: 10,
-            background: "var(--brand)", color: "#fff",
-            fontSize: 13, fontWeight: 700,
-          }}>
-            상세 리포트 생성
-          </button>
+            </>
+          )}
+
+          {/* 시계열 차트 — equipment 매칭 + 데이터 있을 때만 */}
+          {!aiOnly && item.volt != null && item.status !== "offline" && (
+            <>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)" }}>방식전위 트렌드 (6시간)</div>
+                <div style={{ display: "flex", gap: 10, fontSize: 9, color: "var(--ink-4)" }}>
+                  {[
+                    { cc: "rgba(239,68,68,0.4)",   l: "부족 (> -850)" },
+                    { cc: "rgba(16,185,129,0.4)",  l: "정상" },
+                    { cc: "rgba(245,158,11,0.4)",  l: "과방식 (< -1200)" },
+                  ].map(({ cc, l }) => (
+                    <span key={l} style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: cc, flexShrink: 0 }} />{l}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div style={{
+                padding: "8px 4px 4px", borderRadius: 10,
+                background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
+                height: 170,
+              }}>
+                <VoltTrendChart item={item} />
+              </div>
+            </>
+          )}
+
+          {/* 상세 리포트 버튼 제거 (5/26 사용자 결정) — 챗봇이 모든 분석 자동 제공 */}
         </div>
       </div>
     </div>
