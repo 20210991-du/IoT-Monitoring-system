@@ -2396,9 +2396,12 @@ function VoltTrendChart({ item }) {
 // 사이드바 — 마커 popup 클릭 시 지도 영역 안 우측에 슬라이드 인 (5/26 사용자 결정).
 // 백드롭 없음 — 지도/챗봇 보면서 동시 확인 가능.
 // AI 분석 / 위험도 / 기여도 등 모두 제거 — 챗봇 패널이 그 역할 담당.
-function DashboardEquipmentDrawer({ item, onClose }) {
+function DashboardEquipmentDrawer({ item, onClose, onDetailRequest }) {
   if (!item) return null;
   const c = statusChip(item.status);
+  const lastMeasuredText = item.updatedAt
+    ? new Date(item.updatedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : null;
   return (
     <div style={{
       position: "absolute", right: 0, top: 0, bottom: 0, width: 420, zIndex: 30,
@@ -2410,28 +2413,60 @@ function DashboardEquipmentDrawer({ item, onClose }) {
     }}>
       <div style={{
         padding: 18, borderBottom: "1px solid var(--line-soft)",
-        display: "flex", justifyContent: "space-between", alignItems: "start",
       }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-            <span className="mono" style={{ fontSize: 16, fontWeight: 800 }}>{item.deviceId}</span>
-            <span style={{
-              padding: "3px 10px", borderRadius: 6, fontSize: 11, fontWeight: 700,
-              background: c.bg, color: c.fg, border: `1px solid ${c.bd}`,
-            }}>
-              {c.ko}
-            </span>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", gap: 8 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+              <span className="mono" style={{ fontSize: 16, fontWeight: 800 }}>{item.deviceId}</span>
+              <span style={{
+                padding: "3px 10px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+                background: c.bg, color: c.fg, border: `1px solid ${c.bd}`,
+              }}>
+                {c.ko}
+              </span>
+            </div>
+            <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>{item.facilityId} · {item.zone}</div>
+            {item.location && <div style={{ fontSize: 12, color: "var(--ink-2)", marginTop: 6 }}>{item.location}</div>}
           </div>
-          <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>{item.facilityId} · {item.zone}</div>
-          {item.location && <div style={{ fontSize: 12, color: "var(--ink-2)", marginTop: 6 }}>{item.location}</div>}
+          <button onClick={onClose} style={{ color: "var(--ink-3)" }}><Icons.close size={16} /></button>
         </div>
-        <button onClick={onClose} style={{ color: "var(--ink-3)" }}><Icons.close size={16} /></button>
+        {/* 상세 분석 풀폭 버튼 — 클릭 시 챗봇에 자동 메시지 푸쉬 (5/26) */}
+        {onDetailRequest && (
+          <button
+            onClick={() => onDetailRequest(item.deviceId)}
+            style={{
+              marginTop: 12, width: "100%",
+              padding: "10px 14px", borderRadius: 8,
+              background: "var(--brand)",
+              color: "#fff",
+              border: "none",
+              fontSize: 12.5, fontWeight: 700,
+              letterSpacing: "0.02em",
+              cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              boxShadow: "0 4px 12px -4px rgba(99,102,241,0.4)",
+              transition: "filter 140ms",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.08)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
+          >
+            <span style={{ fontSize: 14 }}>🤖</span>
+            상세 분석 →
+          </button>
+        )}
       </div>
       <div className="scroll" style={{ padding: 18, overflowY: "auto", flex: 1 }}>
         {item.volt != null && (
           <>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-3)", marginBottom: 8 }}>실시간 측정값</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 18 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-3)" }}>실시간 측정값</div>
+              {lastMeasuredText && (
+                <div className="mono" style={{ fontSize: 10, color: "var(--ink-4)" }}>
+                  마지막 측정 {lastMeasuredText}
+                </div>
+              )}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
               {[
                 { l: "방식전위", v: `${item.volt}mV` },
                 { l: "AC 유입", v: `${(item.ac ?? 0).toLocaleString()}mV` },
@@ -2449,14 +2484,7 @@ function DashboardEquipmentDrawer({ item, onClose }) {
           </>
         )}
 
-        {item.volt != null && item.status !== "offline" && (
-          <>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-3)", marginBottom: 8 }}>방식전위 트렌드 (6시간)</div>
-            <div style={{ padding: "8px 4px 4px", borderRadius: 10, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)", height: 160 }}>
-              <VoltTrendChart item={item} />
-            </div>
-          </>
-        )}
+        {/* 트렌드 차트 제거 (5/26 사용자 결정 — 전체 장비 페이지에서 조회 가능) */}
 
         {item.status === "offline" && (
           <div style={{
@@ -2539,11 +2567,18 @@ export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equip
   // 마커 popup 클릭 → 지도 영역 안 사이드바에 표시할 단말 (5/26)
   const [sidebarDevice, setSidebarDevice] = useState(null);
 
-  // AI 탐지 카드 클릭: 챗봇 패널에 분석 메시지 자동 푸쉬 + 지도 포커스
+  // AI 탐지 카드 클릭 (5/26 변경): 사이드바 열기 + 지도 포커스. 챗봇 푸쉬는 사이드바 안 '상세 분석' 버튼으로 옮김.
   const handleAnalyze = (item) => {
     if (!item || !item.node) return;
-    setChatAutoMessage(`${item.node} 의 현재 상태, 위험 요인, 권장 조치를 정리해줘`);
+    const eq = equipment.find((e) => e.deviceId === item.node);
+    if (eq) setSidebarDevice(eq);
     focusByNode(item.node);
+  };
+
+  // 사이드바 안 '상세 분석' 버튼 클릭 → 챗봇 패널에 자동 메시지 푸쉬
+  const handleDetailRequest = (deviceId) => {
+    if (!deviceId) return;
+    setChatAutoMessage(`${deviceId} 의 현재 상태, 위험 요인, 권장 조치를 정리해줘`);
   };
 
   // 지도 마커 클릭: popup 표시 (Leaflet 자동). popup 클릭은 별도 delegation 으로 사이드바 열기.
@@ -2683,7 +2718,11 @@ export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equip
             onCancelAutoKpi={cancelAutoKpi}
           />
           {sidebarDevice && (
-            <DashboardEquipmentDrawer item={sidebarDevice} onClose={() => setSidebarDevice(null)} />
+            <DashboardEquipmentDrawer
+              item={sidebarDevice}
+              onClose={() => setSidebarDevice(null)}
+              onDetailRequest={handleDetailRequest}
+            />
           )}
         </div>
 
