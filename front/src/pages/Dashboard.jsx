@@ -114,8 +114,28 @@ function Panel({ children, style, className }) {
   );
 }
 
+// 시간(h) → "N일 M시간" 변환 (Gemini 5/26 — 687h 같은 큰 숫자 직관성 부족)
+function fmtHoursShort(h) {
+  if (h == null || !isFinite(h)) return "—";
+  const n = Math.floor(Number(h));
+  if (n < 24) return `${n}시간`;
+  const days = Math.floor(n / 24);
+  const hours = n % 24;
+  return hours === 0 ? `${days}일` : `${days}일 ${hours}시간`;
+}
+
+// MSE → 위험도 % (threshold 대비). 운영자 시점 직관성 ↑
+function riskPct(mse, threshold) {
+  if (mse == null || !threshold || threshold <= 0) return null;
+  return Math.round((mse / threshold) * 100);
+}
+
 function AnomalyCard({ item, onClick, kind }) {
   const color = kind === "warn" ? "var(--warn)" : "var(--err)";
+  // 통신 두절(offline) 카드는 label 이 "통신 두절..." 로 시작 → 우측 박스 = 두절 일/시간
+  // 일반 anomaly 는 위험도 % 표시 (MSE / threshold * 100)
+  const isOffline = typeof item.label === "string" && item.label.startsWith("통신 두절");
+  const pct = isOffline ? null : riskPct(item.mse, item.threshold);
   return (
     <div
       onClick={() => onClick(item)}
@@ -150,8 +170,23 @@ function AnomalyCard({ item, onClick, kind }) {
           </div>
         </div>
         <div style={{ textAlign: "right", flexShrink: 0 }}>
-          <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", letterSpacing: "0.05em" }}>MSE</div>
-          <div className="mono" style={{ fontSize: 14, fontWeight: 700, color, lineHeight: 1 }}>{item.mse.toFixed(3)}</div>
+          {isOffline ? (
+            <>
+              <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", letterSpacing: "0.05em" }}>두절</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color, lineHeight: 1, whiteSpace: "nowrap" }}>{fmtHoursShort(item.mse)}</div>
+            </>
+          ) : pct != null ? (
+            <>
+              <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", letterSpacing: "0.05em" }}>위험도</div>
+              <div className="mono" style={{ fontSize: 16, fontWeight: 700, color, lineHeight: 1 }}>{pct}%</div>
+              <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>MSE {item.mse.toFixed(3)}</div>
+            </>
+          ) : (
+            <>
+              <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", letterSpacing: "0.05em" }}>MSE</div>
+              <div className="mono" style={{ fontSize: 14, fontWeight: 700, color, lineHeight: 1 }}>{item.mse.toFixed(3)}</div>
+            </>
+          )}
         </div>
       </div>
       {item.contribution && item.contribution.length > 0 && (
