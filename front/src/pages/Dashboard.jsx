@@ -89,6 +89,7 @@ function PanelHeader({ children, right }) {
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
+      gap: 12,    // children 과 right 가 붙지 않게 (LogPanel 필터 칩 ↔ ← AI 탐지로 간격)
       padding: "16px 20px", borderBottom: "1px solid var(--line-soft)",
     }}>
       {children}
