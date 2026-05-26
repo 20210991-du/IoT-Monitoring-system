@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  매일 자정 빈 일일 세션 강제 (1-1, 2026-05-26)
+    · 매일 00:01 (자정 직후 1분) launchd 가 /api/admin/ensure-daily-session POST
+    · 이미 있으면 skip, 없으면 새로 INSERT
+    · title 형식: "📅 2026-05-27 대화"
+    · 운영자가 그날 첫 진입 시 헤더 📋 그룹 "오늘" 에 항상 1개 이상 보임
+
+  설치:
+    cp ~/work/IoT-Monitoring-system/front/launchd/com.siwon.daily-session.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.siwon.daily-session.plist
+
+  검증:
+    launchctl list | grep daily-session
+    tail -f ~/daily-session.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.siwon.daily-session</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/curl</string>
+    <string>-sS</string>
+    <string>--max-time</string>
+    <string>15</string>
+    <string>-X</string>
+    <string>POST</string>
+    <string>http://localhost:5050/api/admin/ensure-daily-session</string>
+  </array>
+
+  <!-- 매일 00:01 실행 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>0</integer>
+    <key>Minute</key>
+    <integer>1</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/pjh/daily-session.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/pjh/daily-session.log</string>
+</dict>
+</plist>
