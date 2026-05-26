@@ -392,6 +392,14 @@ export function App() {
     try { return JSON.parse(localStorage.getItem("siwon.demo.mode") || "false"); }
     catch { return false; }
   });
+  // 시스템 로그 드로어 토글 (5/26 floating → 헤더 알약으로 이동)
+  const [logOpen, setLogOpen] = useState(false);
+  useEffect(() => {
+    if (!logOpen) return;
+    const onKey = (e) => { if (e.key === "Escape") setLogOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [logOpen]);
 
   // ── AI 이벤트 생성 헬퍼 ────────────────────────────────────
   function makeAiLogEvents(devRes, anoRes) {
@@ -560,6 +568,8 @@ export function App() {
         setMapStyle={setMapStyle}
         demoMode={demoMode}
         onToggleDemo={() => setDemoMode((v) => !v)}
+        logOpen={logOpen}
+        onToggleLog={tab === "dashboard" ? () => setLogOpen((v) => !v) : undefined}
       />
       <SubNav
         tab={tab}
@@ -609,6 +619,8 @@ export function App() {
             watch={watch}
             aiEvents={aiEvents}
             demoMode={demoMode}
+            logOpen={logOpen}
+            onLogClose={() => setLogOpen(false)}
           />
         )}
         {tab === "equipment" && <Equipment onOpen={setDrawer} equipment={equipment} />}
