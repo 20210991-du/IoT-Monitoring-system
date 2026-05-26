@@ -1086,7 +1086,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
                 }}
               >
                 전체 기능
-                <Icons.chevron size={9} color="var(--ink-4)" />
+                <span style={{ fontSize: 9, color: "var(--ink-4)", marginLeft: 1 }}>▾</span>
               </div>
               {/* LLM 모델 (placeholder) — 정보 표시 */}
               <div
@@ -1101,7 +1101,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
                 }}
               >
                 qwen3.5:9b
-                <Icons.chevron size={9} color="var(--ink-4)" />
+                <span style={{ fontSize: 9, color: "var(--ink-4)", marginLeft: 1 }}>▾</span>
               </div>
               {/* 새 대화 (초기화) */}
               <button
