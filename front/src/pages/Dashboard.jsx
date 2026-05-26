@@ -628,6 +628,12 @@ function LogLine({ line }) {
 }
 
 function LogPanel({ lines, onToggleLog }) {
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return lines;
+    return lines.filter((l) => (l.text || "").toLowerCase().includes(q));
+  }, [lines, query]);
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <PanelHeader
@@ -655,14 +661,56 @@ function LogPanel({ lines, onToggleLog }) {
             animation: "pulse-dot 1.2s infinite",
           }} />
           <div style={{ fontSize: 13, fontWeight: 700 }}>실시간 시스템 로그</div>
-          <span className="mono" style={{ fontSize: 10, color: "var(--ink-3)", marginLeft: 4 }}>{lines.length} EVENTS</span>
+          <span className="mono" style={{ fontSize: 10, color: "var(--ink-3)", marginLeft: 4 }}>
+            {query ? `${filtered.length} / ${lines.length}` : `${lines.length}`} EVENTS
+          </span>
         </div>
       </PanelHeader>
+      {/* 검색 입력창 */}
+      <div style={{
+        padding: "8px 10px", borderBottom: "1px solid var(--line-soft)",
+        background: "var(--bg-elev)",
+        display: "flex", alignItems: "center", gap: 6,
+      }}>
+        <span style={{ color: "var(--ink-4)", fontSize: 12 }}>🔍</span>
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="검색 (예: TB24-250429, ALERT, 통신, 도구명)"
+          style={{
+            flex: 1, minWidth: 0,
+            background: "transparent", border: "none", outline: "none",
+            color: "var(--ink)", fontSize: 12,
+            fontFamily: "JetBrains Mono, ui-monospace, monospace",
+          }}
+        />
+        {query && (
+          <button
+            onClick={() => setQuery("")}
+            title="검색 초기화"
+            style={{
+              background: "transparent", border: "none",
+              color: "var(--ink-4)", cursor: "pointer",
+              fontSize: 14, lineHeight: 1, padding: 0,
+            }}
+          >×</button>
+        )}
+      </div>
       <div className="scroll" style={{
         padding: 10, flex: 1, overflow: "auto",
         background: "var(--bg-sunk)",
       }}>
-        {lines.map((l) => <LogLine key={l.id} line={l} />)}
+        {filtered.length === 0 && query ? (
+          <div style={{
+            padding: 16, textAlign: "center",
+            fontSize: 11, color: "var(--ink-4)",
+          }}>
+            "{query}" 와 일치하는 로그 없음
+          </div>
+        ) : (
+          filtered.map((l) => <LogLine key={l.id} line={l} />)
+        )}
       </div>
     </Panel>
   );
@@ -1965,14 +2013,47 @@ function useLogStream(externalEvents = []) {
     ];
   });
   const processedIds = useRef(new Set([1, 2, 3]));
+  const latestTsRef  = useRef(null);   // 백엔드 polling 증분용
 
+  // (A) 페이지 진입 시 App.jsx 가 생성한 즉시 이벤트 추가
   useEffect(() => {
     if (!externalEvents || externalEvents.length === 0) return;
     const fresh = externalEvents.filter((e) => !processedIds.current.has(e.id));
     if (fresh.length === 0) return;
     fresh.forEach((e) => processedIds.current.add(e.id));
-    setLines((prev) => [...prev.slice(-50), ...fresh]);
+    setLines((prev) => [...prev.slice(-200), ...fresh]);
   }, [externalEvents]);
+
+  // (B) 30초 polling — /api/log-events 영구 저장 데이터 누적
+  useEffect(() => {
+    let aborted = false;
+    const poll = async () => {
+      try {
+        const url = latestTsRef.current
+          ? `/api/log-events?after=${encodeURIComponent(latestTsRef.current)}&limit=100`
+          : `/api/log-events?limit=100`;
+        const r = await fetch(url);
+        if (!r.ok || aborted) return;
+        const d = await r.json();
+        if (!d?.ok || !Array.isArray(d.events) || d.events.length === 0) return;
+        const fresh = d.events.filter((e) => !processedIds.current.has(e.id));
+        if (fresh.length === 0) return;
+        fresh.forEach((e) => processedIds.current.add(e.id));
+        // 가장 최신 ts 갱신 (poll 증분 cursor)
+        const newest = d.events.reduce((acc, e) => {
+          const t = new Date(e.ts).getTime();
+          return !acc || t > acc.t ? { t, ts: e.ts } : acc;
+        }, null);
+        if (newest) latestTsRef.current = newest.ts;
+        // 시간순 (오래된 → 최신) 으로 누적
+        const sorted = fresh.slice().sort((x, y) => new Date(x.ts).getTime() - new Date(y.ts).getTime());
+        setLines((prev) => [...prev.slice(-200), ...sorted]);
+      } catch { /* silent — 다음 주기에 재시도 */ }
+    };
+    poll();                                  // 즉시 1회
+    const t = setInterval(poll, 30000);      // 30초 주기
+    return () => { aborted = true; clearInterval(t); };
+  }, []);
 
   return lines;
 }

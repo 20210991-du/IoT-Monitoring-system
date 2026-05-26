@@ -2225,6 +2225,89 @@ app.get("/api/insights", (_req, res) => {
   res.json({ ok: true, insights: [] });
 });
 
+// ── GET /api/log-events — 시스템 로그 (영구 + 30초 polling) ──
+// audit_log (tool_call) + kscg_alarm_log 통합. 시간 역순 LIMIT.
+// query:
+//   after (ISO datetime): 그 이후 이벤트만 (polling 증분)
+//   q (string): text 부분 검색
+//   limit (default 100, max 300)
+app.get("/api/log-events", dbRequired, async (req, res) => {
+  try {
+    const after = req.query.after;
+    const q     = (req.query.q || "").trim().toLowerCase();
+    const limit = Math.min(parseInt(req.query.limit || "100", 10), 300);
+
+    // audit_log (도구 호출, AI 동작 등) — 최근 7일
+    const [audits] = await pool.query(`
+      SELECT id, created_at, action, target_id, metadata_json
+      FROM audit_log
+      WHERE created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
+        ${after ? "AND created_at > ?" : ""}
+      ORDER BY created_at DESC LIMIT ${limit}
+    `, after ? [after] : []);
+
+    // kscg_alarm_log (옴니 원본 알람) — 최근 30일
+    const [alarms] = await pool.query(`
+      SELECT a.ALARM_ID AS id, a.GEN_DATE AS ts, a.CONTENTS, a.VALUE,
+             g.GRADE_TEXT AS grade,
+             t.NAME AS deviceId
+      FROM kscg_alarm_log a
+      LEFT JOIN kscg_alarm_grade_info g ON g.GRADE_ID = a.GRADE_ID
+      LEFT JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
+      LEFT JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = si.TRANSMITTER_ID
+      WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 30 DAY)
+        ${after ? "AND a.GEN_DATE > ?" : ""}
+      ORDER BY a.GEN_DATE DESC LIMIT ${limit}
+    `, after ? [after] : []);
+
+    const fmtTime = (d) => {
+      const dt = new Date(d);
+      const hh = String(dt.getHours()).padStart(2, "0");
+      const mm = String(dt.getMinutes()).padStart(2, "0");
+      const ss = String(dt.getSeconds()).padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    };
+
+    // audit → 이벤트 변환 (도구 호출 표시)
+    const auditEvents = audits.map((a) => {
+      let meta = {};
+      try { meta = a.metadata_json ? (typeof a.metadata_json === "string" ? JSON.parse(a.metadata_json) : a.metadata_json) : {}; } catch {}
+      const argsTxt = meta.args ? Object.entries(meta.args).slice(0, 2).map(([k, v]) => `${k}:${String(v).slice(0, 16)}`).join(",") : "";
+      const dur = meta.durationMs != null ? ` · ${meta.durationMs}ms` : "";
+      const ok  = meta.ok === false ? " · ✗ 실패" : "";
+      return {
+        id:   `aud-${a.id}`,
+        ts:   a.created_at,
+        time: fmtTime(a.created_at),
+        kind: meta.ok === false ? "warn" : "ai",
+        text: `AI: ${a.target_id}(${argsTxt})${dur}${ok}`,
+        source: "audit",
+      };
+    });
+
+    // alarm → 이벤트 변환 (위험/경고/주의)
+    const alarmEvents = alarms.map((a) => ({
+      id:   `alm-${a.id}`,
+      ts:   a.ts,
+      time: fmtTime(a.ts),
+      kind: a.grade === "위험" ? "alert" : "warn",
+      text: `${a.grade || "ALARM"}: ${a.deviceId || "(unknown)"} · ${a.CONTENTS || ""} · 값 ${a.VALUE != null ? Number(a.VALUE).toFixed(2) : "-"}`,
+      source: "alarm",
+    }));
+
+    // 통합 + 시간순 정렬 + 검색 필터 + LIMIT
+    let merged = [...auditEvents, ...alarmEvents]
+      .sort((x, y) => new Date(y.ts).getTime() - new Date(x.ts).getTime());
+    if (q) merged = merged.filter((e) => e.text.toLowerCase().includes(q));
+    merged = merged.slice(0, limit);
+
+    res.json({ ok: true, count: merged.length, events: merged });
+  } catch (err) {
+    console.error("[/api/log-events]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── GET /api/admin/tool-stats — 도구 호출 통계 (audit_log 집계) ──
 app.get("/api/admin/tool-stats", dbRequired, async (req, res) => {
   try {
