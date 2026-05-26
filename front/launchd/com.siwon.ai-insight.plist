@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AI 자동 분석 cron — 매시 정각 (0분) 에 /api/admin/run-auto-insight 호출
+    · 호출 시 server.js 가 도구 5개 호출 + 군산 날씨 fetch + LLM 1회 → chat_messages 에 system 메시지 INSERT
+    · 결과는 "AI 자동 분석 — YYYY-MM-DD" 일일 세션에 누적 (운영자가 챗봇 세션 드롭다운에서 열어볼 수 있음)
+    · LLM 응답 시간 ~5초 + 도구 5개 (~50ms 캐시) → 총 ~10초 이내 완료
+    · 실패 시 nohup 로그에 표시. 다음 시각에 재시도 (idempotent — 같은 세션에 다음 메시지 INSERT).
+
+  설치:
+    cp ~/work/IoT-Monitoring-system/front/launchd/com.siwon.ai-insight.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.siwon.ai-insight.plist
+
+  검증:
+    launchctl list | grep com.siwon.ai-insight
+    tail -f ~/ai-insight.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.siwon.ai-insight</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/curl</string>
+    <string>-sS</string>
+    <string>--max-time</string>
+    <string>120</string>
+    <string>-X</string>
+    <string>POST</string>
+    <string>http://localhost:5050/api/admin/run-auto-insight</string>
+  </array>
+
+  <!-- 매시 정각 (0분) 실행. minute=0 ~ 시각 매시. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- 실패해도 OS 가 즉시 재실행하지 않음 (다음 정각까지 대기). -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/pjh/ai-insight.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/pjh/ai-insight.log</string>
+</dict>
+</plist>

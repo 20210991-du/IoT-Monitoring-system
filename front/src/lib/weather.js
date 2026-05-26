@@ -1,15 +1,17 @@
 /**
- * weather.js — Open-Meteo (무료·키 X·CORS OK) 로 서울 현재 날씨 fetch
+ * weather.js — Open-Meteo (무료·키 X·CORS OK) 로 군산 현재 날씨 fetch
  *
  *  - 1시간 TTL, localStorage 캐시
  *  - WMO weather code → 한국어 + 이모지 매핑
  *  - 실패 시 기본값(흐림 12°C) 반환
+ *  - 5/26: 서울 → 군산 변경 (군산도시가스 = 우리 SITE_ID=2 대상 지역)
  */
 
 import { useEffect, useState } from "react";
 
-const SEOUL_LAT = 37.5665;
-const SEOUL_LON = 126.978;
+// 군산시청 좌표 (군산 시 중심부)
+const GUNSAN_LAT = 35.9678;
+const GUNSAN_LON = 126.7369;
 const CACHE_KEY = "siwon.weather";
 const TTL_MS    = 60 * 60 * 1000; // 1h
 
@@ -67,7 +69,7 @@ export function useWeather() {
     let alive = true;
     const fetchWeather = async () => {
       try {
-        const url = `https://api.open-meteo.com/v1/forecast?latitude=${SEOUL_LAT}&longitude=${SEOUL_LON}&current=temperature_2m,weather_code&timezone=Asia%2FSeoul`;
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${GUNSAN_LAT}&longitude=${GUNSAN_LON}&current=temperature_2m,weather_code,precipitation,relative_humidity_2m&timezone=Asia%2FSeoul`;
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), 8000);
         const res = await fetch(url, { signal: ctrl.signal });
@@ -82,6 +84,8 @@ export function useWeather() {
           ko:   meta.ko,
           icon: meta.icon,
           code,
+          precip: j.current.precipitation != null ? Number(j.current.precipitation) : null,    // mm
+          humidity: j.current.relative_humidity_2m != null ? Math.round(j.current.relative_humidity_2m) : null,
           time: j.current.time,
           stale: false,
         };
