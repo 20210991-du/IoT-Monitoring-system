@@ -44,11 +44,17 @@ const PIN_INNER_ICON = {
 };
 
 function makeIcon(status) {
+  // 정상 마커는 작은 초록 동그라미로 단순화 — 비정상이 시각적으로 두드러지도록 (Gemini 5/26 피드백)
+  if (status === "normal") {
+    const svg = `<svg width="14" height="14" viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.25))">
+      <circle cx="7" cy="7" r="5" fill="#10b981" stroke="rgba(255,255,255,0.9)" stroke-width="1.4"/>
+    </svg>`;
+    return L.divIcon({ html: svg, className: "", iconSize: [14, 14], iconAnchor: [7, 7], popupAnchor: [0, -10] });
+  }
   const color =
     status === "critical" ? "#991b1b" :
     status === "anomaly"  ? "#ef4444" :
     status === "warn"     ? "#f59e0b" :
-    status === "normal"   ? "#10b981" :
     status === "offline"  ? "#64748b" : "#4f46e5";
   const iconPaths = PIN_INNER_ICON[status] || "";
   const inner = iconPaths

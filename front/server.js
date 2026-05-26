@@ -1821,6 +1821,16 @@ function mapStatus(_deviceStatus, hoursSilent, activeAlarmCount) {
   return "normal";
 }
 
+// 시간(h) → "N일 M시간" 표기 (Gemini 5/26 피드백 — 687h 같은 큰 숫자 직관성 부족)
+function fmtHours(h) {
+  if (h == null || !isFinite(h)) return "확인 불가";
+  const n = Math.floor(Number(h));
+  if (n < 24) return `${n}시간`;
+  const days = Math.floor(n / 24);
+  const hours = n % 24;
+  return hours === 0 ? `${days}일` : `${days}일 ${hours}시간`;
+}
+
 // ── GET /api/summary — KPI 카운트 ─────────────────────
 app.get("/api/summary", dbRequired, async (req, res) => {
   try {
@@ -2188,7 +2198,7 @@ app.get("/api/anomalies", dbRequired, async (req, res) => {
       }));
       demoWatch = dd.filter((d) => d.status === "offline").map((d) => ({
         node: d.deviceId, zone: zoneFromFacility(d.facility),
-        label: `통신 두절 ${d.hoursSilent}h`, mse: d.hoursSilent, threshold: 24,
+        label: `통신 두절 ${fmtHours(d.hoursSilent)}`, mse: d.hoursSilent, threshold: 24,
         contribution: [], demo: true,
       }));
     }
@@ -2208,7 +2218,7 @@ app.get("/api/anomalies", dbRequired, async (req, res) => {
       watch: [...demoWatch, ...watchRows.map((r) => ({
         node:  r.node,
         zone:  zoneFromFacility(r.facility),
-        label: `통신 두절 ${r.hoursSilent}h`,
+        label: `통신 두절 ${fmtHours(r.hoursSilent)}`,
         mse:   r.hoursSilent,
         threshold: 24,
         contribution: [],
