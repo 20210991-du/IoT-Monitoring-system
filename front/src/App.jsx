@@ -405,24 +405,25 @@ export function App() {
   function makeAiLogEvents(devRes, anoRes) {
     const now = new Date();
     const t   = now.toTimeString().slice(0, 8); // HH:MM:SS
+    const ts  = now.toISOString();              // 날짜 separator 용
     const base = now.getTime();
     const events = [];
 
     events.push({
-      id: base, kind: "ai", time: t,
+      id: base, ts, kind: "ai", time: t,
       text: `AI: LSTM 배치 추론 완료 · ${devRes.devices.length}개 장비 분석 (${devRes.last_updated || t})`,
     });
 
     anoRes.anomalies.slice(0, 5).forEach((a, i) => {
       events.push({
-        id: base + 1 + i, kind: "alert", time: t,
+        id: base + 1 + i, ts, kind: "alert", time: t,
         text: `ALERT: MSE ${a.mse.toFixed(4)} > TH ${a.threshold.toFixed(4)} @ ${a.node} [${a.label}]`,
       });
     });
 
     anoRes.watch.slice(0, 3).forEach((w, i) => {
       events.push({
-        id: base + 10 + i, kind: "warn", time: t,
+        id: base + 10 + i, ts, kind: "warn", time: t,
         text: `WARN: 이상 의심 ${w.node} · MSE=${w.mse.toFixed(4)} [${w.label}]`,
       });
     });
@@ -430,14 +431,14 @@ export function App() {
     const offline = devRes.devices.filter((d) => d.status === "offline");
     if (offline.length > 0) {
       events.push({
-        id: base + 20, kind: "warn", time: t,
+        id: base + 20, ts, kind: "warn", time: t,
         text: `WARN: 통신고장 ${offline.length}건 · ${offline.slice(0, 2).map((d) => d.deviceId).join(", ")}`,
       });
     }
 
     const normal = devRes.devices.filter((d) => d.status === "normal").length;
     events.push({
-      id: base + 30, kind: "ok", time: t,
+      id: base + 30, ts, kind: "ok", time: t,
       text: `SYS: 정상 ${normal}건 · 위험 ${anoRes.anomalies.length}건 · 이상 의심 ${anoRes.watch.length}건`,
       tail: "OK",
     });

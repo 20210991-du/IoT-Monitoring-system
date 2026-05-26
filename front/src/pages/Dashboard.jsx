@@ -787,9 +787,46 @@ function LogPanel({ lines, onToggleLog }) {
               ? `"${query}" 와 일치하는 로그 없음`
               : "선택된 종류의 로그 없음"}
           </div>
-        ) : (
-          filtered.map((l) => <LogLine key={l.id} line={l} />)
-        )}
+        ) : (() => {
+          // 인접 라인의 날짜(YYYY-MM-DD) 변경 지점에 separator 삽입
+          const today = new Date(); today.setHours(0, 0, 0, 0);
+          const fmtDay = (d) => `${d.getMonth() + 1}월 ${d.getDate()}일`;
+          const dayKey = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+          const todayKey = dayKey(today);
+          const yKey = (() => { const y = new Date(today); y.setDate(y.getDate() - 1); return dayKey(y); })();
+
+          let prevKey = null;
+          const out = [];
+          for (const l of filtered) {
+            if (!l.ts) {
+              // ts 없으면 separator 판정 불가 — 그냥 라인만
+              out.push(<LogLine key={l.id} line={l} />);
+              continue;
+            }
+            const d = new Date(l.ts);
+            const k = dayKey(d);
+            if (k !== prevKey) {
+              const label = k === todayKey ? `${fmtDay(d)} (오늘)`
+                          : k === yKey     ? `${fmtDay(d)} (어제)`
+                          :                  `${d.getFullYear()}년 ${fmtDay(d)}`;
+              out.push(
+                <div key={`sep-${k}`} style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  margin: "10px 4px 6px",
+                  fontSize: 9, fontWeight: 700, color: "var(--ink-4)",
+                  letterSpacing: "0.05em",
+                }}>
+                  <div style={{ flex: 1, height: 1, background: "var(--line-soft)" }} />
+                  <span style={{ whiteSpace: "nowrap" }}>{label}</span>
+                  <div style={{ flex: 1, height: 1, background: "var(--line-soft)" }} />
+                </div>
+              );
+              prevKey = k;
+            }
+            out.push(<LogLine key={l.id} line={l} />);
+          }
+          return out;
+        })()}
       </div>
     </Panel>
   );
@@ -2090,10 +2127,11 @@ function useLogStream(externalEvents = []) {
   const [lines, setLines] = useState(() => {
     const now = new Date();
     const base = now.getTime() - 4000;
+    const d1 = new Date(base), d2 = new Date(base + 2000), d3 = new Date(base + 4000);
     return [
-      { id: 1, time: fmtTime(new Date(base)),        kind: "ok", text: "SYS: 시스템 시작 · AI 엔진 초기화", tail: "OK" },
-      { id: 2, time: fmtTime(new Date(base + 2000)), kind: "ai", text: "AI: LSTM-AutoEncoder 모델 로드 완료" },
-      { id: 3, time: fmtTime(new Date(base + 4000)), kind: "ai", text: "AI: 백엔드 연결 대기 중..." },
+      { id: 1, ts: d1.toISOString(), time: fmtTime(d1), kind: "ok", text: "SYS: 시스템 시작 · AI 엔진 초기화", tail: "OK" },
+      { id: 2, ts: d2.toISOString(), time: fmtTime(d2), kind: "ai", text: "AI: LSTM-AutoEncoder 모델 로드 완료" },
+      { id: 3, ts: d3.toISOString(), time: fmtTime(d3), kind: "ai", text: "AI: 백엔드 연결 대기 중..." },
     ];
   });
   const processedIds = useRef(new Set([1, 2, 3]));
