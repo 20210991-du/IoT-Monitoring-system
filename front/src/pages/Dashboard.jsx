@@ -1467,15 +1467,35 @@ function ChatMessage({ message }) {
               })}
             </div>
           )}
-          {renderInlineMD(message.text)}
-          {message.streaming && (
+          {/* AI 응답 생성 중 인디케이터 — streaming + 아직 텍스트·도구 X */}
+          {isAi && message.streaming && !message.text && !(message.toolCalls?.length) ? (
             <span style={{
-              display: "inline-block",
-              width: 7, height: 13, marginLeft: 2,
-              verticalAlign: "text-bottom",
-              background: "var(--brand)",
-              animation: "blink 0.9s step-start infinite",
-            }} />
+              display: "inline-flex", alignItems: "center", gap: 7,
+              color: "var(--ink-3)", fontSize: 12, fontWeight: 500,
+            }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" style={{
+                animation: "spin 0.9s linear infinite", display: "block",
+              }}>
+                <circle cx="12" cy="12" r="9" fill="none"
+                  stroke="currentColor" strokeWidth="2.5"
+                  strokeDasharray="42 14" strokeLinecap="round"
+                  opacity="0.65" />
+              </svg>
+              AI 응답 생성 중...
+            </span>
+          ) : (
+            <>
+              {renderInlineMD(message.text)}
+              {message.streaming && (
+                <span style={{
+                  display: "inline-block",
+                  width: 7, height: 13, marginLeft: 2,
+                  verticalAlign: "text-bottom",
+                  background: "var(--brand)",
+                  animation: "blink 0.9s step-start infinite",
+                }} />
+              )}
+            </>
           )}
         </div>
         <div style={{
