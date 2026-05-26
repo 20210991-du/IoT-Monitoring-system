@@ -178,7 +178,7 @@ function AnomalyCard({ item, onClick, kind }) {
   );
 }
 
-function AIPanels({ onAnalyze, anomalies, watch }) {
+function AIPanels({ onAnalyze, anomalies, watch, onToggleLog }) {
   // 이상 + 관찰 통합 리스트. MSE 내림차순 → 자연스러운 우선순위
   const combined = [
     ...anomalies.map((a) => ({ ...a, _kind: "anomaly" })),
@@ -189,7 +189,7 @@ function AIPanels({ onAnalyze, anomalies, watch }) {
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       <PanelHeader
         right={
-          <div style={{ display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <span style={{
               fontSize: 10, fontWeight: 700, padding: "2px 10px",
               background: "rgba(239,68,68,0.12)", color: "var(--err)",
@@ -204,6 +204,37 @@ function AIPanels({ onAnalyze, anomalies, watch }) {
             }}>
               이상 의심 {watch.length}건
             </span>
+            {onToggleLog && (
+              <button
+                onClick={onToggleLog}
+                title="실시간 시스템 로그로 전환 (ESC 로 돌아오기)"
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 5,
+                  padding: "3px 9px", borderRadius: 999,
+                  background: "transparent",
+                  border: "1px solid var(--line)",
+                  color: "var(--ink-3)",
+                  fontSize: 10, fontWeight: 700,
+                  cursor: "pointer",
+                  transition: "all 140ms ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = "var(--brand)";
+                  e.currentTarget.style.color       = "var(--brand)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = "var(--line)";
+                  e.currentTarget.style.color       = "var(--ink-3)";
+                }}
+              >
+                <span style={{
+                  width: 6, height: 6, borderRadius: "50%",
+                  background: "var(--ok)",
+                  animation: "pulse-dot 1.2s infinite",
+                }} />
+                시스템 로그
+              </button>
+            )}
           </div>
         }
       >
@@ -596,10 +627,28 @@ function LogLine({ line }) {
   );
 }
 
-function LogPanel({ lines }) {
+function LogPanel({ lines, onToggleLog }) {
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <PanelHeader>
+      <PanelHeader
+        right={onToggleLog ? (
+          <button
+            onClick={onToggleLog}
+            title="AI 탐지 목록으로 돌아가기 (ESC)"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              padding: "3px 9px", borderRadius: 999,
+              background: "var(--brand)",
+              border: "1px solid var(--brand)",
+              color: "#fff",
+              fontSize: 10, fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            ← AI 탐지로
+          </button>
+        ) : null}
+      >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{
             width: 8, height: 8, borderRadius: "50%", background: "var(--ok)",
@@ -2255,7 +2304,7 @@ function DashboardEquipmentDrawer({ item, onClose }) {
   );
 }
 
-export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], aiEvents = [], demoMode = false, logOpen = false, onLogClose }) {
+export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], aiEvents = [], demoMode = false, logOpen = false, onLogClose, onToggleLog }) {
   const [activeKpi, setActiveKpi] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [focused, setFocused] = useState(null); // {lat, lng, node, ts}
@@ -2442,8 +2491,8 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
         }}>
           <TableSummary data={tableData} onRowClick={handleRowClick} activeKpi={activeKpi} />
           {logOpen
-            ? <LogPanel lines={lines} />
-            : <AIPanels anomalies={anomalies} watch={watch} onAnalyze={handleAnalyze} />}
+            ? <LogPanel lines={lines} onToggleLog={onToggleLog} />
+            : <AIPanels anomalies={anomalies} watch={watch} onAnalyze={handleAnalyze} onToggleLog={onToggleLog} />}
         </div>
       </div>
 

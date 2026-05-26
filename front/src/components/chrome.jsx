@@ -55,7 +55,7 @@ const iconBtn = {
   color: "var(--ink-3)",
 };
 
-export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, setMapStyle, demoMode = false, onToggleDemo, logOpen = false, onToggleLog }) {
+export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, setMapStyle, demoMode = false, onToggleDemo }) {
   const now = useClock();
   const [open, setOpen] = useState(false);          // 사용자 카드 드롭다운
   const [settingsOpen, setSettingsOpen] = useState(false); // 설정 드롭다운
@@ -130,32 +130,7 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-        {/* ── 시스템 로그 ⇄ AI 탐지 교체 토글 (5/26 in-place swap) ── */}
-        {onToggleLog && (
-          <button
-            type="button"
-            onClick={onToggleLog}
-            aria-pressed={logOpen}
-            title={logOpen ? "AI 탐지 목록으로 돌아가기 (ESC)" : "AI 탐지 자리에 시스템 로그 표시"}
-            style={{
-              display: "inline-flex", alignItems: "center", gap: 6,
-              padding: "6px 12px", borderRadius: 999,
-              fontSize: 11, fontWeight: 700, letterSpacing: "0.02em",
-              background: logOpen ? "var(--brand)" : "transparent",
-              color: logOpen ? "#fff" : "var(--ink-3)",
-              border: `1px solid ${logOpen ? "var(--brand)" : "var(--line)"}`,
-              cursor: "pointer",
-              transition: "all 140ms ease",
-            }}
-          >
-            <span style={{
-              width: 7, height: 7, borderRadius: "50%",
-              background: logOpen ? "#fff" : "var(--ok)",
-              animation: "pulse-dot 1.2s infinite",
-            }} />
-            {logOpen ? "AI 탐지로 돌아가기" : "시스템 로그"}
-          </button>
-        )}
+        {/* 시스템 로그 토글은 5/26 AIPanels 헤더 안으로 이동 (logOpen / onToggleLog props 제거) */}
 
         {/* ── 설정 아이콘 (클릭 → 드롭다운: 테마/비프) ── */}
         <div ref={settingsRef} style={{ position: "relative" }}>
