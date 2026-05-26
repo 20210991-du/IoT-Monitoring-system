@@ -1074,20 +1074,35 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
           const lbl = isLlm  ? "LLM 연결됨"             : isMock ? "mock fallback"         : "대기";
           return (
             <div style={{ display: "flex", alignItems: "center", gap: 6, position: "relative" }}>
-              {/* 세션 목록 드롭다운 토글 */}
-              <button
-                onClick={openSessionsList}
-                title="이전 대화 세션 목록"
+              {/* 도구 카테고리 (placeholder) — 시각용 라벨 */}
+              <div
+                title="도구 카테고리 (현재 전체 18 도구 활성)"
                 style={{
-                  display: "grid", placeItems: "center",
-                  width: 22, height: 22, borderRadius: 6,
-                  background: showSessions ? "var(--bg-elev)" : "transparent",
-                  border: "1px solid var(--line)",
-                  color: "var(--ink-3)", cursor: "pointer",
+                  display: "inline-flex", alignItems: "center", gap: 5,
+                  padding: "3px 9px", borderRadius: 8,
+                  background: "var(--bg-elev)", border: "1px solid var(--line)",
+                  fontSize: 11, fontWeight: 500, color: "var(--ink-3)",
+                  cursor: "default", whiteSpace: "nowrap",
                 }}
               >
-                <Icons.list size={11} />
-              </button>
+                전체 기능
+                <Icons.chevron size={9} color="var(--ink-4)" />
+              </div>
+              {/* LLM 모델 (placeholder) — 정보 표시 */}
+              <div
+                title="LLM 모델 (Mac Studio Ollama 로컬)"
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 5,
+                  padding: "3px 9px", borderRadius: 8,
+                  background: "var(--bg-elev)", border: "1px solid var(--line)",
+                  fontSize: 11, fontWeight: 500, color: "var(--ink-3)",
+                  fontFamily: "JetBrains Mono, ui-monospace, monospace",
+                  cursor: "default", whiteSpace: "nowrap",
+                }}
+              >
+                qwen3.5:9b
+                <Icons.chevron size={9} color="var(--ink-4)" />
+              </div>
               {/* 새 대화 (초기화) */}
               <button
                 onClick={() => {
@@ -1111,6 +1126,20 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
                 }}
               >
                 <Icons.refresh size={11} />
+              </button>
+              {/* 세션 목록 드롭다운 토글 */}
+              <button
+                onClick={openSessionsList}
+                title="이전 대화 세션 목록"
+                style={{
+                  display: "grid", placeItems: "center",
+                  width: 22, height: 22, borderRadius: 6,
+                  background: showSessions ? "var(--bg-elev)" : "transparent",
+                  border: "1px solid var(--line)",
+                  color: "var(--ink-3)", cursor: "pointer",
+                }}
+              >
+                <Icons.list size={11} />
               </button>
               <div style={{
                 display: "flex", alignItems: "center", gap: 6,
@@ -1212,13 +1241,12 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
         display: "flex", flexDirection: "column", gap: 8,
       }}>
         {messages.map((m, i) => <ChatMessage key={i} message={m} />)}
-        {/* 빈 상태 빠른 질문 카드 — greeting 만 있을 때 표시. 클릭 시 자동 전송. */}
-        {messages.length === 1 && messages[0].role === "ai" && !sending && (
-          <QuickPrompts onPick={(q) => send(null, q)} />
-        )}
         {/* 스트리밍 중엔 마지막 AI 메시지의 깜빡 커서가 visual feedback 역할 — 별도 typing indicator 불필요 */}
         {sending && messages[messages.length - 1]?.role !== "ai" && <ChatTyping />}
       </div>
+
+      {/* 빠른 질문 알약 — 입력창 위에 항상 표시 (sending 중에는 dim) */}
+      <QuickPrompts onPick={(q) => send(null, q)} disabled={sending} />
 
       <form onSubmit={send} style={{
         display: "flex", gap: 6,
@@ -1266,73 +1294,53 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
   );
 }
 
-// 빈 상태 빠른 질문 카드 — greeting 만 있을 때 표시.
-// 청중에게 "이런 거 물어볼 수 있어요" 가이드 + 발표 시연 임팩트.
-function QuickPrompts({ onPick }) {
+// 빠른 질문 알약 — 입력창 위에 가로 wrap.
+// 클릭 = 바로 전송. 메시지 갯수 무관 항상 표시. sending 중엔 dim·비활성.
+function QuickPrompts({ onPick, disabled }) {
   const items = [
-    { q: "현재 통신 두절 단말 알려줘",       icon: <Icons.wifi_off size={14} />, accent: "var(--ink-3)" },
-    { q: "방식전위 -800 mV 이상 단말은?",   icon: <Icons.alert size={14} />,    accent: "var(--err)" },
-    { q: "은파호수공원 근처 단말 알려줘",     icon: <span style={{ fontSize: 12 }}>📍</span>, accent: "var(--brand)" },
-    { q: "최근 7일 위험 등급 알람",          icon: <Icons.bell size={14} />,     accent: "var(--warn)" },
-    { q: "전체 단말 평균 RSSI",              icon: <Icons.activity size={14} />, accent: "var(--brand)" },
-    { q: "방식전위가 뭐야?",                  icon: <span style={{ fontSize: 12, fontWeight: 700 }}>?</span>, accent: "var(--ok)" },
+    "통신 두절 단말",
+    "방식전위 -800 이상 단말",
+    "은파호수공원 근처 단말",
+    "최근 7일 위험 알람",
   ];
   return (
     <div style={{
-      marginTop: 12, padding: "12px 4px 4px",
-      display: "flex", flexDirection: "column", gap: 10,
+      display: "flex", flexWrap: "wrap", gap: 6,
+      padding: "8px 10px 4px",
+      borderTop: "1px solid var(--line-soft)",
+      background: "var(--bg-elev)",
     }}>
-      <div style={{
-        fontSize: 11, fontWeight: 700, letterSpacing: "0.04em",
-        color: "var(--ink-3)", textTransform: "uppercase",
-        paddingLeft: 4,
-      }}>
-        빠른 질문 — 클릭해서 바로 전송
-      </div>
-      <div style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-        gap: 6,
-      }}>
-        {items.map((it, idx) => (
-          <button
-            key={idx}
-            type="button"
-            onClick={() => onPick(it.q)}
-            style={{
-              display: "flex", alignItems: "center", gap: 8,
-              padding: "9px 11px", borderRadius: 10,
-              background: "var(--bg-elev)",
-              border: "1px solid var(--line-soft)",
-              color: "var(--ink)",
-              fontSize: 12, fontWeight: 500, lineHeight: 1.35,
-              textAlign: "left", cursor: "pointer",
-              transition: "border-color 140ms, background 140ms, transform 100ms",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.borderColor = "var(--brand)";
-              e.currentTarget.style.background  = "var(--bg-sunk)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = "var(--line-soft)";
-              e.currentTarget.style.background  = "var(--bg-elev)";
-            }}
-          >
-            <span style={{
-              display: "grid", placeItems: "center",
-              width: 22, height: 22, borderRadius: 6,
-              background: "rgba(99,102,241,0.08)",
-              color: it.accent, flexShrink: 0,
-            }}>
-              {it.icon}
-            </span>
-            <span style={{
-              flex: 1, minWidth: 0,
-              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            }}>{it.q}</span>
-          </button>
-        ))}
-      </div>
+      {items.map((q, idx) => (
+        <button
+          key={idx}
+          type="button"
+          onClick={() => !disabled && onPick(q)}
+          disabled={disabled}
+          style={{
+            padding: "5px 12px",
+            borderRadius: 999,
+            background: "var(--bg-sunk)",
+            border: "1px solid var(--line)",
+            color: "var(--ink-3)",
+            fontSize: 11.5, fontWeight: 500, lineHeight: 1.3,
+            cursor: disabled ? "not-allowed" : "pointer",
+            opacity: disabled ? 0.5 : 1,
+            whiteSpace: "nowrap",
+            transition: "border-color 140ms, color 140ms, background 140ms",
+          }}
+          onMouseEnter={(e) => {
+            if (disabled) return;
+            e.currentTarget.style.borderColor = "var(--brand)";
+            e.currentTarget.style.color       = "var(--brand)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.borderColor = "var(--line)";
+            e.currentTarget.style.color       = "var(--ink-3)";
+          }}
+        >
+          {q}
+        </button>
+      ))}
     </div>
   );
 }
