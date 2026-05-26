@@ -1744,11 +1744,12 @@ function DayDivider({ dateKey }) {
 // 빠른 질문 알약 — 입력창 위에 가로 wrap.
 // 클릭 = 바로 전송. 메시지 갯수 무관 항상 표시. sending 중엔 dim·비활성.
 function QuickPrompts({ onPick, disabled }) {
+  // 4 능력 분야 (현황 / 점검 / 위치 / 변화) — 구체 운영 액션 표현 (5/26 사용자 결정)
   const items = [
-    "통신 두절 단말",
-    "방식전위 -800 이상 단말",
-    "은파호수공원 근처 단말",
-    "최근 7일 위험 알람",
+    "오늘 KPI 요약",
+    "위험·통신두절 단말",
+    "은파호수공원 근처",
+    "최근 24시간 변화",
   ];
   return (
     <div style={{
