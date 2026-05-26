@@ -2268,6 +2268,35 @@ app.get("/api/admin/tool-stats", dbRequired, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────
+// 📅 매일 자정 빈 일일 세션 강제 (cron) — launchd 가 00:01 에 호출
+//   사용자 5/26 결정 — "새 세션이 날짜별로 새 세션이 되도록".
+//   매일 00:01 에 "📅 YYYY-MM-DD 대화" 세션 ensure (이미 있으면 skip).
+//   운영자가 그날 처음 챗봇 진입 시 자연스럽게 그 세션이 이미 만들어져 있음.
+//   드롭다운 그룹 "오늘" 에 항상 1개 이상 세션 존재.
+// ─────────────────────────────────────────────────────
+app.post("/api/admin/ensure-daily-session", dbRequired, async (_req, res) => {
+  try {
+    const now = new Date();
+    const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const title = `📅 ${dateKey} 대화`;
+    // 같은 title 이미 있으면 skip (idempotent)
+    const [existing] = await pool.query(
+      `SELECT id FROM chat_sessions WHERE title = ? ORDER BY created_at DESC LIMIT 1`,
+      [title],
+    );
+    if (existing.length) {
+      return res.json({ ok: true, sessionId: Number(existing[0].id), created: false, dateKey });
+    }
+    const [r] = await pool.query(`INSERT INTO chat_sessions (title) VALUES (?)`, [title]);
+    console.log(`[daily-session] created session ${r.insertId} : ${title}`);
+    res.json({ ok: true, sessionId: r.insertId, created: true, dateKey, title });
+  } catch (err) {
+    console.error("[ensure-daily-session]", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────
 // 🤖 AI 자동 분석 (cron) — 매시 정각 launchd 가 호출
 //   1. 군산 날씨 fetch (Open-Meteo)
 //   2. 도구 5개 호출로 시스템 현황 수집
