@@ -627,13 +627,40 @@ function LogLine({ line }) {
   );
 }
 
+// kind 필터 칩 정의 — LogLine 의 색과 일치
+const LOG_KINDS = [
+  { k: "ok",    label: "정상",  color: "var(--ok)"    },
+  { k: "ai",    label: "AI",   color: "var(--brand)" },
+  { k: "alert", label: "위험",  color: "var(--err)"   },
+  { k: "warn",  label: "경고",  color: "var(--warn)"  },
+];
+
 function LogPanel({ lines, onToggleLog }) {
   const [query, setQuery] = useState("");
+  const [hiddenKinds, setHiddenKinds] = useState(() => new Set());
+  // kind 별 카운트 (모든 lines 기준 — 필터 적용 전)
+  const kindCounts = useMemo(() => {
+    const c = { ok: 0, ai: 0, alert: 0, warn: 0 };
+    for (const l of lines) { if (c[l.kind] !== undefined) c[l.kind]++; }
+    return c;
+  }, [lines]);
+  // kind + search 필터 동시 적용
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return lines;
-    return lines.filter((l) => (l.text || "").toLowerCase().includes(q));
-  }, [lines, query]);
+    return lines.filter((l) => {
+      if (hiddenKinds.has(l.kind)) return false;
+      if (q && !(l.text || "").toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [lines, query, hiddenKinds]);
+  const toggleKind = (k) => {
+    setHiddenKinds((prev) => {
+      const next = new Set(prev);
+      next.has(k) ? next.delete(k) : next.add(k);
+      return next;
+    });
+  };
+  const allVisible = hiddenKinds.size === 0;
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <PanelHeader
@@ -666,6 +693,53 @@ function LogPanel({ lines, onToggleLog }) {
           </span>
         </div>
       </PanelHeader>
+      {/* kind 필터 칩 */}
+      <div style={{
+        padding: "6px 10px", borderBottom: "1px solid var(--line-soft)",
+        background: "var(--bg-elev)",
+        display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap",
+      }}>
+        {LOG_KINDS.map(({ k, label, color }) => {
+          const on = !hiddenKinds.has(k);
+          const n = kindCounts[k] || 0;
+          return (
+            <button
+              key={k}
+              onClick={() => toggleKind(k)}
+              title={on ? `${label} 숨기기` : `${label} 표시`}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 4,
+                padding: "2px 8px", borderRadius: 999,
+                fontSize: 10, fontWeight: 700, lineHeight: 1.4,
+                background: on ? "rgba(0,0,0,0.04)" : "transparent",
+                border: `1px solid ${on ? color : "var(--line)"}`,
+                color: on ? color : "var(--ink-4)",
+                cursor: "pointer",
+                opacity: on ? 1 : 0.5,
+                transition: "all 140ms ease",
+              }}
+            >
+              <span style={{
+                width: 6, height: 6, borderRadius: "50%",
+                background: on ? color : "var(--ink-4)",
+              }} />
+              {label}
+              <span className="mono" style={{ opacity: 0.7 }}>{n}</span>
+            </button>
+          );
+        })}
+        {!allVisible && (
+          <button
+            onClick={() => setHiddenKinds(new Set())}
+            style={{
+              marginLeft: "auto",
+              background: "transparent", border: "none",
+              color: "var(--ink-4)", cursor: "pointer",
+              fontSize: 10, fontWeight: 600,
+            }}
+          >전체 표시</button>
+        )}
+      </div>
       {/* 검색 입력창 */}
       <div style={{
         padding: "8px 10px", borderBottom: "1px solid var(--line-soft)",
@@ -701,12 +775,14 @@ function LogPanel({ lines, onToggleLog }) {
         padding: 10, flex: 1, overflow: "auto",
         background: "var(--bg-sunk)",
       }}>
-        {filtered.length === 0 && query ? (
+        {filtered.length === 0 && (query || !allVisible) ? (
           <div style={{
             padding: 16, textAlign: "center",
             fontSize: 11, color: "var(--ink-4)",
           }}>
-            "{query}" 와 일치하는 로그 없음
+            {query
+              ? `"${query}" 와 일치하는 로그 없음`
+              : "선택된 종류의 로그 없음"}
           </div>
         ) : (
           filtered.map((l) => <LogLine key={l.id} line={l} />)
