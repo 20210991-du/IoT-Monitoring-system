@@ -638,7 +638,7 @@ export function App() {
       </div>
         );
       })()}
-      <AnalysisModal item={analysis} onClose={() => setAnalysis(null)} />
+      <AnalysisModal item={analysis} equipment={equipment} onClose={() => setAnalysis(null)} />
       <EquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
       <TweaksPanel state={tweakState} setState={setTweakState} show={tweaksOn} />
     </>
