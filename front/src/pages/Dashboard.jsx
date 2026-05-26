@@ -1927,7 +1927,7 @@ function DashboardEquipmentDrawer({ item, onClose }) {
   );
 }
 
-export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], aiEvents = [], demoMode = false }) {
+export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], aiEvents = [], demoMode = false, logOpen = false, onLogClose }) {
   const [activeKpi, setActiveKpi] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [focused, setFocused] = useState(null); // {lat, lng, node, ts}
@@ -1938,15 +1938,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
   const [autoKpiSec, setAutoKpiSec] = useState(0);           // AI 자동 필터 잔여 초 (0 = 비활성)
   const autoKpiTimer = useRef(null);                         // setTimeout 핸들
   const autoKpiTick  = useRef(null);                         // setInterval 핸들 (1초)
-  const [logOpen, setLogOpen]   = useState(false);           // 시스템 로그 드로어 토글 (옴니 5/22 피드백 반영 — 챗봇 영역 확장)
-
-  // ESC 로 로그 드로어 닫기
-  useEffect(() => {
-    if (!logOpen) return;
-    const onKey = (e) => { if (e.key === "Escape") setLogOpen(false); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [logOpen]);
+  // logOpen / ESC 처리는 App.jsx 로 이동 (헤더 알약 버튼이 토글, 5/26)
 
   const counts = useMemo(() => {
     const c = { all: equipment.length, normal: 0, critical: 0, anomaly: 0, warn: 0, offline: 0 };
@@ -2124,32 +2116,7 @@ export function Dashboard({ onAnalyze, mapStyle, setMapStyle, theme, autoPlay = 
         </div>
       </div>
 
-      {/* 우상단 floating 토글 — 시스템 로그 드로어 */}
-      <button
-        onClick={() => setLogOpen((v) => !v)}
-        title={logOpen ? "시스템 로그 닫기 (ESC)" : "실시간 시스템 로그 열기"}
-        style={{
-          position: "fixed", top: 168, right: logOpen ? 432 : 24, zIndex: 60,
-          display: "inline-flex", alignItems: "center", gap: 6,
-          padding: "8px 14px", borderRadius: 999,
-          background: logOpen ? "var(--brand)" : "var(--bg-elev)",
-          color: logOpen ? "#fff" : "var(--ink)",
-          border: `1px solid ${logOpen ? "var(--brand)" : "var(--line)"}`,
-          fontSize: 12, fontWeight: 700, letterSpacing: "0.02em",
-          cursor: "pointer", boxShadow: "var(--shadow-card)",
-          transition: "right 220ms cubic-bezier(.4,0,.2,1), background 160ms, color 160ms",
-        }}
-      >
-        <span style={{
-          width: 7, height: 7, borderRadius: "50%",
-          background: logOpen ? "#fff" : "var(--ok)",
-          animation: "pulse-dot 1.2s infinite",
-        }} />
-        {logOpen ? "로그 닫기" : "시스템 로그"}
-        <span className="mono" style={{ opacity: 0.7, fontSize: 10, marginLeft: 4 }}>{lines.length}</span>
-      </button>
-
-      {/* 우측 슬라이드 드로어 — 시스템 로그 */}
+      {/* 우측 슬라이드 드로어 — 시스템 로그 (5/26 헤더 알약으로 토글) */}
       <div style={{
         position: "fixed", top: 0, right: 0, bottom: 0, width: 400, zIndex: 55,
         background: "var(--bg)",
