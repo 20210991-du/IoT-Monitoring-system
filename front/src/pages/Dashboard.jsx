@@ -1242,7 +1242,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
   };
 
   return (
-    <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
+    <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0, position: "relative" }}>
       <PanelHeader
         right={(() => {
           // 모드: null = 아직 호출 X, true = LLM 연결됨, false = mock fallback
@@ -1254,11 +1254,11 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
           const lbl = isLlm  ? "LLM 연결됨"             : isMock ? "mock fallback"         : "대기";
           return (
             <div style={{ display: "flex", alignItems: "center", gap: 6, position: "relative" }}>
-              {/* 자동 분석 버튼 — 클릭 시 즉시 cron 로직 실행 + 현재 채팅에 push */}
+              {/* 수동 분석 버튼 — 클릭 시 즉시 cron 로직 실행 + 현재 채팅에 push */}
               <button
                 onClick={runAutoInsight}
                 disabled={sending}
-                title={sending ? "분석 중..." : "지금 자동 분석 실행 (도구 5개 + 군산 날씨 + LLM 1회)"}
+                title={sending ? "분석 중..." : "지금 수동 분석 실행 (도구 5개 + 군산 날씨 + LLM 1회)"}
                 style={{
                   display: "inline-flex", alignItems: "center", gap: 5,
                   padding: "3px 10px", borderRadius: 8,
@@ -1282,7 +1282,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
                 }}
               >
                 <span style={{ fontSize: 11 }}>{sending ? "⏳" : "✨"}</span>
-                자동 분석
+                수동 분석
               </button>
               {/* LLM 모델 (placeholder) — 정보 표시 */}
               <div
@@ -1323,20 +1323,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
               >
                 <Icons.refresh size={11} />
               </button>
-              {/* 세션 목록 드롭다운 토글 */}
-              <button
-                onClick={openSessionsList}
-                title="이전 대화 세션 목록"
-                style={{
-                  display: "grid", placeItems: "center",
-                  width: 22, height: 22, borderRadius: 6,
-                  background: showSessions ? "var(--bg-elev)" : "transparent",
-                  border: "1px solid var(--line)",
-                  color: "var(--ink-3)", cursor: "pointer",
-                }}
-              >
-                <Icons.list size={11} />
-              </button>
+              {/* 세션 목록 토글은 좌상단 [📋 N] 알약으로 이동 (5/26 사이드바 패턴) */}
               <div style={{
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "2px 10px", borderRadius: 999,
@@ -1347,8 +1334,9 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
                 {lbl}
               </div>
 
-              {/* 세션 목록 드롭다운 */}
-              {showSessions && (
+              {/* 세션 목록은 좌측 사이드바로 이동 — 이 영역에서는 제거 (5/26)
+                  아래 false 블록은 빌드 영향 없도록 임시 비활성. 다음 commit 에서 완전 삭제 예정. */}
+              {false && (
                 <div style={{
                   position: "absolute", top: 30, right: 0, zIndex: 50,
                   width: 280, maxHeight: 360, overflow: "auto",
@@ -1443,6 +1431,23 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
         })()}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* 좌상단 세션 목록 토글 — 클릭 시 ChatPanel 안 좌측 사이드바 슬라이드 (5/26) */}
+          <button
+            onClick={openSessionsList}
+            title={showSessions ? "세션 목록 닫기" : "세션 목록 열기"}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 4,
+              padding: "3px 9px", borderRadius: 999,
+              background: showSessions ? "var(--brand)" : "var(--bg-elev)",
+              border: `1px solid ${showSessions ? "var(--brand)" : "var(--line)"}`,
+              color: showSessions ? "#fff" : "var(--ink-3)",
+              fontSize: 11, fontWeight: 600, cursor: "pointer",
+              transition: "all 140ms ease",
+            }}
+          >
+            <Icons.list size={11} />
+            {Array.isArray(sessions) && sessions.length > 0 ? sessions.length : ""}
+          </button>
           <Icons.sparkle size={16} color="var(--brand)" />
           <div style={{ fontSize: 13, fontWeight: 700 }}>AI 챗봇</div>
         </div>
@@ -1513,7 +1518,155 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
           전송
         </button>
       </form>
+
+      {/* 좌측 사이드바 — 세션 목록 (오버레이, ChatPanel 안에 갇힘)
+          showSessions=true 일 때 좌측에서 슬라이드 인. 외부 클릭/ESC 로 닫힘. */}
+      <SessionSidebar
+        open={showSessions}
+        loading={sessionsLoading}
+        sessions={sessions}
+        activeSessionId={sessionId}
+        onClose={() => setShowSessions(false)}
+        onPick={loadSession}
+        onDelete={removeSession}
+      />
     </Panel>
+  );
+}
+
+// 세션 목록 사이드바 — ChatPanel 안 absolute 오버레이
+//   open=true 시 좌측에서 슬라이드 인 (translateX 220ms).
+//   ESC 또는 외부 클릭으로 닫힘. 세션 클릭 시 자동 닫힘 (onPick 안에서 처리).
+function SessionSidebar({ open, loading, sessions, activeSessionId, onClose, onPick, onDelete }) {
+  const ref = useRef(null);
+  // ESC 닫기
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+  // 외부 클릭 닫기 (사이드바 영역 밖)
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) onClose();
+    };
+    // 마운트 직후 같은 click 으로 닫히지 않게 다음 tick 등록
+    const t = setTimeout(() => document.addEventListener("mousedown", onDoc), 0);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("mousedown", onDoc);
+    };
+  }, [open, onClose]);
+
+  const grouped = open ? groupSessionsByDate(sessions || []) : null;
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: "absolute", left: 0, top: 0, bottom: 0,
+        width: 280, zIndex: 30,
+        background: "var(--bg)",
+        borderRight: "1px solid var(--line)",
+        boxShadow: open ? "8px 0 24px -10px rgba(0,0,0,0.18)" : "none",
+        transform: open ? "translateX(0)" : "translateX(-100%)",
+        transition: "transform 220ms ease",
+        display: "flex", flexDirection: "column",
+        overflow: "hidden",
+      }}
+    >
+      {/* 헤더 */}
+      <div style={{
+        padding: "12px 14px",
+        borderBottom: "1px solid var(--line)",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink)" }}>
+          저장된 대화 세션
+        </div>
+        <button
+          onClick={onClose}
+          title="닫기 (ESC)"
+          style={{
+            background: "transparent", border: "none",
+            color: "var(--ink-4)", cursor: "pointer", padding: 2,
+          }}
+        ><Icons.close size={12} /></button>
+      </div>
+
+      {/* 목록 */}
+      <div className="scroll" style={{ flex: 1, overflow: "auto" }}>
+        {loading && (
+          <div style={{ padding: 14, fontSize: 11, color: "var(--ink-4)" }}>불러오는 중...</div>
+        )}
+        {!loading && (!sessions || sessions.length === 0) && (
+          <div style={{ padding: 14, fontSize: 11, color: "var(--ink-4)" }}>저장된 세션 없음</div>
+        )}
+        {!loading && grouped && Object.entries(grouped).map(([label, items]) => {
+          if (items.length === 0) return null;
+          return (
+            <div key={label}>
+              <div style={{
+                position: "sticky", top: 0, zIndex: 1,
+                padding: "6px 12px 4px",
+                fontSize: 10, fontWeight: 700, color: "var(--ink-3)",
+                letterSpacing: "0.05em", textTransform: "uppercase",
+                background: "var(--bg)",
+                borderBottom: "1px solid var(--line-soft)",
+              }}>
+                {label} <span style={{ opacity: 0.5, fontWeight: 500 }}>({items.length})</span>
+              </div>
+              {items.map((s) => {
+                const isActive = s.id === activeSessionId;
+                const dt = s.updated_at ? new Date(s.updated_at) : null;
+                const dtLabel = dt ? `${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}` : "";
+                return (
+                  <div
+                    key={s.id}
+                    onClick={() => { onPick(s.id); onClose(); }}
+                    style={{
+                      padding: "9px 12px",
+                      borderBottom: "1px solid var(--line)",
+                      background: isActive ? "rgba(79,70,229,0.08)" : "transparent",
+                      cursor: "pointer",
+                      display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8,
+                    }}
+                    onMouseOver={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-elev)"; }}
+                    onMouseOut={(e)  => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: 12, fontWeight: isActive ? 700 : 500,
+                        color: isActive ? "var(--brand)" : "var(--ink)",
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      }}>
+                        {s.title || `세션 #${s.id}`}
+                      </div>
+                      <div style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>
+                        {dtLabel} · 메시지 {s.messageCount || 0}
+                      </div>
+                    </div>
+                    <button
+                      onClick={(e) => onDelete(s.id, e)}
+                      title="세션 삭제"
+                      style={{
+                        background: "transparent", border: "none",
+                        color: "var(--ink-4)", cursor: "pointer", padding: 2,
+                        opacity: 0.5,
+                      }}
+                      onMouseOver={(e) => { e.currentTarget.style.opacity = 1; e.currentTarget.style.color = "#dc2626"; }}
+                      onMouseOut={(e)  => { e.currentTarget.style.opacity = 0.5; e.currentTarget.style.color = "var(--ink-4)"; }}
+                    ><Icons.close size={10} /></button>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
