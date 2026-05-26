@@ -1009,6 +1009,67 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     saveChatHistory(messages);
   }, [messages, sending]);
 
+  // 헤더 "자동 분석" 버튼 — POST /api/admin/run-auto-insight 즉시 호출
+  //   백엔드는 매시 cron 과 동일 로직 (도구 5개 + 군산 날씨 + LLM) →
+  //   "🤖 AI 자동 분석 — YYYY-MM-DD" 세션에 영구 INSERT (system role).
+  //   동시에 응답 text 를 현재 채팅에 AI 메시지로 push (사용자 즉시 보임).
+  const runAutoInsight = async () => {
+    if (sending) return;
+    setSending(true);
+    const rtime = (() => {
+      const r = new Date();
+      return `${String(r.getHours()).padStart(2,"0")}:${String(r.getMinutes()).padStart(2,"0")}`;
+    })();
+    const today = todayKey();
+    // 빈 AI 메시지 자리 (streaming) — "AI 응답 생성 중..." 인디케이터 자동 트리거
+    setMessages((m) => [
+      ...m,
+      { role: "ai", text: "", time: rtime, streaming: true, dateKey: today, isAutoInsight: true },
+    ]);
+    const t0 = Date.now();
+    try {
+      const res = await fetch("/api/admin/run-auto-insight", {
+        method: "POST",
+        signal: AbortSignal.timeout(120_000),
+      });
+      const d = await res.json();
+      if (!d.ok) throw new Error(d.error || "자동 분석 실패");
+      const elapsedMs = Date.now() - t0;
+      setMessages((m) => {
+        const arr = m.slice();
+        const last = arr[arr.length - 1];
+        if (last && last.streaming) {
+          arr[arr.length - 1] = {
+            role: "ai",
+            text: d.text,
+            time: rtime,
+            dateKey: today,
+            isAutoInsight: true,
+            meta: { elapsedMs, autoInsight: true, sessionId: d.sessionId, model: "qwen3.5:9b" },
+          };
+        }
+        return arr;
+      });
+      setLlmActive(true);
+    } catch (err) {
+      setMessages((m) => {
+        const arr = m.slice();
+        const last = arr[arr.length - 1];
+        if (last && last.streaming) {
+          arr[arr.length - 1] = {
+            role: "ai",
+            text: `❌ 자동 분석 실패: ${err.message}`,
+            time: rtime,
+            dateKey: today,
+          };
+        }
+        return arr;
+      });
+    } finally {
+      setSending(false);
+    }
+  };
+
   // send(e, q?) — q 지정 시 그것 우선 전송 (빠른 질문 카드용), 없으면 input state 사용
   const send = async (e, q) => {
     e && e.preventDefault();
@@ -1144,20 +1205,36 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
           const lbl = isLlm  ? "LLM 연결됨"             : isMock ? "mock fallback"         : "대기";
           return (
             <div style={{ display: "flex", alignItems: "center", gap: 6, position: "relative" }}>
-              {/* 도구 카테고리 (placeholder) — 시각용 라벨 */}
-              <div
-                title="도구 카테고리 (현재 전체 18 도구 활성)"
+              {/* 자동 분석 버튼 — 클릭 시 즉시 cron 로직 실행 + 현재 채팅에 push */}
+              <button
+                onClick={runAutoInsight}
+                disabled={sending}
+                title={sending ? "분석 중..." : "지금 자동 분석 실행 (도구 5개 + 군산 날씨 + LLM 1회)"}
                 style={{
                   display: "inline-flex", alignItems: "center", gap: 5,
-                  padding: "3px 9px", borderRadius: 8,
-                  background: "var(--bg-elev)", border: "1px solid var(--line)",
-                  fontSize: 11, fontWeight: 500, color: "var(--ink-3)",
-                  cursor: "default", whiteSpace: "nowrap",
+                  padding: "3px 10px", borderRadius: 8,
+                  background: sending ? "var(--bg-sunk)" : "rgba(99,102,241,0.10)",
+                  border: `1px solid ${sending ? "var(--line)" : "rgba(99,102,241,0.35)"}`,
+                  fontSize: 11, fontWeight: 600,
+                  color: sending ? "var(--ink-4)" : "var(--brand)",
+                  cursor: sending ? "wait" : "pointer",
+                  whiteSpace: "nowrap",
+                  transition: "all 140ms ease",
+                }}
+                onMouseEnter={(e) => {
+                  if (sending) return;
+                  e.currentTarget.style.background = "rgba(99,102,241,0.18)";
+                  e.currentTarget.style.borderColor = "var(--brand)";
+                }}
+                onMouseLeave={(e) => {
+                  if (sending) return;
+                  e.currentTarget.style.background = "rgba(99,102,241,0.10)";
+                  e.currentTarget.style.borderColor = "rgba(99,102,241,0.35)";
                 }}
               >
-                전체 기능
-                <span style={{ fontSize: 9, color: "var(--ink-4)", marginLeft: 1 }}>▾</span>
-              </div>
+                <span style={{ fontSize: 11 }}>{sending ? "⏳" : "✨"}</span>
+                자동 분석
+              </button>
               {/* LLM 모델 (placeholder) — 정보 표시 */}
               <div
                 title="LLM 모델 (Mac Studio Ollama 로컬)"
