@@ -2326,9 +2326,18 @@ async function ensureAutoInsightSession(dateKey) {
 }
 
 // 자동 분석 prompt 빌더 (C 톤 풍부 형식 강제)
+//   시각 기준 = 정시 (매시 00분 floor). 운영자가 14:23 에 눌러도 메시지는 "14:00" 기준.
+//   다음 분석은 항상 다음 정시 (HH+1):00.
 function buildAutoInsightPrompt(weather, dataBundle) {
   const { summary, offlineList, criticalList, lowVolt, recentAlarms } = dataBundle;
-  const now = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+  // 정시 floor (Asia/Seoul) — 분/초 = 00 으로 잘라냄
+  const nowDate = new Date();
+  const fmtHour = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:00`;
+  const hourFloor = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate(), nowDate.getHours(), 0, 0);
+  const nextHour  = new Date(hourFloor.getTime() + 60 * 60 * 1000);
+  const currentSlot = fmtHour(hourFloor);   // "2026-05-26 14:00"
+  const nextSlot    = fmtHour(nextHour);    // "2026-05-26 15:00"
   const weatherLine = weather
     ? `${weather.ko} · ${weather.temp}°C${weather.precip != null ? ` · 강수 ${weather.precip}mm` : ""}${weather.humidity != null ? ` · 습도 ${weather.humidity}%` : ""}`
     : "(데이터 없음)";
@@ -2336,8 +2345,10 @@ function buildAutoInsightPrompt(weather, dataBundle) {
 운영자가 챗봇에 접속할 때마다 자동으로 push 되는 시간별 분석 메시지를 작성합니다.
 한국어 존댓말. 답변 외 메타·설명 X. 메시지 본문만 출력.
 
-# 현재 시각
-${now}
+# 분석 기준 시각 (정시 기준 — 매시 00분 floor)
+- 현재 분석 시각: ${currentSlot}
+- 다음 분석 시각: ${nextSlot}
+- 메시지 본문에 이 두 시각을 정확히 인용 (다른 분/초 표현 금지)
 
 # 현재 군산 날씨 (Open-Meteo)
 ${weatherLine}
@@ -2357,9 +2368,9 @@ ${JSON.stringify(lowVolt)}
 # 최근 24시간 알람
 ${JSON.stringify(recentAlarms)}
 
-# 출력 형식 (반드시 이대로)
+# 출력 형식 (반드시 이대로 · 시각은 위 "분석 기준 시각" 정확히 인용)
 
-🤖 자동 분석 · {시각} ── 분석 엔진 가동중
+🤖 자동 분석 · ${currentSlot} ── 분석 엔진 가동중
 
 🌦 군산 현재 — {날씨 한 줄}
 
@@ -2375,13 +2386,14 @@ ${JSON.stringify(recentAlarms)}
 2. ...
 3. ...
 
-다음 분석 {다음 시각}
+다음 분석 ${nextSlot}
 
 # 규칙
 - 수치는 도구 데이터 그대로 인용. 추측 결론은 [추정] 라벨
 - 데이터 없는 항목은 "없음" 명시 (만들지 말 것)
 - 마크다운 **굵게** 만 사용 (헤더 ## X)
-- 5문장 이상 길게 쓰지 말 것 (각 섹션 2~4문장)`;
+- 5문장 이상 길게 쓰지 말 것 (각 섹션 2~4문장)
+- 시각 표기는 절대 "오후 2:01" 같은 분/초 X. 무조건 "${currentSlot}" / "${nextSlot}" 형태`;
 }
 
 app.post("/api/admin/run-auto-insight", dbRequired, async (_req, res) => {
