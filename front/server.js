@@ -2236,6 +2236,8 @@ app.get("/api/log-events", dbRequired, async (req, res) => {
     const after = req.query.after;
     const q     = (req.query.q || "").trim().toLowerCase();
     const limit = Math.min(parseInt(req.query.limit || "100", 10), 300);
+    // 검색용 풀은 limit 보다 넉넉히 — 적은 limit 으로도 검색이 의미 있도록
+    const sqlLimit = Math.max(limit, 500);
 
     // audit_log (도구 호출, AI 동작 등) — 최근 7일
     const [audits] = await pool.query(`
@@ -2243,7 +2245,7 @@ app.get("/api/log-events", dbRequired, async (req, res) => {
       FROM audit_log
       WHERE created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
         ${after ? "AND created_at > ?" : ""}
-      ORDER BY created_at DESC LIMIT ${limit}
+      ORDER BY created_at DESC LIMIT ${sqlLimit}
     `, after ? [after] : []);
 
     // kscg_alarm_log (옴니 원본 알람) — 최근 30일
@@ -2257,7 +2259,7 @@ app.get("/api/log-events", dbRequired, async (req, res) => {
       LEFT JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = si.TRANSMITTER_ID
       WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 30 DAY)
         ${after ? "AND a.GEN_DATE > ?" : ""}
-      ORDER BY a.GEN_DATE DESC LIMIT ${limit}
+      ORDER BY a.GEN_DATE DESC LIMIT ${sqlLimit}
     `, after ? [after] : []);
 
     const fmtTime = (d) => {
