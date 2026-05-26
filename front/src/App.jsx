@@ -8,7 +8,7 @@ import { TweaksPanel } from "./components/TweaksPanel.jsx";
 import { Icons } from "./components/Icons.jsx";
 import { Login } from "./pages/Login.jsx";
 import { SignUp } from "./pages/SignUp.jsx";
-import { Dashboard, AnalysisModal } from "./pages/Dashboard.jsx";
+import { Dashboard } from "./pages/Dashboard.jsx";
 import { Equipment } from "./pages/Equipment.jsx";
 import { Admin } from "./pages/Admin.jsx";
 import { currentSession, signOut, listPending } from "./lib/authMock.js";
@@ -373,7 +373,7 @@ export function App() {
   });
   const [tweaksOn,   setTweaksOn]   = useState(false);
   const [bannerOpen, setBannerOpen] = useState(true);
-  const [analysis,   setAnalysis]   = useState(null);
+  // analysis state 폐기 (5/26) — AI 탐지 카드 클릭은 챗봇 메시지 푸쉬로 대체 (Dashboard 내부 처리)
   const [drawer,     setDrawer]     = useState(null);
 
   // ── API 데이터 상태 (초기값 = 목업) ──────────────────────────
@@ -594,7 +594,7 @@ export function App() {
           <EmergencyBanner
             criticalDevices={criticalDevices}
             onDismiss={() => setBannerOpen(false)}
-            onOpen={() => setAnalysis(anomalies.find((a) => a.node === criticalDevices[0].deviceId) || anomalies[0] || null)}
+            /* onOpen 제거 (5/26) — Banner 의 액션은 추후 결정 */
           />
         );
       })()}
@@ -609,7 +609,7 @@ export function App() {
           }}>
         {tab === "dashboard" && (
           <Dashboard
-            onAnalyze={setAnalysis}
+            /* onAnalyze 제거 (5/26) — AI 탐지 카드 클릭은 Dashboard 내부에서 챗봇 푸쉬 */
             mapStyle={tweakState.mapStyle}
             setMapStyle={setMapStyle}
             theme={tweakState.theme}
@@ -638,7 +638,7 @@ export function App() {
       </div>
         );
       })()}
-      <AnalysisModal item={analysis} equipment={equipment} onClose={() => setAnalysis(null)} />
+      {/* AnalysisModal 폐기 (5/26) — AI 탐지 카드 클릭은 챗봇 메시지 푸쉬로 대체 */}
       <EquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
       <TweaksPanel state={tweakState} setState={setTweakState} show={tweaksOn} />
     </>
