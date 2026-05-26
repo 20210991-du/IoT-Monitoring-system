@@ -130,13 +130,13 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-        {/* ── 시스템 로그 토글 (드로어) — 5/26 위치 이동: floating → 헤더 ── */}
+        {/* ── 시스템 로그 ⇄ AI 탐지 교체 토글 (5/26 in-place swap) ── */}
         {onToggleLog && (
           <button
             type="button"
             onClick={onToggleLog}
             aria-pressed={logOpen}
-            title={logOpen ? "시스템 로그 닫기 (ESC)" : "실시간 시스템 로그 열기"}
+            title={logOpen ? "AI 탐지 목록으로 돌아가기 (ESC)" : "AI 탐지 자리에 시스템 로그 표시"}
             style={{
               display: "inline-flex", alignItems: "center", gap: 6,
               padding: "6px 12px", borderRadius: 999,
@@ -153,7 +153,7 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
               background: logOpen ? "#fff" : "var(--ok)",
               animation: "pulse-dot 1.2s infinite",
             }} />
-            시스템 로그
+            {logOpen ? "AI 탐지로 돌아가기" : "시스템 로그"}
           </button>
         )}
 
