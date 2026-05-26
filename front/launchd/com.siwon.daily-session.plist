@@ -1,18 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  매일 자정 빈 일일 세션 강제 (1-1, 2026-05-26)
-    · 매일 00:01 (자정 직후 1분) launchd 가 /api/admin/ensure-daily-session POST
-    · 이미 있으면 skip, 없으면 새로 INSERT
-    · title 형식: "📅 2026-05-27 대화"
-    · 운영자가 그날 첫 진입 시 헤더 📋 그룹 "오늘" 에 항상 1개 이상 보임
+  매일 자정 (00:01) 2가지 작업 chain (1-1 + 2-1 통합):
+    1) /api/admin/merge-yesterday-sessions
+       → 어제 일반 세션들을 1개로 합침 (자동분석 🤖 제외)
+       → title "📚 YYYY-MM-DD 대화 통합"
+    2) /api/admin/ensure-daily-session
+       → 오늘 빈 일일 세션 INSERT (📅 YYYY-MM-DD 대화)
+
+  순서: merge 먼저 (어제 정리) → ensure (오늘 준비).
+  자동분석 세션 (🤖 AI 자동 분석 — YYYY-MM-DD) 은 별도 ai-insight plist 가 관리.
 
   설치:
     cp ~/work/IoT-Monitoring-system/front/launchd/com.siwon.daily-session.plist ~/Library/LaunchAgents/
-    launchctl load ~/Library/LaunchAgents/com.siwon.daily-session.plist
-
-  검증:
-    launchctl list | grep daily-session
-    tail -f ~/daily-session.log
+    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.siwon.daily-session.plist 2>/dev/null
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.siwon.daily-session.plist
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -22,16 +23,12 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/curl</string>
-    <string>-sS</string>
-    <string>--max-time</string>
-    <string>15</string>
-    <string>-X</string>
-    <string>POST</string>
-    <string>http://localhost:5050/api/admin/ensure-daily-session</string>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>echo "=== $(date) ===" ; curl -sS --max-time 30 -X POST http://localhost:5050/api/admin/merge-yesterday-sessions ; echo ; curl -sS --max-time 15 -X POST http://localhost:5050/api/admin/ensure-daily-session ; echo</string>
   </array>
 
-  <!-- 매일 00:01 실행 -->
+  <!-- 매일 00:01 (자정 직후) 실행 -->
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>

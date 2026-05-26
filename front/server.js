@@ -2274,6 +2274,63 @@ app.get("/api/admin/tool-stats", dbRequired, async (req, res) => {
 //   운영자가 그날 처음 챗봇 진입 시 자연스럽게 그 세션이 이미 만들어져 있음.
 //   드롭다운 그룹 "오늘" 에 항상 1개 이상 세션 존재.
 // ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────
+// 📚 어제 일반 세션 → 1개로 merge (매일 자정 cron)
+//   사용자 5/26 결정 — "다음날에 볼때는 어제 모든 세션이 합친 1개로 표시".
+//   자동분석 세션 (🤖) 은 제외, 어제 일반 세션만 대상.
+//   target = 어제 첫 일반 세션 (id 최소, 보통 빈 일일 세션 📅).
+//   메시지 모두 target 으로 UPDATE → 빈 세션 DELETE → title "📚 YYYY-MM-DD 대화 통합".
+// ─────────────────────────────────────────────────────
+app.post("/api/admin/merge-yesterday-sessions", dbRequired, async (_req, res) => {
+  try {
+    const y = new Date();
+    y.setDate(y.getDate() - 1);
+    const yKey = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, "0")}-${String(y.getDate()).padStart(2, "0")}`;
+
+    // 어제의 첫 일반 세션 찾기
+    const [tRows] = await pool.query(`
+      SELECT MIN(s.id) AS target FROM chat_sessions s
+      JOIN chat_messages m ON m.session_id = s.id
+      WHERE s.title NOT LIKE '🤖%' AND DATE(m.created_at) = ?
+    `, [yKey]);
+    const target = tRows[0]?.target;
+    if (!target) {
+      return res.json({ ok: true, dateKey: yKey, merged: 0, message: "어제 일반 세션 없음" });
+    }
+
+    // 다른 일반 세션 메시지 → target 으로 UPDATE
+    await pool.query(`
+      UPDATE chat_messages SET session_id = ?
+      WHERE DATE(created_at) = ? AND session_id != ?
+        AND session_id IN (SELECT * FROM (
+          SELECT DISTINCT s.id FROM chat_sessions s
+          JOIN chat_messages m ON m.session_id = s.id
+          WHERE s.title NOT LIKE '🤖%' AND DATE(m.created_at) = ?
+        ) x)
+    `, [target, yKey, target, yKey]);
+
+    // 빈 일반 세션 DELETE (자동분석 🤖 제외)
+    const [delResult] = await pool.query(`
+      DELETE FROM chat_sessions
+      WHERE title NOT LIKE '🤖%'
+        AND id != ?
+        AND id NOT IN (SELECT DISTINCT session_id FROM chat_messages)
+    `, [target]);
+
+    // target title 갱신
+    await pool.query(
+      `UPDATE chat_sessions SET title = ? WHERE id = ?`,
+      [`📚 ${yKey} 대화 통합`, target],
+    );
+
+    console.log(`[merge-yesterday] dateKey=${yKey} target=${target} deleted=${delResult.affectedRows}`);
+    res.json({ ok: true, dateKey: yKey, target, deletedSessions: delResult.affectedRows });
+  } catch (err) {
+    console.error("[merge-yesterday]", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post("/api/admin/ensure-daily-session", dbRequired, async (_req, res) => {
   try {
     const now = new Date();
