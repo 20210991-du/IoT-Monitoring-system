@@ -568,8 +568,8 @@ export function App() {
         setMapStyle={setMapStyle}
         demoMode={demoMode}
         onToggleDemo={() => setDemoMode((v) => !v)}
-        logOpen={logOpen}
-        onToggleLog={tab === "dashboard" ? () => setLogOpen((v) => !v) : undefined}
+        /* 로그 토글은 5/26 Header → AIPanels 헤더 안으로 이동
+           Header 알약 제거. Dashboard 에 직접 onToggleLog 전달 */
       />
       <SubNav
         tab={tab}
@@ -621,6 +621,7 @@ export function App() {
             demoMode={demoMode}
             logOpen={logOpen}
             onLogClose={() => setLogOpen(false)}
+            onToggleLog={() => setLogOpen((v) => !v)}
           />
         )}
         {tab === "equipment" && <Equipment onOpen={setDrawer} equipment={equipment} />}
