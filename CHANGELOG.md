@@ -3,31 +3,53 @@
 ## v2026.05.25
 
 ### Added
-- 로그인 페이지 전면 리디자인
+- 자문 내용 확인
+
+### Changed
+- 로그인 페이지 개선 (2차)
+  - 다크/라이트 테마 자동 연동 (MutationObserver + CSS 변수 기반, 대시보드와 색감 일치)
+  - 실시간 시스템 로그 더미 제거 → `/api/health` · `/api/devices` · `/api/anomalies` 실제 폴링으로 대체
+  - 로그 패널 레이아웃 점프 수정 (고정 높이 컨테이너, 5줄 고정, opacity-only 전환)
+  - 부팅 메시지 단순화: 누적 표시 → 한 줄씩 교체 방식
+  - 다크 모드 배경 색감 조정: `#060c18` 심화 + 멀티 블롭 (인디고·퍼플·틸)
+
+👉 **결과**
+- 테마 전환 시 로그인 ↔ 대시보드 간 시각적 이질감 해소
+- 실제 시스템 데이터 기반 로그 표시로 현실감 향상
+
+## v2026.05.18
+
+### Added
+- 로그인 페이지 전면 리디자인 (1차)
   - Canvas 파티클 네트워크 (마우스 반응 반발력 + 스파클 트레일)
   - SVG 데이터 흐름선 애니메이션 (stroke-dashoffset)
-  - 부팅 시퀀스 (터미널 스타일 메시지 + 프로그레스 바)
+  - 부팅 시퀀스 (터미널 스타일 초기화 메시지 + 프로그레스 바)
   - 로그인 카드 3D 틸트 효과 (마우스 위치 기반 원근감 변환)
-  - 실시간 시스템 로그 패널 (`/api/health` · `/api/devices` · `/api/anomalies` 폴링)
   - 글리치 텍스트 효과 (타이틀 간헐적 사이버펑크 연출)
   - 타이핑 애니메이션 · easeOutExpo 카운팅 애니메이션 (감시 노드 55개, 센서 6종)
   - 입력 완료 시 체크 애니메이션 + 버튼 Ripple 효과
-- 다크/라이트 테마 자동 연동 (MutationObserver 기반, CSS 변수 일치)
-- `ai/scripts/gas_common_model_train.py` · `gas_common_model_predict.py` 추가
-  - 팀 파일명 괄호 포함(`2026.05.03`) → Python import 불가 문제 해결용 clean copy
-
-### Changed
-- 로그인 더미 이벤트 제거 → 실제 백엔드 API 폴링으로 대체
-- 다크 모드 배경 심화: `#060c18` 계열 + 멀티 그라디언트 블롭 (인디고·퍼플·틸)
-- 부팅 메시지 단순화: 누적 표시 → 한 줄씩 교체 방식으로 변경
-- 실시간 로그 패널: 고정 높이 컨테이너로 레이아웃 점프 현상 수정 (5줄 고정)
+  - dot grid 배경 오버레이, scanline 애니메이션, 실시간 상태 뱃지
 
 👉 **결과**
-- 로그인 화면이 AI 관제 시스템 분위기에 맞게 완성
-- 다크/라이트 테마 전환 시 시각적 이질감 해소
+- 로그인 화면이 AI 관제 시스템 분위기에 맞는 인터랙티브 UI로 완성
 
-### Added
-- 자문 내용 확인
+## v2026.05.11
+
+### Fixed
+- 백엔드 503 오류 수정
+  - 팀 AI 스크립트 파일명에 괄호 포함(`2026.05.03`) → Python import 불가 문제
+  - `ai/scripts/gas_common_model_train.py` · `gas_common_model_predict.py` clean copy 추가
+- `uvicorn` 미인식 오류 수정 (Windows PATH 문제) → `python -m uvicorn` 방식으로 변경
+
+### Changed
+- 팀원 변경사항 동기화
+  - `front/src/api/client.js` BASE URL 환경변수화 (`VITE_API_BASE_URL`), 데모 모드 플래그 추가
+  - `front/server.js` 추가 (Express + MySQL, 포트 5050) — 로컬 개발은 Python FastAPI(8001) 유지
+  - 지도 좌표계 군산 지역 기준으로 갱신 (lat 35.80~36.00, lng 126.45~126.83)
+
+👉 **결과**
+- 백엔드 정상 기동 및 API 응답 복구
+- 팀 통합 환경과 로컬 개발 환경 병행 운용 구조 정리
 
 ## v2026.05.04
 
