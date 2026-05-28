@@ -14,7 +14,7 @@
 > ⚠️ 임시 URL (`trycloudflare.com`). Mac Studio 재부팅·재가동 시 자동으로 새 URL 로 갱신됨. 도메인 구입 후 영구 URL 로 전환 예정 (발표 직전).
 
 ## 📌 Version
-Current Version: v2026.04.19
+Current Version: v2026.05.28
 
 👉 자세한 변경 내역은 [CHANGELOG.md](./CHANGELOG.md) 참고
 
