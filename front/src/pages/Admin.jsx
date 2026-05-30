@@ -39,7 +39,7 @@ function fmtDate(iso) {
 }
 
 // ── 메인 ─────────────────────────────────────────────────
-export function Admin({ user, equipment, anomalies, watch, apiStatus }) {
+export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiStatus }) {
   const [section, setSection] = useState("overview");
   const [users, setUsers] = useState([]);
   const [toast, setToast] = useState(null);
@@ -114,7 +114,7 @@ export function Admin({ user, equipment, anomalies, watch, apiStatus }) {
         {section === "overview" && (
           <OverviewSection
             users={users} counts={counts}
-            equipment={equipment} anomalies={anomalies} watch={watch}
+            equipment={equipment} anomalies={anomalies} watch={watch} commOutage={commOutage}
             apiStatus={apiStatus}
             onJump={(s) => setSection(s)}
           />
@@ -189,7 +189,7 @@ function AdminBadge({ user }) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 1) 개요 섹션
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-function OverviewSection({ users, counts, equipment, anomalies, watch, apiStatus, onJump }) {
+function OverviewSection({ users, counts, equipment, anomalies, watch, commOutage = [], apiStatus, onJump }) {
   const recentPending = users
     .filter((u) => u.status === "pending")
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
@@ -292,6 +292,11 @@ function OverviewSection({ users, counts, equipment, anomalies, watch, apiStatus
               label="관찰 필요"
               value={`${watch?.length || 0}건`}
               color={(watch?.length || 0) > 0 ? "var(--warn)" : "var(--ink-2)"}
+            />
+            <StatRow
+              label="통신 장애"
+              value={`${commOutage?.length || 0}건`}
+              color={(commOutage?.length || 0) > 0 ? "var(--ink-3)" : "var(--ink-2)"}
             />
             {lastActiveJoin && (
               <StatRow
@@ -713,9 +718,9 @@ function SettingsSection({ apiStatus, setToast }) {
       {/* 알림 임계값 (read-only — 모델/백엔드 영역) */}
       <SettingPanel title="알림 임계값" desc="이상 탐지 MSE 임계 (모델 학습 시 결정)">
         <div style={{ display: "grid", gap: 6 }}>
-          <ReadonlyRow label="이상 임계 (절대)"   value="MSE > 0.0085"  hint="ai/config/model_config.json" />
-          <ReadonlyRow label="관찰 임계 (이상 대비)" value="0.7 ~ 1.0배" hint="3단계 분류 기준" />
-          <ReadonlyRow label="통신장애 판정"        value="60초 무응답"   hint="백엔드 설정" />
+          <ReadonlyRow label="이상 임계"          value="단말별 threshold 초과" hint="ai_predictions.threshold" />
+          <ReadonlyRow label="관찰 임계"          value="threshold 0.7 ~ 1.0배" hint="3단계 분류 기준" />
+          <ReadonlyRow label="통신장애 판정"       value="24시간 이상 무측정"    hint="백엔드 mapStatus" />
         </div>
         <div style={{ marginTop: 10, fontSize: 11, color: "var(--ink-3)" }}>
           임계값 조정은 모델 재학습 또는 백엔드 설정 파일 수정 필요. 5/11 1차 자문 보고서 후 이 화면에서 직접 조정 가능하도록 확장 예정.

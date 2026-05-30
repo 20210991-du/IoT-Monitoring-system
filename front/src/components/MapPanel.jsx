@@ -134,22 +134,61 @@ const STATUS_DISPLAY = {
   offline:  { ko: "통신 장애", color: "#475569", bg: "rgba(100,116,139,0.12)", bd: "rgba(100,116,139,0.3)" },
 };
 
+function formatMse(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  if (Math.abs(n) >= 0.01) return n.toFixed(4);
+  return n.toFixed(6);
+}
+
+function formatAiRatio(m) {
+  const ratio = Number.isFinite(Number(m.aiRatio))
+    ? Number(m.aiRatio)
+    : m.mse != null && Number(m.threshold) > 0
+      ? Number(m.mse) / Number(m.threshold)
+      : null;
+  if (!Number.isFinite(ratio)) return "-";
+  return ratio >= 100 ? `x${Math.round(ratio)}` : `x${ratio.toFixed(2)}`;
+}
+
+function featureLabel(name) {
+  return String(name || "")
+    .replace(/_dev24$/u, " 편차")
+    .replace(/_diff1$/u, " 변화")
+    .replace(/_/gu, " ");
+}
+
+function fmtWhen(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleString("ko-KR", {
+    timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+// 운영자 우선순위 순서: 단말 ID → 상태 → 위치/구역 → 마지막 측정 → AI 기준 대비/MSE → 상세 보기
 function popupHtml(m) {
   const sd = STATUS_DISPLAY[m.status] || STATUS_DISPLAY.warn;
   const color = sd.color;
+  const place = [m.zone, m.location].filter(Boolean).join(" · ") || "-";
+  const when = fmtWhen(m.updatedAt);
   const contrib = (m.contribution || []).slice(0, 2).map((c, i) => {
     const bg  = i === 0 ? sd.bg : "#f1f5f9";
     const col = i === 0 ? color : "#64748b";
     const bd  = i === 0 ? sd.bd : "#e2e8f0";
-    return `<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:${bg};color:${col};border:1px solid ${bd}">${c.sensor} ${c.pct}%</span>`;
+    return `<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:${bg};color:${col};border:1px solid ${bd}">${featureLabel(c.sensor)} ${c.pct}%</span>`;
   }).join("");
-  return `<div data-popup-node="${m.node}" style="min-width:190px;font-family:system-ui,sans-serif;cursor:pointer" title="클릭하면 단말 상세 사이드바 열림">
-    <div style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;color:${color}">${m.node}</div>
-    <div style="font-size:12px;font-weight:600;margin-top:4px;color:#555">${m.label || (m.status === "normal" ? "정상 작동" : "")}</div>
-    <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
-      <div><div style="font-size:9px;color:#888;margin-bottom:1px">MSE</div><div style="font-weight:700;font-size:12px">${m.mse != null ? m.mse.toFixed(3) : "-"}</div></div>
-      <div><div style="font-size:9px;color:#888;margin-bottom:1px">구역</div><div style="font-weight:700;font-size:12px">${m.zone || "-"}</div></div>
-      <div><div style="font-size:9px;color:#888;margin-bottom:1px">상태</div><div style="font-weight:700;font-size:12px;color:${color}">${sd.ko}</div></div>
+  return `<div data-popup-node="${m.node}" style="min-width:200px;font-family:system-ui,sans-serif;cursor:pointer" title="클릭하면 단말 상세 사이드바 열림">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <span style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;color:${color}">${m.node}</span>
+      <span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:${sd.bg};color:${color};border:1px solid ${sd.bd};white-space:nowrap">${sd.ko}</span>
+    </div>
+    <div style="font-size:11px;color:#64748b;margin-top:5px">${place}</div>
+    ${when ? `<div style="font-size:10px;color:#94a3b8;margin-top:2px">마지막 측정 ${when}</div>` : ""}
+    <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:6px">
+      <div><div style="font-size:9px;color:#888;margin-bottom:1px">AI 기준 대비</div><div style="font-weight:700;font-size:12px;color:${color}">${formatAiRatio(m)}</div></div>
+      <div><div style="font-size:9px;color:#888;margin-bottom:1px">MSE</div><div style="font-weight:700;font-size:12px">${formatMse(m.mse)}</div></div>
     </div>
     ${contrib ? `<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">${contrib}</div>` : ""}
     <div style="margin-top:10px;padding:6px 10px;border-radius:6px;background:#4f46e5;color:#fff;font-size:10px;font-weight:700;text-align:center">상세 보기 →</div>

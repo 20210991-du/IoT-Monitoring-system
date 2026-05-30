@@ -33,7 +33,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 # gas_common_model_predict 모듈 동적 import — 파일명에 공백/괄호 있어서 importlib 필요
 import importlib.util
-PREDICT_PY = SCRIPT_DIR / 'gas_common_model_predict(2026.05.03).py'
+PREDICT_PY = SCRIPT_DIR / 'gas_common_model_predict.py'
 spec = importlib.util.spec_from_file_location('predict_mod', PREDICT_PY)
 predict_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(predict_mod)
@@ -75,6 +75,7 @@ def connect_db():
         user=os.environ.get('SIWON_DB_USER', 'siwon_app'),
         password=os.environ['SIWON_DB_PASS'],
         database=os.environ.get('SIWON_DB_NAME', 'siwon'),
+        charset='utf8mb4',   # 한글 ENUM(risk_level 등) 매칭 — 없으면 'Data truncated' 에러
         autocommit=False,
     )
 
@@ -87,7 +88,7 @@ def load_device_windows(conn, site_id: int, hours: int):
     cur = conn.cursor(pymysql.cursors.DictCursor)
     # 단말 목록 + TRANSMITTER_ID
     cur.execute("""
-        SELECT t.NAME AS device_id, t.TRANSMITTER_ID AS txid
+        SELECT t.NAME AS device_id, t.TRANSMITTER_ID AS txid, t.TYPE AS device_type
         FROM kscg_transmitter_info t
         JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = %s
         ORDER BY t.TRANSMITTER_ID
@@ -141,6 +142,7 @@ def load_device_windows(conn, site_id: int, hours: int):
         wide = long_df.pivot_table(index='t', columns='kind', values='v', aggfunc='first').reset_index()
         wide = wide.rename(columns={'t': '측정시각', **KIND_TO_KR})
         wide.insert(0, '장비번호', device_id)
+        wide['형식'] = d.get('device_type')   # 정규화그룹(형식) — group_scalers 키 매칭용 (없으면 'ALL' 폴백→scaler 없음 에러)
 
         # BASE_FEATURES 모두 있어야 함
         if any(f not in wide.columns for f in BASE_FEATURES):

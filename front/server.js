@@ -508,7 +508,7 @@ const TOOLS = [
     type: "function",
     function: {
       name: "get_predictions",
-      description: "AI LSTM-AutoEncoder 예측 (MSE, 위험도, 통신상태, 신뢰도). 단말 ID 없으면 전체 최근 예측. 이두현 백엔드 연동 전이므로 결과가 비어있을 수 있음.",
+      description: "AI LSTM-AutoEncoder 최신 예측 (MSE, threshold, 위험도, 통신상태, 신뢰도). 단말 ID 없으면 전체 최근 예측.",
       parameters: {
         type: "object",
         properties: {
@@ -664,7 +664,7 @@ async function execToolInternal(name, args, demoMode = false) {
           hoursSilent: d.hoursSilent, status: d.status, demo: true,
         })) : [];
         let sql = `
-          SELECT t.NAME AS deviceId, f.NUMBER AS facility, f.POSITION AS location,
+          SELECT t.TRANSMITTER_ID AS txid, t.NAME AS deviceId, f.NUMBER AS facility, f.POSITION AS location,
                  t.DEVICE_STATUS AS deviceStatus,
                  (SELECT MAX(r.DATE)
                   FROM kscg_sensor_info si JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID
@@ -687,15 +687,16 @@ async function execToolInternal(name, args, demoMode = false) {
         if (where.length) sql += ` WHERE ${where.join(" AND ")}`;
         sql += ` ORDER BY t.TRANSMITTER_ID`;     // ★ LIMIT 제거 (필터 전에 자르면 X)
         const [rows] = await pool.query(sql, params);
+        const aiMap = await loadLatestAi();
         const now = Date.now();
         const annotated = rows.map((r) => {
           const hoursSilent = r.lastSeen ? Math.floor((now - new Date(r.lastSeen).getTime()) / 3600000) : null;
           const recentAlarms = Number(r.recentAlarms) || 0;
-          // /api/devices mapStatus 와 일치: 24h 두절 → offline, 최근 7일 알람 → critical, else normal
-          const status = hoursSilent != null && hoursSilent >= 24 ? "offline"
-                       : recentAlarms > 0 ? "critical"
-                       : "normal";
-          return { ...r, hoursSilent, recentAlarms, status };
+          const ai = aiMap.get(r.txid);
+          // 통합 mapStatus (24h두절→offline / 알람 OR AI이상≥5×→critical / AI이상·관찰→warn)
+          const status = mapStatus(r.deviceStatus, hoursSilent, recentAlarms, ai);
+          return { ...r, hoursSilent, recentAlarms, status,
+                   aiRisk: ai ? ai.risk : null, aiRatio: aiRatioOf(ai) };
         });
         // 데모 단말은 status 가 이미 fixed → annotated 와 합쳐서 필터
         const combined = [...demoRows, ...annotated];
@@ -722,10 +723,12 @@ async function execToolInternal(name, args, demoMode = false) {
             facility: d.facility, location: d.location, lat: d.lat, lng: d.lng,
             zone: zoneFromFacility(d.facility),
             sensors: d.sensors,
+            sensorJudgement: buildSensorJudgement(d.sensors, MODEL_CONFIG?.sacrificial_devices?.includes(d.deviceId) || false),
             lastMeasured: d.lastMeasured,
             hoursSilent: d.hoursSilent,
             status: d.status,
             mse: d.mse, threshold: d.threshold, riskLevel: d.riskLevel, aiReliability: d.aiReliability,
+            aiJudgement: classifyAiPrediction({ mse: d.mse, threshold: d.threshold }),
             demo: true,
           };
         }
@@ -755,7 +758,18 @@ async function execToolInternal(name, args, demoMode = false) {
           if (s.measuredAt && (!lastMeasured || s.measuredAt > lastMeasured)) lastMeasured = s.measuredAt;
         }
         const hoursSilent = lastMeasured ? Math.floor((Date.now() - new Date(lastMeasured).getTime()) / 3600000) : null;
-        // AI threshold (있을 때만)
+        // 최근 7일 알람 수 (통합 mapStatus 용)
+        const [[almCnt]] = await pool.query(`
+          SELECT COUNT(*) AS cnt
+          FROM kscg_alarm_log a
+          JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
+          WHERE si.TRANSMITTER_ID = ? AND a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 7 DAY)
+        `, [txid]);
+        const recentAlarms = Number(almCnt?.cnt) || 0;
+        // 최신 AI 예측 (ai_predictions) — 통합 mapStatus + 상세 필드
+        const aiRow = (await loadLatestAi()).get(txid) || null;
+        const status = mapStatus(meta[0]?.deviceStatus, hoursSilent, recentAlarms, aiRow);
+        // 학습 threshold (정적, 참고용) — 실측 AI 예측과 별개
         const aiTh = DEVICE_THRESHOLDS[deviceId];
         const ai = aiTh != null ? {
           threshold: aiTh,
@@ -769,8 +783,20 @@ async function execToolInternal(name, args, demoMode = false) {
           sensors: sensorVals,
           lastMeasured,
           hoursSilent,
-          status: hoursSilent != null && hoursSilent >= 24 ? "offline" : "normal",
+          recentAlarms,
+          status,
+          sensorJudgement: buildSensorJudgement(sensorVals, MODEL_CONFIG?.sacrificial_devices?.includes(deviceId) || false),
           ai,
+          // 최신 LSTM 예측 (ai_predictions 기반)
+          aiRisk:        aiRow ? aiRow.risk : null,
+          aiMse:         aiRow && aiRow.mse != null ? Number(aiRow.mse) : null,
+          aiThreshold:   aiRow && aiRow.threshold != null ? Number(aiRow.threshold) : null,
+          aiRatio:       aiRatioOf(aiRow),
+          aiJudgement:   classifyAiPrediction(aiRow),
+          aiReliability: aiRow ? aiRow.aiReliability : null,
+          commStatus:    aiRow ? aiRow.commStatus : null,
+          featureContributions: aiRow ? contribFromFeatures(aiRow.featureContributions) : [],
+          predictedAt:   aiRow ? aiRow.predictedAt : null,
         };
       }
 
@@ -785,7 +811,13 @@ async function execToolInternal(name, args, demoMode = false) {
         if (demoMode && deviceId.startsWith("DEMO-")) {
           const hours = range === "1h" ? 1 : range === "7d" ? 168 : range === "30d" ? 720 : 24;
           const points = generateDemoHistory(deviceId, kind, hours);
-          return { deviceId, kind, range, count: points.length, sampled: points.length, points, demo: true };
+          const latest = points[points.length - 1]?.v;
+          return {
+            deviceId, kind, range, count: points.length, sampled: points.length, points,
+            latestValue: latest ?? null,
+            latestJudgement: sensorJudgementForKind(kind, latest, false),
+            demo: true,
+          };
         }
         const txid = await getTransmitterIdByName(deviceId);
         if (!txid) return { error: `단말 없음: ${deviceId}` };
@@ -804,7 +836,12 @@ async function execToolInternal(name, args, demoMode = false) {
           const step = Math.ceil(rows.length / 100);
           points = rows.filter((_, i) => i % step === 0);
         }
-        return { deviceId, kind, range, count: rows.length, sampled: points.length, points };
+        const latest = rows[rows.length - 1]?.v;
+        return {
+          deviceId, kind, range, count: rows.length, sampled: points.length, points,
+          latestValue: latest ?? null,
+          latestJudgement: sensorJudgementForKind(kind, latest, MODEL_CONFIG?.sacrificial_devices?.includes(deviceId) || false),
+        };
       }
 
       // 알람
@@ -836,31 +873,35 @@ async function execToolInternal(name, args, demoMode = false) {
 
       // KPI 카운트
       case "get_summary": {
-        const [[total]] = await pool.query(`
-          SELECT COUNT(*) AS all_ FROM kscg_transmitter_info t
+        // /api/summary 와 동일 기준 — 단말별 (통신두절·7일알람·최신AI) → mapStatus 집계
+        const [silentRows] = await pool.query(`
+          SELECT t.TRANSMITTER_ID AS txid,
+                 TIMESTAMPDIFF(HOUR, MAX(r.DATE), NOW()) AS hoursSilent
+          FROM kscg_transmitter_info t
           JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
+          LEFT JOIN kscg_sensor_info si ON si.TRANSMITTER_ID = t.TRANSMITTER_ID
+          LEFT JOIN kscg_recent_data r  ON r.SENSOR_ID = si.SENSOR_ID
+          GROUP BY t.TRANSMITTER_ID
         `, [SITE_ID]);
-        const [[silent]] = await pool.query(`
-          SELECT COUNT(*) AS offline FROM (
-            SELECT t.TRANSMITTER_ID, TIMESTAMPDIFF(HOUR, MAX(r.DATE), NOW()) AS h
-            FROM kscg_transmitter_info t
-            JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
-            JOIN kscg_sensor_info si ON si.TRANSMITTER_ID = t.TRANSMITTER_ID
-            JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID
-            GROUP BY t.TRANSMITTER_ID HAVING h >= 24
-          ) x
-        `, [SITE_ID]);
-        const [[alm]] = await pool.query(`
-          SELECT COUNT(DISTINCT si.TRANSMITTER_ID) AS critical
+        const [almRows] = await pool.query(`
+          SELECT si.TRANSMITTER_ID AS txid, COUNT(*) AS cnt
           FROM kscg_alarm_log a
           JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
           JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = si.TRANSMITTER_ID AND m.SITE_ID = ?
           WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 7 DAY)
+          GROUP BY si.TRANSMITTER_ID
         `, [SITE_ID]);
-        const all = Number(total.all_) || 0;
-        const offline = Number(silent.offline) || 0;
-        const critical = Number(alm.critical) || 0;
-        // 데모 가산
+        const almMap = new Map(almRows.map((r) => [r.txid, Number(r.cnt)]));
+        const aiMap  = await loadLatestAi();
+        let all = silentRows.length, offline = 0, critical = 0, warn = 0, normal = 0;
+        for (const dRow of silentRows) {
+          const hs = dRow.hoursSilent == null ? null : Number(dRow.hoursSilent);
+          const st = mapStatus(null, hs, almMap.get(dRow.txid) || 0, aiMap.get(dRow.txid));
+          if (st === "offline") offline++;
+          else if (st === "critical") critical++;
+          else if (st === "warn") warn++;
+          else normal++;
+        }
         if (demoMode) {
           const d = getDemoDevices();
           const dC = d.filter((x) => x.status === "critical").length;
@@ -868,12 +909,11 @@ async function execToolInternal(name, args, demoMode = false) {
           const dO = d.filter((x) => x.status === "offline").length;
           return {
             total: all + d.length,
-            normal: all - offline - critical,
-            critical: critical + dC, warn: dW, offline: offline + dO,
+            normal, critical: critical + dC, warn: warn + dW, offline: offline + dO,
             demoMode: true,
           };
         }
-        return { total: all, normal: all - offline - critical, critical, warn: 0, offline };
+        return { total: all, normal, critical, warn, offline };
       }
 
       // 집계 (평균·최대·최소)
@@ -1088,6 +1128,8 @@ async function execToolInternal(name, args, demoMode = false) {
             min: Number(mn.toFixed(2)), max: Number(mx.toFixed(2)),
             mean: Number(mean.toFixed(2)), std: Number(std.toFixed(2)),
             direction: delta > 0.01 ? "상승" : delta < -0.01 ? "하락" : "평탄",
+            startJudgement: sensorJudgementForKind(kind, first, false),
+            endJudgement: sensorJudgementForKind(kind, last, false),
             demo: true,
           };
         }
@@ -1124,6 +1166,8 @@ async function execToolInternal(name, args, demoMode = false) {
           mean:  Number(mean.toFixed(2)),
           std:   Number(std.toFixed(2)),
           direction: delta > 0.01 ? "상승" : delta < -0.01 ? "하락" : "평탄",
+          startJudgement: sensorJudgementForKind(kind, first, MODEL_CONFIG?.sacrificial_devices?.includes(deviceId) || false),
+          endJudgement: sensorJudgementForKind(kind, last, MODEL_CONFIG?.sacrificial_devices?.includes(deviceId) || false),
         };
       }
 
@@ -1198,6 +1242,7 @@ async function execToolInternal(name, args, demoMode = false) {
         const enriched = rows.map((r) => ({
           ...r,
           classification: r.mse != null && r.deviceId ? classifyMse(r.deviceId, r.mse) : null,
+          aiJudgement: classifyAiPrediction(r),
         }));
         // 데모 단말 예측 합치기
         if (demoMode) {
@@ -1209,6 +1254,7 @@ async function execToolInternal(name, args, demoMode = false) {
               riskLevel: d.riskLevel, commStatus: d.status === "offline" ? "통신고장" : "정상통신",
               aiReliability: d.aiReliability, isSacrificial: 0,
               classification: { level: d.riskLevel, ratio: d.mse != null ? Number((d.mse / d.threshold).toFixed(3)) : null },
+              aiJudgement: classifyAiPrediction({ mse: d.mse, threshold: d.threshold }),
               demo: true,
             }));
           return { count: enriched.length + demoPreds.length, predictions: [...demoPreds, ...enriched], demoMode };
@@ -1807,17 +1853,208 @@ function zoneFromFacility(num) {
   return m ? `제${m[1]}구역` : "-";
 }
 
-// 단말 status 판정
-//   - offline  : 최근 측정 24h+ 없음 (진짜 통신 두절)
-//   - critical : 최근 7일 활성 알람 발생
-//   - warn     : (LSTM 예측 연동 후 확장 예정)
-//   - normal   : 그 외
+// AI '이상' 이 threshold 의 N배 이상이면 '위험'(critical) 으로 승격. 그 미만이면 '이상의심'(warn).
+const AI_CRITICAL_RATIO = 5;
+
+// 단말별 최신 ai_predictions 1건씩 → Map<transmitter_id, {risk, mse, threshold}>
+async function loadLatestAi() {
+  const map = new Map();
+  try {
+    const [rows] = await pool.query(`
+      SELECT p.transmitter_id AS txid, p.risk_level AS risk, p.mse, p.threshold,
+             p.comm_status AS commStatus, p.ai_reliability AS aiReliability,
+             p.feature_contributions AS featureContributions, p.predicted_at AS predictedAt
+      FROM ai_predictions p
+      JOIN (SELECT transmitter_id, MAX(predicted_at) AS mx
+            FROM ai_predictions GROUP BY transmitter_id) l
+        ON l.transmitter_id = p.transmitter_id AND l.mx = p.predicted_at
+    `);
+    for (const r of rows) map.set(r.txid, r);
+  } catch (e) { console.error("[loadLatestAi]", e.message); }
+  return map;
+}
+
+// AI mse/threshold → 배수 (없으면 null)
+function aiRatioOf(ai) {
+  return ai && ai.mse != null && Number(ai.threshold) > 0
+    ? Number((Number(ai.mse) / Number(ai.threshold)).toFixed(2)) : null;
+}
+
+// feature_contributions(JSON dict) → [{sensor, pct}] 상위 5 (정규화 %)
+// 엔지니어드 피처명 → 사람이 읽는 라벨. (프론트 featureLabel 과 동일 규칙 + AC유입 공백)
+//   원시 컬럼명(_dev24, _diff1)이 LLM 답변/anomalies 라벨에 그대로 노출되지 않게 함.
+function featureLabelKo(name) {
+  return String(name || "")
+    .replace(/_dev24$/u, " 편차")
+    .replace(/_diff1$/u, " 변화")
+    .replace(/AC유입/u, "AC 유입")
+    .replace(/_/gu, " ")
+    .trim();
+}
+
+function contribFromFeatures(fc) {
+  let obj = fc;
+  if (typeof fc === "string") { try { obj = JSON.parse(fc); } catch { obj = null; } }
+  if (!obj || typeof obj !== "object") return [];
+  const ent = Object.entries(obj).map(([k, v]) => [k, Math.abs(Number(v) || 0)]);
+  const sum = ent.reduce((s, [, v]) => s + v, 0) || 1;
+  return ent.sort((a, b) => b[1] - a[1]).slice(0, 5)
+            .map(([sensor, v]) => ({ sensor: featureLabelKo(sensor), pct: Number((v / sum * 100).toFixed(1)) }));
+}
+
+function classifyAcInput(ac) {
+  const value = Number(ac);
+  if (!Number.isFinite(value)) return null;
+  const cautionThreshold = 200;
+  const criticalThreshold = 500;
+  if (value >= criticalThreshold) {
+    return {
+      metric: "ac",
+      value,
+      unit: "mV",
+      level: "위험",
+      comparison: "critical_threshold_exceeded",
+      cautionThreshold,
+      criticalThreshold,
+      overCriticalBy: Number((value - criticalThreshold).toFixed(1)),
+      ratioToCritical: Number((value / criticalThreshold).toFixed(3)),
+      wording: `${value} mV 는 500 mV 즉각 점검 기준을 초과했습니다. '근접'이 아니라 '초과'로 설명하세요.`,
+    };
+  }
+  if (value >= cautionThreshold) {
+    return {
+      metric: "ac",
+      value,
+      unit: "mV",
+      level: "주의",
+      comparison: value >= criticalThreshold * 0.8 ? "near_critical_threshold" : "caution_threshold_exceeded",
+      cautionThreshold,
+      criticalThreshold,
+      underCriticalBy: Number((criticalThreshold - value).toFixed(1)),
+      ratioToCritical: Number((value / criticalThreshold).toFixed(3)),
+      wording: value >= criticalThreshold * 0.8
+        ? `${value} mV 는 500 mV 즉각 점검 기준에 근접했습니다.`
+        : `${value} mV 는 200 mV 주의 기준을 초과했지만 500 mV 즉각 점검 기준에는 아직 못 미칩니다.`,
+    };
+  }
+  return {
+    metric: "ac",
+    value,
+    unit: "mV",
+    level: "정상",
+    comparison: "below_caution_threshold",
+    cautionThreshold,
+    criticalThreshold,
+    ratioToCritical: Number((value / criticalThreshold).toFixed(3)),
+    wording: `${value} mV 는 200 mV 주의 기준 미만입니다.`,
+  };
+}
+
+// 주요 센서 도메인 판정 — LLM 이 "근접 vs 초과", 정상/주의/위험을 정확히 답하도록 도구 결과에 동봉.
+//   기준값은 시스템 프롬프트 도메인 지식 및 차트 밴드와 일치. (상태 판정/mapStatus 와 무관 — 설명용)
+function mkJudge(metric, value, unit, level, wording) {
+  return { metric, value, unit, level, wording };
+}
+
+// 방식전위(P/S Potential) — -850mV 이하(더 음수)가 양호. 차트 밴드: normal -850 / warn -700.
+function classifyCpVolt(volt) {
+  const v = Number(volt);
+  if (!Number.isFinite(v)) return null;
+  if (v <= -850) return mkJudge("volt", v, "mV", "정상", `${v}mV 는 -850mV 방호 기준을 충족(이하)합니다.`);
+  if (v <= -700) return mkJudge("volt", v, "mV", "주의", `${v}mV 는 -850mV 방호 기준을 초과(미달)했습니다. 방식전위 기준초과 확인이 필요합니다.`);
+  return mkJudge("volt", v, "mV", "위험", `${v}mV 는 -700mV 보다 높아 방식 보호가 미흡합니다. 정류기 출력 점검이 필요합니다.`);
+}
+
+// 희생전류 — 희생양극 단말 기준 1mA 이하 교체 검토. 비희생양극 단말은 판정 대상 아님.
+function classifySacrificial(mA, isSacrificial) {
+  const v = Number(mA);
+  if (!Number.isFinite(v)) return null;
+  if (!isSacrificial) return mkJudge("sacrificial", v, "mA", "해당없음", "희생양극 단말이 아니므로 희생전류 판정 대상이 아닙니다.");
+  if (v <= 1) return mkJudge("sacrificial", v, "mA", "주의", `${v}mA 로 1mA 이하입니다. 양극 소모/접속부 점검·교체 검토가 필요합니다.`);
+  if (v <= 2) return mkJudge("sacrificial", v, "mA", "관찰", `${v}mA 로 보호 전류가 낮은 편입니다. 추이 관찰을 권장합니다.`);
+  return mkJudge("sacrificial", v, "mA", "정상", `${v}mA 로 보호 전류가 유지되고 있습니다.`);
+}
+
+// 통신 품질(RSSI dBm) — -65 이상 양호, -75 이하 주의, -85 이하 두절 임박, -115 이하 두절.
+function classifyCommDbm(dbm) {
+  const v = Number(dbm);
+  if (!Number.isFinite(v)) return null;
+  if (v <= -115) return mkJudge("commDbm", v, "dBm", "위험", `${v}dBm 로 통신 두절 수준입니다. 안테나·전원·맨홀 확인이 필요합니다.`);
+  if (v <= -85)  return mkJudge("commDbm", v, "dBm", "위험", `${v}dBm 로 두절 임박 수준입니다. 안테나·전원·맨홀 확인이 필요합니다.`);
+  if (v <= -75)  return mkJudge("commDbm", v, "dBm", "주의", `${v}dBm 로 신호가 약합니다(-75dBm 이하).`);
+  return mkJudge("commDbm", v, "dBm", "정상", `${v}dBm 로 통신 신호가 양호합니다.`);
+}
+
+// 배터리 — 차트 밴드: normal 3500 / warn 3200 mV.
+function classifyBattery(mV) {
+  const v = Number(mV);
+  if (!Number.isFinite(v)) return null;
+  if (v >= 3500) return mkJudge("battery", v, "mV", "정상", `${v}mV 로 배터리 전압이 충분합니다.`);
+  if (v >= 3200) return mkJudge("battery", v, "mV", "주의", `${v}mV 로 배터리 전압이 낮아지고 있습니다. 교체 일정 검토가 필요합니다.`);
+  return mkJudge("battery", v, "mV", "위험", `${v}mV 로 배터리 전압이 부족합니다. 교체가 필요합니다.`);
+}
+
+// 주요 센서 종합 판정 (get_device_detail 등 도구 결과 동봉용)
+function buildSensorJudgement(s, isSacrificial = false) {
+  if (!s || typeof s !== "object") return null;
+  return {
+    ac:          classifyAcInput(s.ac),
+    volt:        classifyCpVolt(s.volt),
+    sacrificial: classifySacrificial(s.sacrificial, isSacrificial),
+    commDbm:     classifyCommDbm(s.commDbm),
+    battery:     classifyBattery(s.battery),
+  };
+}
+
+function sensorJudgementForKind(kind, value, isSacrificial = false) {
+  switch (kind) {
+    case "volt":        return classifyCpVolt(value);
+    case "sacrificial": return classifySacrificial(value, isSacrificial);
+    case "ac":          return classifyAcInput(value);
+    case "battery":     return classifyBattery(value);
+    case "commDbm":     return classifyCommDbm(value);
+    default:            return null;
+  }
+}
+
+function classifyAiPrediction(ai) {
+  if (!ai || ai.mse == null || !(Number(ai.threshold) > 0)) return null;
+  const mse = Number(ai.mse);
+  const threshold = Number(ai.threshold);
+  const ratio = mse / threshold;
+  const ratioText = ratio >= 10 ? `x${Math.round(ratio)}` : `x${Number(ratio.toFixed(2))}`;
+  const percentText = `${Number((ratio * 100).toFixed(1))}%`;
+  let level = "정상";
+  if (ratio > 1) level = "이상";
+  else if (ratio >= 0.7) level = "관찰";
+  return {
+    level,
+    mse,
+    threshold,
+    ratio: Number(ratio.toFixed(3)),
+    ratioPercent: Number((ratio * 100).toFixed(1)),
+    ratioText,
+    wording: ratio >= 10
+      ? `현재 MSE 는 AI 기준 대비 ${ratioText} 수준입니다. 큰 퍼센트(${percentText})보다 배수로 설명하세요.`
+      : `현재 MSE 는 AI 임계값의 ${percentText} 수준입니다(AI 기준 대비 ${ratioText}).`,
+    trendCaution: "단일 최신 예측값만으로 상승/하락 추세를 단정하지 마세요.",
+  };
+}
+
+// 단말 status 판정 (하이브리드 — 규칙 + AI, ADR #2b 옵션 C)
+//   - offline       : 최근 측정 24h+ 없음 (진짜 통신 두절)
+//   - critical(위험)   : 최근 7일 활성 알람  OR  AI '이상' & MSE >= threshold*AI_CRITICAL_RATIO
+//   - warn(이상의심) : AI '이상'(경계) 또는 '관찰'
+//   - normal        : 그 외
 //
 // 주의: KSCG 의 DEVICE_STATUS 컬럼은 의미가 명확하지 않음 (시범 5대=1, 확대 50대=0).
 //       데이터 자체는 둘 다 정상 흐름이라 status 판정에 사용하지 않음.
-function mapStatus(_deviceStatus, hoursSilent, activeAlarmCount) {
+function mapStatus(_deviceStatus, hoursSilent, activeAlarmCount, ai) {
   if (hoursSilent != null && hoursSilent >= 24) return "offline";
-  if (activeAlarmCount > 0) return "critical";
+  const aiSevere = ai && ai.risk === "이상" && ai.mse != null && Number(ai.threshold) > 0
+                   && Number(ai.mse) >= Number(ai.threshold) * AI_CRITICAL_RATIO;
+  if (activeAlarmCount > 0 || aiSevere) return "critical";
+  if (ai && (ai.risk === "이상" || ai.risk === "관찰")) return "warn";
   return "normal";
 }
 
@@ -1835,44 +2072,37 @@ function fmtHours(h) {
 app.get("/api/summary", dbRequired, async (req, res) => {
   try {
     const demoMode = isDemoMode(req);
-    const [[counts]] = await pool.query(`
-      SELECT
-        COUNT(*) AS total,
-        SUM(CASE WHEN t.DEVICE_STATUS = 1 THEN 1 ELSE 0 END) AS active,
-        SUM(CASE WHEN t.DEVICE_STATUS = 0 THEN 1 ELSE 0 END) AS inactive
+    // 단말별 (통신두절시간 · 7일 알람수 · 최신 AI) → mapStatus 로 /api/devices 와 동일 집계
+    // (이전엔 offline/critical 을 독립 SQL 로 세어 중복카운트 + warn=0 버그가 있었음)
+    const [silentRows] = await pool.query(`
+      SELECT t.TRANSMITTER_ID AS txid,
+             TIMESTAMPDIFF(HOUR, MAX(r.DATE), NOW()) AS hoursSilent
       FROM kscg_transmitter_info t
       JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
+      LEFT JOIN kscg_sensor_info si ON si.TRANSMITTER_ID = t.TRANSMITTER_ID
+      LEFT JOIN kscg_recent_data r  ON r.SENSOR_ID = si.SENSOR_ID
+      GROUP BY t.TRANSMITTER_ID
     `, [SITE_ID]);
-
-    // 최근 1시간 안 들어온 단말 = 통신 두절 추정
-    const [[silent]] = await pool.query(`
-      SELECT COUNT(*) AS offline
-      FROM (
-        SELECT t.TRANSMITTER_ID,
-               TIMESTAMPDIFF(HOUR, MAX(r.DATE), NOW()) AS hours_silent
-        FROM kscg_transmitter_info t
-        JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
-        JOIN kscg_sensor_info si  ON si.TRANSMITTER_ID = t.TRANSMITTER_ID
-        JOIN kscg_recent_data r   ON r.SENSOR_ID = si.SENSOR_ID
-        GROUP BY t.TRANSMITTER_ID
-        HAVING hours_silent >= 24
-      ) x
-    `, [SITE_ID]);
-
-    // 활성 알람 (status=0 등 운영 중) → critical 추정
-    const [[alarmsRecent]] = await pool.query(`
-      SELECT COUNT(DISTINCT si.TRANSMITTER_ID) AS critical
+    const [almRows] = await pool.query(`
+      SELECT si.TRANSMITTER_ID AS txid, COUNT(*) AS cnt
       FROM kscg_alarm_log a
       JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
       JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = si.TRANSMITTER_ID AND m.SITE_ID = ?
       WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 7 DAY)
+      GROUP BY si.TRANSMITTER_ID
     `, [SITE_ID]);
+    const almMap = new Map(almRows.map(r => [r.txid, Number(r.cnt)]));
+    const aiMap  = await loadLatestAi();
 
-    const total    = Number(counts.total) || 0;
-    const offline  = Number(silent.offline) || 0;
-    const critical = Number(alarmsRecent.critical) || 0;
-    let   warn     = 0;  // TODO: LSTM 예측 → ai_predictions 연계 시 채우기
-    let   normal   = total - offline - critical - warn;
+    let total = silentRows.length, offline = 0, critical = 0, warn = 0, normal = 0;
+    for (const dRow of silentRows) {
+      const hs = dRow.hoursSilent == null ? null : Number(dRow.hoursSilent);
+      const st = mapStatus(null, hs, almMap.get(dRow.txid) || 0, aiMap.get(dRow.txid));
+      if (st === "offline") offline++;
+      else if (st === "critical") critical++;
+      else if (st === "warn") warn++;
+      else normal++;
+    }
 
     // 데모 모드: 가상 장비 카운트 추가
     let allCount = total;
@@ -1964,14 +2194,18 @@ app.get("/api/devices", dbRequired, async (req, res) => {
     `, [SITE_ID]);
     const alarmsByDev = Object.fromEntries(alarmRows.map(r => [r.TRANSMITTER_ID, r]));
 
+    // 4. 단말별 최신 AI 예측 (ai_predictions) — status 판정에 반영
+    const aiByDev = await loadLatestAi();
+
     const now = new Date();
     const out = devices.map((d) => {
       const slot   = byDev[d.id] || { sensors: {}, lastMeasured: null };
       const alm    = alarmsByDev[d.id];
+      const ai     = aiByDev.get(d.id);
       const hoursSilent = slot.lastMeasured
         ? Math.floor((now - new Date(slot.lastMeasured)) / 3600000)
         : null;
-      const status = mapStatus(d.deviceStatus, hoursSilent, alm ? Number(alm.cnt) : 0);
+      const status = mapStatus(d.deviceStatus, hoursSilent, alm ? Number(alm.cnt) : 0, ai);
       return {
         id:          d.id,
         deviceId:    d.deviceId,
@@ -1997,6 +2231,10 @@ app.get("/api/devices", dbRequired, async (req, res) => {
         updatedAt:   slot.lastMeasured,
         hoursSilent,
         recentAlarms: alm ? Number(alm.cnt) : 0,
+        aiRisk:      ai ? ai.risk : null,
+        aiMse:       ai && ai.mse != null ? Number(ai.mse) : null,
+        aiThreshold: ai && ai.threshold != null ? Number(ai.threshold) : null,
+        aiRatio:     ai && ai.mse != null && Number(ai.threshold) > 0 ? Number((Number(ai.mse) / Number(ai.threshold)).toFixed(2)) : null,
       };
     });
 
@@ -2143,39 +2381,60 @@ app.get("/api/alarms", dbRequired, async (req, res) => {
   }
 });
 
-// ── GET /api/anomalies — AI 탐지 (이상 의심 + 관찰) ──
-//   현재 LSTM 예측(ai_predictions) 미연동 → KSCG 알람 + 통신 두절로 임시 매핑.
-//   anomalies = 최근 7일 알람 발생 단말, watch = 24h 통신 두절 단말
+// ── GET /api/anomalies — AI 탐지 (이상/관찰) + 통신두절 분리 ──
+//   anomalies = 심각 AI 이상, watch = 경계 이상/관찰, commOutage = 24h+ 무측정
 app.get("/api/anomalies", dbRequired, async (req, res) => {
   try {
     const demoMode = isDemoMode(req);
-    // anomalies: 최근 7일 알람 → 위험·이상으로 매핑
-    const [anomalyRows] = await pool.query(`
-      SELECT
-        t.NAME AS node,
-        f.NUMBER AS facility,
-        a.GEN_DATE AS ts,
-        a.GRADE_ID AS gradeId,
-        g.GRADE_TEXT AS gradeText,
-        a.VALUE AS mse,
-        a.CONTENTS AS label
-      FROM kscg_alarm_log a
-      JOIN kscg_sensor_info si ON si.SENSOR_ID = a.SENSOR_ID
-      JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = si.TRANSMITTER_ID
-      LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
-      LEFT JOIN kscg_alarm_grade_info g ON g.GRADE_ID = a.GRADE_ID
-      JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = si.TRANSMITTER_ID AND m.SITE_ID = ?
-      WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 30 DAY)
-      ORDER BY a.GEN_DATE DESC
-      LIMIT 20
+    // AI 예측(ai_predictions) 최신 1건/단말 + 단말명/시설 → 이상/관찰 목록
+    const [aiRows] = await pool.query(`
+      SELECT t.NAME AS node, f.NUMBER AS facility,
+             p.risk_level AS riskLevel, p.mse, p.threshold,
+             p.comm_status AS commStatus, p.ai_reliability AS aiReliability,
+             p.feature_contributions AS fc, p.predicted_at AS predictedAt
+      FROM ai_predictions p
+      JOIN (SELECT transmitter_id, MAX(predicted_at) AS mx
+            FROM ai_predictions GROUP BY transmitter_id) l
+        ON l.transmitter_id = p.transmitter_id AND l.mx = p.predicted_at
+      JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = p.transmitter_id
+      JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = p.transmitter_id AND m.SITE_ID = ?
+      LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = p.transmitter_id
     `, [SITE_ID]);
 
-    // watch: 통신 24h 두절 단말
-    const [watchRows] = await pool.query(`
-      SELECT
-        t.NAME AS node, f.NUMBER AS facility,
-        MAX(r.DATE) AS lastSeen,
-        TIMESTAMPDIFF(HOUR, MAX(r.DATE), NOW()) AS hoursSilent
+    // ai_predictions row → 프론트 shape (mse/threshold 는 실제 AI 값, label 은 "통신 두절" 로 시작하지 않음)
+    const mkAi = (r) => {
+      const contribution = contribFromFeatures(r.fc);
+      const top = contribution[0]?.sensor;
+      const ratio = Number(r.threshold) > 0 ? Number((Number(r.mse) / Number(r.threshold)).toFixed(2)) : null;
+      return {
+        node: r.node,
+        zone: zoneFromFacility(r.facility),
+        label: `${top ? top + " " : ""}${r.riskLevel === "이상" ? "이상" : "이상 의심"}`,
+        mse: Number(r.mse),
+        threshold: Number(r.threshold),
+        riskLevel: r.riskLevel,
+        aiReliability: r.aiReliability,
+        aiRatio: ratio,
+        commStatus: r.commStatus,
+        predictedAt: r.predictedAt,
+        contribution,
+        ts: r.predictedAt,
+      };
+    };
+    // 심각(이상 & MSE>=threshold*AI_CRITICAL_RATIO) → anomalies, 그 외 이상/관찰 → watch
+    // (대시보드 mapStatus 의 critical/warn 분기와 동일 기준)
+    const isSevere = (r) => r.riskLevel === "이상" && Number(r.threshold) > 0
+                            && Number(r.mse) >= Number(r.threshold) * AI_CRITICAL_RATIO;
+    const aiAnoms = aiRows.filter(isSevere).map(mkAi)
+                          .sort((a, b) => (b.aiRatio || 0) - (a.aiRatio || 0));
+    const aiWatch = aiRows.filter((r) => !isSevere(r) && (r.riskLevel === "이상" || r.riskLevel === "관찰")).map(mkAi)
+                          .sort((a, b) => (b.aiRatio || 0) - (a.aiRatio || 0));
+
+    // 통신 24h 두절 — 별도 배열(commOutage). AI mse/threshold 와 섞지 않음.
+    const [outageRows] = await pool.query(`
+      SELECT t.NAME AS node, f.NUMBER AS facility,
+             MAX(r.DATE) AS lastSeen,
+             TIMESTAMPDIFF(HOUR, MAX(r.DATE), NOW()) AS hoursSilent
       FROM kscg_transmitter_info t
       JOIN kscg_site_mydevice m ON m.TRANSMITTER_ID = t.TRANSMITTER_ID AND m.SITE_ID = ?
       LEFT JOIN kscg_facility_info f ON f.TRANSMITTER_ID = t.TRANSMITTER_ID
@@ -2186,43 +2445,41 @@ app.get("/api/anomalies", dbRequired, async (req, res) => {
       ORDER BY hoursSilent DESC
       LIMIT 20
     `, [SITE_ID]);
+    const commOutage = outageRows.map((r) => ({
+      node: r.node, zone: zoneFromFacility(r.facility),
+      hoursSilent: Number(r.hoursSilent), lastSeen: r.lastSeen,
+      label: `통신 두절 ${fmtHours(r.hoursSilent)}`,
+    }));
 
-    // 데모 anomalies (위험 3 + warn 4 = 7) / watch (offline 3)
-    let demoAnomalies = [], demoWatch = [];
+    // 데모 가산 (critical→anomalies, warn→watch — AI 값 사용)
+    let demoAnomalies = [], demoWatch = [], demoOutage = [];
     if (demoMode) {
       const dd = getDemoDevices();
-      demoAnomalies = dd.filter((d) => d.status === "critical" || d.status === "warn").map((d) => ({
+      const mkDemo = (d, rl) => ({
         node: d.deviceId, zone: zoneFromFacility(d.facility),
-        label: d.riskLevel, mse: d.mse, threshold: d.threshold,
+        label: rl, mse: d.mse, threshold: d.threshold, riskLevel: rl,
+        aiReliability: d.aiReliability,
+        aiRatio: d.threshold ? Number((d.mse / d.threshold).toFixed(2)) : null,
         contribution: [], ts: d.lastMeasured, demo: true,
-      }));
-      demoWatch = dd.filter((d) => d.status === "offline").map((d) => ({
-        node: d.deviceId, zone: zoneFromFacility(d.facility),
-        label: `통신 두절 ${fmtHours(d.hoursSilent)}`, mse: d.hoursSilent, threshold: 24,
-        contribution: [], demo: true,
+      });
+      demoAnomalies = dd.filter((d) => d.status === "critical").map((d) => mkDemo(d, "이상"));
+      demoWatch     = dd.filter((d) => d.status === "warn").map((d) => mkDemo(d, "관찰"));
+      demoOutage    = dd.filter((d) => d.status === "offline").map((d) => ({
+        node: d.deviceId,
+        zone: zoneFromFacility(d.facility),
+        hoursSilent: d.hoursSilent,
+        lastSeen: d.lastMeasured,
+        label: `통신 두절 ${fmtHours(d.hoursSilent)}`,
+        demo: true,
       }));
     }
 
     res.json({
       ok: true,
       demoMode,
-      anomalies: [...demoAnomalies, ...anomalyRows.map((r) => ({
-        node:  r.node,
-        zone:  zoneFromFacility(r.facility),
-        label: r.label,
-        mse:   r.mse,
-        threshold: -850,
-        contribution: [],
-        ts: r.ts,
-      }))],
-      watch: [...demoWatch, ...watchRows.map((r) => ({
-        node:  r.node,
-        zone:  zoneFromFacility(r.facility),
-        label: `통신 두절 ${fmtHours(r.hoursSilent)}`,
-        mse:   r.hoursSilent,
-        threshold: 24,
-        contribution: [],
-      }))],
+      anomalies: [...demoAnomalies, ...aiAnoms],
+      watch: [...demoWatch, ...aiWatch],
+      commOutage: [...demoOutage, ...commOutage],
     });
   } catch (err) {
     console.error("[/api/anomalies]", err);
@@ -2820,18 +3077,26 @@ function buildSystemPrompt(ctx) {
     : "(데이터 없음)";
 
   // 12시간 추이 텍스트 표 (위험·이상 의심만)
-  const trendBlock = trends.length === 0 ? "- (위험·이상 의심 노드 없음)" :
-    trends.map((t) => {
-      const h = t.mseHistory || [];
-      const start = h[0] ?? "-";
-      const peak  = h.length ? Math.max(...h.filter((v) => v != null)) : "-";
-      const last  = h[h.length - 1] ?? "-";
-      const dir   = (h.length >= 2 && h[0] != null && h[h.length - 1] != null)
-        ? (h[h.length - 1] > h[0] ? "상승↑" : h[h.length - 1] < h[0] ? "하락↓" : "평탄→")
-        : "—";
-      const series = h.map((v) => v == null ? "-" : v.toFixed(2)).join(",");
-      return `- ${t.deviceId} (${t.status === "critical" ? "위험" : "이상의심"}, ${t.zone}, ${t.label || "-"}): 12h MSE [${series}] · 시작 ${start} → 현재 ${last} · 피크 ${peak} · 방향 ${dir}`;
-    }).join("\n");
+  //   ⚠️ 추이 데이터 없음(시계열 미수집) ≠ 위험 단말 없음. 두 경우를 반드시 구분해서 안내.
+  const hasTrends = trends.length > 0;
+  const riskCount = (Number(counts.critical) || 0) + (Number(counts.warn) || 0);
+  const trendBlock = hasTrends
+    ? trends.map((t) => {
+        const h = t.mseHistory || [];
+        const start = h[0] ?? "-";
+        const peak  = h.length ? Math.max(...h.filter((v) => v != null)) : "-";
+        const last  = h[h.length - 1] ?? "-";
+        const dir   = (h.length >= 2 && h[0] != null && h[h.length - 1] != null)
+          ? (h[h.length - 1] > h[0] ? "상승↑" : h[h.length - 1] < h[0] ? "하락↓" : "평탄→")
+          : "—";
+        const series = h.map((v) => v == null ? "-" : v.toFixed(2)).join(",");
+        return `- ${t.deviceId} (${t.status === "critical" ? "위험" : "이상의심"}, ${t.zone}, ${t.label || "-"}): 12h MSE [${series}] · 시작 ${start} → 현재 ${last} · 피크 ${peak} · 방향 ${dir}`;
+      }).join("\n")
+    : (!hasContext
+        ? `- 12시간 MSE 시계열 추이 데이터가 없습니다(추이 미수집). 위험/이상 의심 단말 수는 get_summary 도구로 확인하세요. **추이 데이터 없음·최근 알람 없음을 "위험 단말 없음" 으로 답하지 마세요.**`
+        : riskCount === 0
+          ? "- 현재 위험·이상 의심 단말이 없습니다."
+          : `- 12시간 MSE 시계열 추이 데이터가 이 컨텍스트에 없습니다(추이 미수집). **추이 데이터 없음 ≠ 위험 단말 없음** — 현재 위험 ${counts.critical ?? 0}대 · 이상 의심 ${counts.warn ?? 0}대 는 위 "현재 시스템 상태" 를 참조하세요. 추세가 필요하면 get_device_history / get_recent_changes 도구를 호출하고, 절대로 "위험 단말 없음" 으로 답하지 마세요.`);
 
   return `당신은 매설배관 IoT 통합관제 시스템의 AI 분석 어시스턴트입니다.
 운영자(관제사)와 한국어 존댓말로 대화하며, 노드 ID·위험 단계·도메인 용어 질문에 답합니다.
@@ -2846,7 +3111,18 @@ function buildSystemPrompt(ctx) {
 - **방식전위(P/S Potential)**: 매설배관 부식 보호 지표. -850mV 이하 양호, 초과 시 부식 진행 가능.
 - **희생전류(Sacrificial Current)**: 희생양극→배관 보호 전류. 점차 감소 시 양극 소모/접속부 불량. 1mA 이하 교체 검토. (희생양극 단말은 TB24-250406, TB24-250407 2대만 해당)
 - **AC 유입**: 송전선·전철 유도 교류. 200mV 이상 가속 부식, 500mV 이상 즉각 차폐/배수장치 점검.
+  - AC < 200mV: 정상/낮음
+  - 200mV ≤ AC < 500mV: 주의
+  - AC ≥ 500mV: 즉각 점검 기준 **초과**. "근접/임박/가까움" 이라고 쓰지 말고 반드시 "초과" 라고 표현.
 - **통신 품질(dBm)**: -65 이상 양호, -75 이하 주의, -85 이하 두절 임박, -115 이하 두절.
+
+# 숫자 판정 규칙 (환각 방지)
+- 실제값이 기준값 이상이면 항상 **초과**입니다. 이 경우 "근접", "가까움", "임박" 같은 표현 금지.
+- "근접"은 실제값이 기준값 미만이면서 기준값의 80% 이상일 때만 사용합니다. 예: AC 450mV 는 500mV 에 근접, AC 971mV 는 500mV 초과.
+- 기준값을 말할 때는 가능하면 차이도 함께 말합니다. 예: "971mV 는 500mV 기준보다 471mV 높습니다."
+- 최신 단일값만 조회한 경우 "상승 중/하락 중/추세" 라고 단정 금지. 추세 표현은 get_device_history, get_recent_changes, 또는 최근 12시간 MSE 추이 표가 있을 때만 사용.
+- **시계열 해석 주의**: 값이 평탄/안정적이어도 기준을 벗어나면 정상이라고 말하지 마세요. 예: 방식전위 7~8mV 는 변동이 작아도 -850mV 방호 기준을 크게 초과한 위험/보호 미흡 상태입니다. get_device_history 의 latestJudgement, get_recent_changes 의 endJudgement 가 있으면 그 판정을 반드시 함께 말하세요.
+- **센서 기준과 AI 기준 혼용 금지**: 방식전위/AC유입/통신품질 같은 센서 추세 질문에는 해당 센서 기준(-850mV, 500mV, -85dBm 등)으로만 판정하세요. "AI 기준 대비 xN" 은 get_predictions 또는 get_device_detail 결과에 aiMse/aiThreshold/aiRatio/aiJudgement 가 있을 때만 말하고, 센서 시계열만 조회한 상태에서는 AI 배수를 추측하지 마세요.
 
 # AI 모델 (LSTM AutoEncoder) — 위험도 판정 정확 명세
 - 모델은 단말별로 학습한 **정상 패턴 복원 오차(MSE)** 로 이상 탐지
@@ -2856,6 +3132,7 @@ function buildSystemPrompt(ctx) {
   - **관찰** — threshold × 0.70 ≤ 현재 MSE ≤ threshold × 1.00
   - **이상** — 현재 MSE > threshold × 1.00
 - 답변 시 가능하면 "현재 MSE 가 threshold 의 N% 도달" 같이 비율로 설명 (절대값 단독은 의미 약함)
+- "정상 패턴의 N% 상승" 같은 표현 금지. 정확히는 "AI 임계값(threshold)의 N% 수준/도달"입니다.
 - **중요 구분**: 측정 센서 8 종(방식전위/희생전류/AC유입/배터리/온도/습도/충격/통신) ≠ AI 학습 입력 피처. AI 학습 입력 피처·시퀀스 길이·epoch 등 모델 세부 명세는 절대 추측 금지, 반드시 **get_ai_model_info** 도구 호출해서 확인하세요. (예: 학습 base_features 는 4개, 파생 포함 12개 컬럼 — 도구 응답으로 확정)
 
 # 위험 단계 (5단계)
@@ -2899,7 +3176,7 @@ ${trendBlock}
 - **compare_devices** — 다중 단말 비교 (2~5개 단말의 8 센서 한꺼번에).
 - **get_recent_changes** — 변화량 통계 (시작/끝/델타/최저/최고/평균/표준편차/방향). "얼마나 변했어", "어떻게 바뀌었어" 류.
 - **get_maintenance_log** — 현장 점검·정비 이력.
-- **get_predictions** — AI LSTM 예측 결과 (현재 데이터 비어있을 수 있음 — message 필드 확인).
+- **get_predictions** — AI LSTM 최신 예측 결과. 데이터가 없을 때만 message 필드로 fallback 사유 확인.
 
 **위치/지도 (3)**
 - **search_devices_by_location** — 지명 키워드로 단말 검색 (DB POSITION LIKE). "미룡동", "시청 앞", "버스터미널" 같은 DB 텍스트 매칭 가능한 경우 1차 시도.
@@ -2933,34 +3210,46 @@ ${trendBlock}
 
 
 
+# 질문 유형별 응답 형식
+- **단말 상세** ("TB24-250xxx 상태/센서") → 상태 + 핵심 센서/AI 수치 1~2개 + 조치 1줄. 2~4문장.
+- **현황 요약** ("전체 요약", "지금 상태") → 카운트 한 줄 + 위험/이상 의심 노드 ID. 2~3문장.
+- **TOP N · 점검표 · 우선순위** → 번호·불릿 항목형 허용. 각 항목: 단말 ID · 근거 수치(AI 기준 대비 또는 센서값) · 조치.
+- **원인 분석** ("왜 위험해?") → AI 기준 대비 x배수 또는 MSE/threshold 근거 + 주요 원인 피처(사람이 읽는 라벨) + [추정] 라벨 + 조치.
+- **현장 점검** ("뭐부터 봐?") → 우선순위 + 짧은 점검 체크리스트(불릿).
+- **도메인 설명** ("방식전위가 뭐야?") → 정의 1~2문장 + 기준값. 도구 호출 불필요.
+- 단순/단답 질문은 1~2문장으로 짧게.
+
 # 응답 규칙
-1. **간결** — 2~5문장. 인사말·사과 절대 금지. 바로 본론.
-2. **노드 ID 인용** — 위 상태/추이 표에 있는 노드 ID 를 그대로 답변에 포함.
-3. **추이 표는 시간 데이터** — 위 "최근 12시간 MSE 추이" 표가 곧 과거 데이터입니다. "과거 시점 정보가 없다" 는 답변 절대 금지. 표의 12개 값이 1시간 간격이므로 "약 N시간 전" 표현 가능.
+1. **간결** — 기본 2~5문장, 인사말·사과 절대 금지, 바로 본론. 단 TOP N·점검표·비교 요청은 번호·불릿 항목형으로 정리해도 됩니다.
+2. **노드 ID 인용** — 위 상태/추이 표에 있는 노드 ID(예: TB24-250429)를 그대로 답변에 포함.
+3. ${hasTrends
+  ? `**추이 표는 시간 데이터** — 위 "최근 12시간 MSE 추이" 표가 곧 과거 데이터입니다. "과거 시점 정보가 없다" 는 답변 절대 금지. 12개 값이 1시간 간격이므로 "약 N시간 전" 표현 가능.`
+  : `**추세 질문** — 12h MSE 추이 표가 비어 있으면(추이 데이터 없음) 현재값만으로 추세를 단정하지 말고 get_device_history / get_recent_changes 도구로 시계열을 조회해 답하세요. 추이 데이터가 없다고 해서 "위험 단말 없음" 으로 답하지 마세요.`}
 4. **통신 장애 시점** — "통신 장애 노드 상세" 섹션에 마지막 측정 시각과 두절 기간이 명시되어 있습니다. "언제 끊겼는지 모름" 답변 절대 금지. 마지막 측정 시각 = 통신 두절 시작 시점으로 보고 답변하세요.
 5. **환각 금지** — 위 표·섹션에 없는 데이터만 "확인되지 않음".
 6. **운영 친화** — 가능하면 "현장 점검 권장" 등 짧은 액션 한 줄.
-7. **포맷** — 마크다운 헤더(##) X. **굵게**(**TB24-5JN011**) 정도만.
+7. **포맷** — 마크다운 헤더(##) X. **굵게**(**TB24-250429**) 정도만.
+8. **원인 피처 라벨** — 도구가 주는 원인 피처는 이미 사람이 읽는 라벨입니다(예: "습도 편차", "방식전위 변화"). "습도_dev24", "방식전위_diff1" 같은 원시 컬럼명을 답변에 그대로 쓰지 마세요.
+9. **AI 위험도 표현** — MSE/threshold 같은 작은 절대값보다 "AI 기준 대비 x{배수}" 로 설명(예: AI 기준 대비 x484). "threshold 의 N% 수준" 도 가능.
+10. **위험 = 알람 OR AI 이상** — 위험 단말은 "최근 7일 알람" 또는 "AI 이상(MSE 초과)" 중 하나라도 해당되면 위험입니다. "최근 알람 없음" 을 "위험 단말 없음" 으로 답하지 마세요. 위험 단말 수는 위 "현재 시스템 상태" 의 위험 카운트(컨텍스트 없으면 get_summary)를 기준으로 답하세요.
 
-# 응답 예시 (이대로 따라할 것)
+# 응답 예시 (형식 참고 — 실제 수치는 도구로 확인)
 
-질문: "위험이 언제 발생했어?"
-좋은 답변:
-> **TB24-5JN011** 은 12시간 전 0.42 에서 시작해 약 8시간 전부터 임계 0.85 를 초과했습니다. **TB24-5JN012** 도 12시간 전 0.38 에서 시작해 약 9시간 전부터 임계를 넘었습니다. 두 노드 모두 현재까지 상승 추세이므로 즉시 현장 점검이 필요합니다.
+질문: "TB24-250448 상태 알려줘"  (단말 상세 — 짧게)
+> **TB24-250448** 은 이상 의심 상태입니다. AC 유입이 971mV 로 500mV 즉각 점검 기준을 471mV 초과했고, AI 위험도는 임계값의 73% 수준(AI 기준 대비 x0.73, 관찰)입니다. AC 차폐·배수장치 점검을 권장합니다.
 
-나쁜 답변 (금지):
-> 죄송하지만 과거 시점 정보는 확인되지 않습니다. (X — 위 추이 표가 있음)
+질문: "위험 단말 근거"  (원인 분석)
+> **TB24-250429** 는 위험 단말입니다. AI 위험도가 임계값을 크게 초과해 **AI 기준 대비 x484** 수준이며, 주요 원인 피처는 습도 편차입니다. 즉시 현장 점검이 필요합니다.
 
-질문: "TB24-5JN042 추세는?"
-좋은 답변:
-> **TB24-5JN042** 의 MSE 는 12시간 전 0.41 → 현재 0.84 로 지속 상승 중입니다. 임계 0.85 직전이라 즉각 점검을 권장합니다.
+질문: "위험 추세"  (추이 데이터 없을 때 — 위험 단말 없음과 혼동 금지)
+> 현재 위험·이상 의심 단말은 있으나 12시간 MSE 추이 데이터는 이 화면 컨텍스트에 없습니다. 추세가 필요하면 get_device_history 로 시계열을 조회하겠습니다.
 
-질문: "통신 장애는 언제부터 발생함?"
-좋은 답변:
-> **TB24-250429** 의 마지막 측정이 2026-04-28 01:00 입니다. 그 이후 480시간(약 20일) 통신 두절 상태로, 4/28 새벽에 단절된 것으로 보입니다. 현장 점검 (전원·안테나·맨홀 침수 확인) 즉시 필요합니다.
+질문: "통신 장애는 언제부터?"  (통신 장애 시점)
+> **TB24-250437** 의 마지막 측정이 2026-05-27 19:00 입니다. 이후 약 58시간(약 2일) 통신 두절 상태로, 그 시점에 단절된 것으로 보입니다. 전원·안테나·맨홀 침수 확인이 즉시 필요합니다.
 
-질문: "방식전위"
-좋은 답변:
-> 방식전위는 매설배관 부식 보호 지표로 -850 mV 이하가 양호 기준입니다. 초과 시 부식 진행 가능성이 있어 정류기 출력 조정이 필요합니다.
+질문: "방식전위"  (도메인 설명 — 1~2문장)
+> 방식전위는 매설배관 부식 보호 지표로 -850mV 이하가 양호 기준입니다. 초과 시 부식 진행 가능성이 있어 정류기 출력 점검이 필요합니다.
+
+금지 (낡은 예시): "MSE 0.42 → 0.85, 임계 0.85" 같은 큰 스케일 가짜 수치나 "TB24-5JN###" 형식 ID. 실제 단말 ID 는 TB24-250xxx, threshold 는 0.0003 수준의 작은 값이며, 위험도는 "AI 기준 대비 x배수" 로 설명합니다.
 `;
 }

@@ -17,6 +17,10 @@ bold() { printf "\033[1m%s\033[0m" "$1"; }
 green() { printf "\033[32m%s\033[0m" "$1"; }
 red()   { printf "\033[31m%s\033[0m" "$1"; }
 gray()  { printf "\033[90m%s\033[0m" "$1"; }
+preview() {
+  local n="${1:-130}"
+  python3 -c "import sys; print(sys.stdin.read().replace('\n', ' ')[:$n], end='')"
+}
 
 test_case() {
   local title="$1"
@@ -53,12 +57,12 @@ JSON
 
   if [[ -n "$expect_in_reply" ]] && [[ ! "$reply" =~ $expect_in_reply ]]; then
     printf "  %s 응답에 [%s] 없음\n" "$(red FAIL)" "$expect_in_reply"
-    printf "  %s %s\n" "$(gray "A:")" "$(echo "$reply" | head -c 150)"
+    printf "  %s %s\n" "$(gray "A:")" "$(printf "%s" "$reply" | preview 150)"
     FAIL=$((FAIL + 1)); FAILED_CASES+=("$title"); return
   fi
 
   printf "  %s tools=[%s]\n" "$(green PASS)" "$tools"
-  printf "  %s %s\n" "$(gray "A:")" "$(echo "$reply" | head -c 130 | tr '\n' ' ')"
+  printf "  %s %s\n" "$(gray "A:")" "$(printf "%s" "$reply" | preview 130)"
   PASS=$((PASS + 1))
 }
 
@@ -73,11 +77,11 @@ ALL=$(echo "$SUM" | python3 -c "import json,sys; print(json.load(sys.stdin)['cou
 CRIT=$(echo "$SUM" | python3 -c "import json,sys; print(json.load(sys.stdin)['counts']['critical'])" 2>/dev/null)
 WARN=$(echo "$SUM" | python3 -c "import json,sys; print(json.load(sys.stdin)['counts']['warn'])" 2>/dev/null)
 OFFL=$(echo "$SUM" | python3 -c "import json,sys; print(json.load(sys.stdin)['counts']['offline'])" 2>/dev/null)
-if [[ "$ALL" == "65" && "$CRIT" == "3" && "$WARN" == "4" && "$OFFL" == "4" ]]; then
-  printf "  %s /api/summary?demo=1 → all=%s critical=%s warn=%s offline=%s (기대 65/3/4/4)\n" "$(green PASS)" "$ALL" "$CRIT" "$WARN" "$OFFL"
+if [[ "$ALL" == "65" && "$CRIT" == "5" && "$WARN" == "26" && "$OFFL" == "5" ]]; then
+  printf "  %s /api/summary?demo=1 → all=%s critical=%s warn=%s offline=%s (기대 65/5/26/5)\n" "$(green PASS)" "$ALL" "$CRIT" "$WARN" "$OFFL"
   PASS=$((PASS + 1))
 else
-  printf "  %s /api/summary?demo=1 → all=%s critical=%s warn=%s offline=%s (기대 65/3/4/4)\n" "$(red FAIL)" "$ALL" "$CRIT" "$WARN" "$OFFL"
+  printf "  %s /api/summary?demo=1 → all=%s critical=%s warn=%s offline=%s (기대 65/5/26/5)\n" "$(red FAIL)" "$ALL" "$CRIT" "$WARN" "$OFFL"
   FAIL=$((FAIL + 1)); FAILED_CASES+=("/api/summary count")
 fi
 
@@ -85,7 +89,7 @@ fi
 test_case "01 위험 단말 → DEMO-001~003 노출"     "현재 위험 단말 알려줘"               "DEMO-00[123]"
 test_case "02 이상의심 단말 → DEMO-101~104"      "이상의심 단계 단말 알려줘"           "DEMO-10[1-4]"
 test_case "03 통신두절 단말 → DEMO-201~203"      "통신 두절 단말 알려줘"                "DEMO-20[1-3]"
-test_case "04 KPI 카운트 → 65/3/4/4"             "전체 KPI 카운트 알려줘"               "(65|위험\\s*3|이상의심\\s*4|통신\\s*장애\\s*4|통신두절\\s*4)"
+test_case "04 KPI 카운트 → 65/5/26/5"            "전체 KPI 카운트 알려줘"               "(65|위험\\s*5|이상\\s*의심\\s*26|통신\\s*장애\\s*5|통신두절\\s*5)"
 test_case "05 DEMO-001 상세 → 방식전위·AC"      "DEMO-001 상태 알려줘"                "(방식전위|AC|-540|312)"
 test_case "06 DEMO-002 24h 추이"                 "DEMO-002 의 최근 24시간 방식전위 추이" "DEMO-002"
 test_case "07 시청 부근 → DEMO-001 포함"         "시청 근처 단말 알려줘"                "(시청|DEMO-001|TB24-250422)"

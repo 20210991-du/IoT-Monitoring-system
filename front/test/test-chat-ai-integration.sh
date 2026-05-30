@@ -14,6 +14,10 @@ bold() { printf "\033[1m%s\033[0m" "$1"; }
 green() { printf "\033[32m%s\033[0m" "$1"; }
 red()   { printf "\033[31m%s\033[0m" "$1"; }
 gray()  { printf "\033[90m%s\033[0m" "$1"; }
+preview() {
+  local n="${1:-150}"
+  python3 -c "import sys; print(sys.stdin.read().replace('\n', ' ')[:$n], end='')"
+}
 
 test_case() {
   local title="$1" question="$2" expected_tool="$3"
@@ -49,7 +53,7 @@ JSON
     FAIL=$((FAIL+1)); FAILED_CASES+=("$title"); return
   fi
   printf "  %s tools=[%s]\n" "$(green PASS)" "$tools"
-  printf "  %s %s%s\n" "$(gray "A:")" "$(echo "$reply" | head -c 150 | tr '\n' ' ')" "$([ ${#reply} -gt 150 ] && echo "...")"
+  printf "  %s %s%s\n" "$(gray "A:")" "$(printf "%s" "$reply" | preview 150)" "$([ ${#reply} -gt 150 ] && echo "...")"
   PASS=$((PASS+1))
 }
 
@@ -60,11 +64,11 @@ echo "============================================================"
 test_case "A01 AI 모델 학습 방식"          "AI 모델 어떻게 학습됐어?"                     "get_ai_model_info"
 test_case "A02 단말 threshold (특정)"       "TB24-250401 의 정상 한계 MSE 는?"            "get_ai_model_info"
 test_case "A03 다른 단말 threshold"         "TB24-250455 의 threshold 알려줘"             "get_ai_model_info"
-test_case "A04 희생전류 단말 목록"          "희생전류 단말은 어느 거야?"                   "get_ai_model_info|get_device_detail|list_devices"
+test_case "A04 희생전류 단말 목록"          "희생전류 단말은 어느 거야?"                   "get_ai_model_info|get_device_detail|list_devices|find_devices_by_value"
 test_case "A05 학습 피처"                   "AI 모델이 사용하는 입력 피처는 뭐야?"          "get_ai_model_info"
 test_case "A06 위험도 분류 기준"            "위험도 단계 어떻게 정해?"                      ""
 test_case "A07 get_device_detail 의 ai"     "TB24-250410 의 AI 정상 한계와 현재 상태"      "get_device_detail|get_ai_model_info"
-test_case "A08 predictions stub"            "TB24-250401 LSTM 예측 결과"                  "get_predictions|get_ai_model_info"
+test_case "A08 predictions 실데이터"         "TB24-250401 LSTM 예측 결과"                  "get_predictions|get_ai_model_info"
 test_case "A09 전체 threshold 평균"          "단말들 평균 threshold 는 얼만지?"              "get_ai_model_info"
 test_case "A10 비율 답변 확인"              "TB24-250403 의 threshold 와 70% 한계 알려줘" "get_ai_model_info"
 

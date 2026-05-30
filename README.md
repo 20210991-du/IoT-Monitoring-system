@@ -2,16 +2,16 @@
 
 ## 🌐 라이브 데모
 
-운영 중 사이트 URL — Mac Studio + Cloudflare Tunnel 로 외부 노출. URL 변경 시 본 섹션 자동 갱신 (`~/work/sync/update-readme-url.sh`).
+운영 중 사이트 URL — Mac Studio + Cloudflare **Named Tunnel** 로 외부 노출 (영구 도메인 `msbuger.com`).
 
 <!-- TUNNEL_URL_START -->
-👉 **<https://block-commissioners-oriental-foster.trycloudflare.com>**
+👉 **<https://siwon.msbuger.com>**
 
-- 헬스 체크: [`/api/health`](https://block-commissioners-oriental-foster.trycloudflare.com/api/health)
-- 마지막 확인: 2026-05-26 01:52 KST (자동 갱신)
+- 헬스 체크: [`/api/health`](https://siwon.msbuger.com/api/health)
+- 마지막 확인: 2026-05-30 KST (영구 도메인 전환)
 <!-- TUNNEL_URL_END -->
 
-> ⚠️ 임시 URL (`trycloudflare.com`). Mac Studio 재부팅·재가동 시 자동으로 새 URL 로 갱신됨. 도메인 구입 후 영구 URL 로 전환 예정 (발표 직전).
+> ✅ 영구 URL (`siwon.msbuger.com`, Cloudflare Named Tunnel). Mac Studio 재부팅 후에도 launchd `com.siwon.cf-tunnel` + `com.siwon.web` 로 자동 유지되어 URL 이 고정됩니다.
 
 ## 📌 Version
 Current Version: v2026.05.28
