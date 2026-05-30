@@ -17,6 +17,10 @@ bold() { printf "\033[1m%s\033[0m" "$1"; }
 green() { printf "\033[32m%s\033[0m" "$1"; }
 red()   { printf "\033[31m%s\033[0m" "$1"; }
 gray()  { printf "\033[90m%s\033[0m" "$1"; }
+preview() {
+  local n="${1:-120}"
+  python3 -c "import sys; print(sys.stdin.read().replace('\n', ' ')[:$n], end='')"
+}
 
 # 한 케이스 실행: 질문 + 기대 도구 이름 (정규식)
 test_case() {
@@ -60,7 +64,7 @@ JSON
   if [[ -n "$expected_tool" ]]; then
     if [[ ! "$tools" =~ $expected_tool ]]; then
       printf "  %s 도구 [%s] 호출 안 됨. 실제: [%s]\n" "$(red FAIL)" "$expected_tool" "$tools"
-      printf "  %s %s\n" "$(gray "응답:")" "$(echo "$reply" | head -c 150)"
+      printf "  %s %s\n" "$(gray "응답:")" "$(printf "%s" "$reply" | preview 150)"
       FAIL=$((FAIL + 1))
       FAILED_CASES+=("$title")
       return
@@ -75,7 +79,7 @@ JSON
   fi
 
   printf "  %s rounds=%s · tools=[%s]\n" "$(green PASS)" "$rounds" "$tools"
-  printf "  %s %s%s\n" "$(gray "응답:")" "$(echo "$reply" | head -c 120 | tr '\n' ' ')" "$([ ${#reply} -gt 120 ] && echo "...")"
+  printf "  %s %s%s\n" "$(gray "응답:")" "$(printf "%s" "$reply" | preview 120)" "$([ ${#reply} -gt 120 ] && echo "...")"
   PASS=$((PASS + 1))
 }
 

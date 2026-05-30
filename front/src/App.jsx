@@ -24,6 +24,29 @@ import { fetchDevices, fetchAnomalies, fetchInsights, devicesToMarkers, setApiDe
 const TWEAK_DEFAULTS = { theme: "light", mapStyle: "light", autoPlay: true };
 const POLL_MS = 60_000;
 
+function formatMse(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  if (Math.abs(n) >= 0.01) return n.toFixed(4);
+  return n.toFixed(6);
+}
+
+// 시스템 로그(운영자용) 보조 — 엔지니어드 피처명을 사람 말로, AI 기준 대비(=MSE/threshold 배수)를 짧게.
+function featureLabel(name) {
+  return String(name || "")
+    .replace(/_dev24$/u, " 편차")
+    .replace(/_diff1$/u, " 변화")
+    .replace(/_/gu, " ");
+}
+function fmtRatio(r) {
+  const n = Number(r);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n >= 100 ? `x${Math.round(n)}` : `x${n.toFixed(2)}`;
+}
+function causeOf(item) {
+  return featureLabel(item?.contribution?.[0]?.sensor || "");
+}
+
 // 시계열 차트 — 센서/시간 범위 토글 + Confidence Band (자문 Q3 권고)
 //   deviceTxid: kscg_transmitter_info.TRANSMITTER_ID (숫자)
 const KIND_OPTS = [
@@ -259,9 +282,10 @@ function EquipmentDrawer({ item, onClose }) {
   if (!item) return null;
   const statusMap = {
     normal:  { ko: "정상", fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
-    anomaly: { ko: "이상", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    warn:    { ko: "이상", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
-    offline: { ko: "장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
+    critical:{ ko: "위험", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
+    anomaly: { ko: "위험", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
+    warn:    { ko: "이상 의심", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
+    offline: { ko: "통신 장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
   };
   const c = statusMap[item.status] || statusMap.normal;
   return (
@@ -306,11 +330,11 @@ function EquipmentDrawer({ item, onClose }) {
           <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", marginBottom: 10 }}>실시간 측정값</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
             {[
-              { l: "방식전위", v: `${item.volt}mV`, a: item.status === "anomaly" && (item.label === "방식전위 이탈" || item.label === "위상차 급변") ? "var(--err)" : "var(--ok)" },
-              { l: "AC 유입", v: `${item.ac.toLocaleString()}mV`, a: item.status === "anomaly" && item.label === "AC 유입 과다" ? "var(--err)" : null },
+              { l: "방식전위", v: `${item.volt}mV`, a: Number(item.volt) > -850 ? "var(--err)" : "var(--ok)" },
+              { l: "AC 유입", v: `${(item.ac ?? 0).toLocaleString()}mV`, a: Number(item.ac) >= 500 ? "var(--err)" : Number(item.ac) >= 200 ? "var(--warn)" : null },
               { l: "희생전류",  v: `${item.sacrificial}mA`, a: item.status === "anomaly" && item.label === "희생전류 저하" ? "var(--err)" : null },
               { l: "온도",     v: `${item.temp}°C` },
-              { l: "습도",     v: `${item.hum}%` },
+              { l: "습도(단말 원본)", v: `${item.hum}%` },
               { l: "통신품질", v: item.commOk ? `${item.commDbm}dBm` : "단절", a: !item.commOk || (item.commOk && item.commDbm < -75) ? "var(--err)" : null },
             ].map((s) => (
               <div
@@ -381,6 +405,7 @@ export function App() {
   const [markers,   setMarkers]   = useState(() => devicesToMarkers(MOCK_EQUIPMENT));
   const [anomalies, setAnomalies] = useState(MOCK_ANOMALIES);
   const [watch,     setWatch]     = useState(MOCK_WATCH);
+  const [commOutage, setCommOutage] = useState([]);
   const [insights,  setInsights]  = useState(MOCK_INSIGHTS);
   const [apiStatus, setApiStatus] = useState("mock"); // "mock" | "loading" | "ok" | "error"
   // DB 연결 상태 (SubNav 의 "AI 연동됨" 옆 배지로 노출) — null=확인 중, true=OK, false=끊김
@@ -415,16 +440,29 @@ export function App() {
     });
 
     anoRes.anomalies.slice(0, 5).forEach((a, i) => {
+      const ratio = fmtRatio(a.aiRatio);
+      const cause = causeOf(a);
       events.push({
         id: base + 1 + i, ts, kind: "alert", time: t,
-        text: `ALERT: MSE ${a.mse.toFixed(4)} > TH ${a.threshold.toFixed(4)} @ ${a.node} [${a.label}]`,
+        text: `ALERT: ${a.node} 위험${ratio ? ` · AI 기준 ${ratio}` : ""}${cause ? ` · ${cause}` : ""}`,
       });
     });
 
     anoRes.watch.slice(0, 3).forEach((w, i) => {
+      const ratio = fmtRatio(w.aiRatio);
+      const cause = causeOf(w);
       events.push({
         id: base + 10 + i, ts, kind: "warn", time: t,
-        text: `WARN: 이상 의심 ${w.node} · MSE=${w.mse.toFixed(4)} [${w.label}]`,
+        text: `WARN: ${w.node} 이상 의심${ratio ? ` · AI 기준 ${ratio}` : ""}${cause ? ` · ${cause}` : ""}`,
+      });
+    });
+
+    const commOutage = Array.isArray(anoRes.commOutage) ? anoRes.commOutage : [];
+    commOutage.slice(0, 2).forEach((o, i) => {
+      const dur = String(o.label || "").replace("통신 두절 ", "두절 ");
+      events.push({
+        id: base + 16 + i, ts, kind: "warn", time: t,
+        text: `WARN: ${o.node} 통신장애 · ${dur || "두절"}`,
       });
     });
 
@@ -432,14 +470,14 @@ export function App() {
     if (offline.length > 0) {
       events.push({
         id: base + 20, ts, kind: "warn", time: t,
-        text: `WARN: 통신고장 ${offline.length}건 · ${offline.slice(0, 2).map((d) => d.deviceId).join(", ")}`,
+        text: `WARN: 통신장애 ${offline.length}건 · ${offline.slice(0, 2).map((d) => d.deviceId).join(", ")}`,
       });
     }
 
     const normal = devRes.devices.filter((d) => d.status === "normal").length;
     events.push({
       id: base + 30, ts, kind: "ok", time: t,
-      text: `SYS: 정상 ${normal}건 · 위험 ${anoRes.anomalies.length}건 · 이상 의심 ${anoRes.watch.length}건`,
+      text: `SYS: 정상 ${normal}건 · 위험 ${anoRes.anomalies.length}건 · 이상 의심 ${anoRes.watch.length}건 · 통신 장애 ${commOutage.length || offline.length}건`,
       tail: "OK",
     });
 
@@ -459,6 +497,7 @@ export function App() {
       setMarkers(devicesToMarkers(devRes.devices));
       setAnomalies(anoRes.anomalies);
       setWatch(anoRes.watch);
+      setCommOutage(Array.isArray(anoRes.commOutage) ? anoRes.commOutage : []);
       setInsights(insRes.insights);
       setAiEvents(makeAiLogEvents(devRes, anoRes));
       setApiStatus("ok");
@@ -618,6 +657,7 @@ export function App() {
             markers={markers}
             anomalies={anomalies}
             watch={watch}
+            commOutage={commOutage}
             aiEvents={aiEvents}
             demoMode={demoMode}
             logOpen={logOpen}
@@ -632,6 +672,7 @@ export function App() {
             equipment={equipment}
             anomalies={anomalies}
             watch={watch}
+            commOutage={commOutage}
             apiStatus={apiStatus}
           />
         )}

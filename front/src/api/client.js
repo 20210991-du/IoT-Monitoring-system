@@ -61,9 +61,13 @@ export function devicesToMarkers(devices) {
       y:            toY(d.lat),
       status:       d.status,
       node:         d.deviceId,
-      label:        d.label || "",
-      mse:          d.mse || 0,
+      label:        d.aiRisk ? `AI ${d.aiRisk}` : d.label || "",
+      mse:          d.aiMse ?? d.mse ?? null,
+      threshold:    d.aiThreshold ?? d.threshold ?? null,
+      aiRatio:      d.aiRatio ?? (d.aiMse != null && d.aiThreshold > 0 ? d.aiMse / d.aiThreshold : null),
       zone:         d.zone,
+      location:     d.location ?? null,
+      updatedAt:    d.updatedAt ?? null,
       contribution: d.contribution || [],
     }));
 }

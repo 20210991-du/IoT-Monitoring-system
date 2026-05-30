@@ -8,9 +8,9 @@ const statusChip = (status) => {
   const map = {
     normal:   { ko: "정상", fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
     critical: { ko: "위험", fg: "#fff",     bg: "#dc2626",                bd: "#991b1b" },
-    anomaly:  { ko: "이상", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    warn:     { ko: "이상", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
-    offline:  { ko: "장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
+    anomaly:  { ko: "위험", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
+    warn:     { ko: "이상 의심", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
+    offline:  { ko: "통신 장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
   };
   return map[status] || map.normal;
 };
@@ -124,18 +124,58 @@ function fmtHoursShort(h) {
   return hours === 0 ? `${days}일` : `${days}일 ${hours}시간`;
 }
 
-// MSE → 위험도 % (threshold 대비). 운영자 시점 직관성 ↑
-function riskPct(mse, threshold) {
-  if (mse == null || !threshold || threshold <= 0) return null;
-  return Math.round((mse / threshold) * 100);
+function formatMse(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  if (Math.abs(n) >= 0.01) return n.toFixed(4);
+  return n.toFixed(6);
+}
+
+function formatAiRatio(item) {
+  const ratio = Number.isFinite(Number(item.aiRatio))
+    ? Number(item.aiRatio)
+    : item.mse != null && item.threshold > 0
+      ? Number(item.mse) / Number(item.threshold)
+      : null;
+  if (!Number.isFinite(ratio)) return null;
+  return ratio >= 100 ? `x${Math.round(ratio)}` : `x${ratio.toFixed(2)}`;
+}
+
+function featureLabel(name) {
+  return String(name || "")
+    .replace(/_dev24$/u, " 편차")
+    .replace(/_diff1$/u, " 변화")
+    .replace(/_/gu, " ");
+}
+
+function anomalyLabel(label) {
+  return String(label || "")
+    .replace(/_dev24(?= |$)/gu, " 편차")
+    .replace(/_diff1(?= |$)/gu, " 변화")
+    .replace(/_/gu, " ");
+}
+
+// 운영자용 권장 조치 — 급한 정도(심각도) + 무엇을 볼지(원인 피처).
+//   API status·판정 기준은 건드리지 않고, 표시용 안내 문구만 도출한다.
+function actionFor(item, kind) {
+  if (kind === "offline") return "전원·안테나·맨홀 점검";
+  const urgency = kind === "anomaly" ? "즉시 현장 점검" : "24시간 내 확인";
+  const cause = item.contribution?.[0]?.sensor || item.label || "";
+  let detail = "";
+  if (/AC/i.test(cause))                 detail = "AC 차폐·배수장치 점검";
+  else if (/방식전위/.test(cause))       detail = "방식전위 기준초과 확인";
+  else if (/습도/.test(cause))           detail = "단말 원본 습도 확인";
+  else if (/온도/.test(cause))           detail = "단말 온도·환경 확인";
+  else if (/통신|RSSI|dBm/i.test(cause)) detail = "통신 모듈 점검";
+  return detail ? `${urgency} · ${detail}` : urgency;
 }
 
 function AnomalyCard({ item, onClick, kind }) {
-  const color = kind === "warn" ? "var(--warn)" : "var(--err)";
+  const color = kind === "offline" ? "var(--ink-3)" : kind === "warn" ? "var(--warn)" : "var(--err)";
   // 통신 두절(offline) 카드는 label 이 "통신 두절..." 로 시작 → 우측 박스 = 두절 일/시간
-  // 일반 anomaly 는 위험도 % 표시 (MSE / threshold * 100)
+  // 일반 anomaly 는 threshold 대비 배수 표시. 퍼센트는 극단값에서 너무 과장되어 보임.
   const isOffline = typeof item.label === "string" && item.label.startsWith("통신 두절");
-  const pct = isOffline ? null : riskPct(item.mse, item.threshold);
+  const ratioText = isOffline ? null : formatAiRatio(item);
   return (
     <div
       onClick={() => onClick(item)}
@@ -166,7 +206,7 @@ function AnomalyCard({ item, onClick, kind }) {
             fontSize: 11, color, marginTop: 3, fontWeight: 600,
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}>
-            {item.label}
+            {anomalyLabel(item.label)}
           </div>
         </div>
         <div style={{ textAlign: "right", flexShrink: 0 }}>
@@ -175,16 +215,16 @@ function AnomalyCard({ item, onClick, kind }) {
               <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", letterSpacing: "0.05em" }}>두절</div>
               <div style={{ fontSize: 13, fontWeight: 700, color, lineHeight: 1, whiteSpace: "nowrap" }}>{fmtHoursShort(item.mse)}</div>
             </>
-          ) : pct != null ? (
+          ) : ratioText != null ? (
             <>
-              <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", letterSpacing: "0.05em" }}>위험도</div>
-              <div className="mono" style={{ fontSize: 16, fontWeight: 700, color, lineHeight: 1 }}>{pct}%</div>
-              <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>MSE {item.mse.toFixed(3)}</div>
+              <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", letterSpacing: "0.03em", whiteSpace: "nowrap" }}>AI 기준 대비</div>
+              <div className="mono" style={{ fontSize: 16, fontWeight: 700, color, lineHeight: 1 }}>{ratioText}</div>
+              <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>MSE {formatMse(item.mse)}</div>
             </>
           ) : (
             <>
               <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", letterSpacing: "0.05em" }}>MSE</div>
-              <div className="mono" style={{ fontSize: 14, fontWeight: 700, color, lineHeight: 1 }}>{item.mse.toFixed(3)}</div>
+              <div className="mono" style={{ fontSize: 14, fontWeight: 700, color, lineHeight: 1 }}>{formatMse(item.mse)}</div>
             </>
           )}
         </div>
@@ -205,41 +245,51 @@ function AnomalyCard({ item, onClick, kind }) {
                 whiteSpace: "nowrap",
               }}
             >
-              {c.sensor} {c.pct}%
+              {featureLabel(c.sensor)} {c.pct}%
             </span>
           ))}
         </div>
       )}
+      {/* 조치 — 운영자가 카드만 보고 바로 무엇을 할지 판단 */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 6, marginTop: 8,
+        padding: "5px 8px", borderRadius: 6,
+        background: "var(--bg-elev)",
+        border: `1px solid ${color}`, borderLeft: `3px solid ${color}`,
+      }}>
+        <span style={{ fontSize: 9, fontWeight: 800, color, letterSpacing: "0.04em", flexShrink: 0 }}>조치</span>
+        <span style={{
+          fontSize: 10, fontWeight: 600, color: "var(--ink-2)",
+          whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+        }}>
+          {actionFor(item, kind)}
+        </span>
+      </div>
     </div>
   );
 }
 
-function AIPanels({ onAnalyze, anomalies, watch, onToggleLog }) {
-  // 이상 + 관찰 통합 리스트. MSE 내림차순 → 자연스러운 우선순위
+function AIPanels({ onAnalyze, anomalies, watch, commOutage = [], onToggleLog }) {
+  // 이상 + 관찰 + 통신두절 통합 리스트. 심각도 우선, 같은 그룹은 threshold 대비 배수 내림차순.
   const combined = [
     ...anomalies.map((a) => ({ ...a, _kind: "anomaly" })),
     ...watch.map((w) => ({ ...w, _kind: "warn" })),
-  ].sort((a, b) => b.mse - a.mse);
+    ...commOutage.map((o) => ({ ...o, mse: o.hoursSilent, _kind: "offline" })),
+  ].sort((a, b) => {
+    const rank = (k) => k === "anomaly" ? 3 : k === "warn" ? 2 : 1;
+    const kindOrder = rank(b._kind) - rank(a._kind);
+    if (kindOrder !== 0) return kindOrder;
+    const ar = Number.isFinite(Number(a.aiRatio)) ? Number(a.aiRatio) : (a.threshold > 0 ? a.mse / a.threshold : 0);
+    const br = Number.isFinite(Number(b.aiRatio)) ? Number(b.aiRatio) : (b.threshold > 0 ? b.mse / b.threshold : 0);
+    return br - ar;
+  });
 
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       <PanelHeader
         right={
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <span style={{
-              fontSize: 10, fontWeight: 700, padding: "2px 10px",
-              background: "rgba(239,68,68,0.12)", color: "var(--err)",
-              borderRadius: 999,
-            }}>
-              이상 {anomalies.length}건
-            </span>
-            <span style={{
-              fontSize: 10, fontWeight: 700, padding: "2px 10px",
-              background: "rgba(245,158,11,0.12)", color: "var(--warn)",
-              borderRadius: 999,
-            }}>
-              이상 의심 {watch.length}건
-            </span>
+            {/* 카운트 배지(이상/이상의심/통신장애 건수)는 상단 KPI 카드와 중복 → 제거 (헤더 한 줄 유지) */}
             {onToggleLog && (
               <button
                 onClick={onToggleLog}
@@ -277,9 +327,6 @@ function AIPanels({ onAnalyze, anomalies, watch, onToggleLog }) {
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Icons.alert size={16} color="var(--err)" />
           <div style={{ fontSize: 14, fontWeight: 700 }}>AI 탐지 목록</div>
-          <span style={{ fontSize: 11, color: "var(--ink-3)", fontWeight: 500 }}>
-            · MSE 내림차순
-          </span>
         </div>
       </PanelHeader>
       <div className="scroll" style={{ padding: 12, flex: 1, overflowY: "auto", minHeight: 0 }}>
@@ -338,7 +385,7 @@ function MarkerPopup({ m, onClose }) {
         <button onClick={onClose} style={{ color: "var(--ink-3)" }}><Icons.close size={14} /></button>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 8 }}>
-        <Metric label="MSE" value={m.mse.toFixed(3)} color={color} />
+        <Metric label="MSE" value={formatMse(m.mse)} color={color} />
         <Metric label="구역" value={m.zone} />
         <Metric label="상태" value={m.status === "critical" ? "위험" : "이상 의심"} color={color} />
       </div>
@@ -536,8 +583,8 @@ function MiniTable({ data, onRowClick }) {
                 </td>
                 <td style={{ padding: "14px 16px", textAlign: "center" }}>
                   <span style={{
-                    display: "inline-block", padding: "4px 12px", borderRadius: 999,
-                    fontSize: 12, fontWeight: 700,
+                    display: "inline-block", padding: "4px 10px", borderRadius: 999,
+                    fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
                     background: c.bg, color: c.fg, border: `1px solid ${c.bd}`,
                     minWidth: 48,
                   }}>
@@ -729,53 +776,7 @@ function LogPanel({ lines, onToggleLog }) {
           <span className="mono" style={{ fontSize: 10, color: "var(--ink-3)", whiteSpace: "nowrap" }}>
             {query ? `${filtered.length}/${lines.length}` : `${lines.length}`}
           </span>
-          {/* 우: 필터 칩 (가운데~우측 영역, ← AI 탐지로 직전) */}
-          <div style={{
-            marginLeft: "auto",
-            display: "flex", alignItems: "center", gap: 3, flexWrap: "wrap",
-          }}>
-            {LOG_KINDS.map(({ k, label, color }) => {
-              const on = !hiddenKinds.has(k);
-              const n = kindCounts[k] || 0;
-              return (
-                <button
-                  key={k}
-                  onClick={() => toggleKind(k)}
-                  title={on ? `${label} 숨기기` : `${label} 표시`}
-                  style={{
-                    display: "inline-flex", alignItems: "center", gap: 3,
-                    padding: "2px 7px", borderRadius: 999,
-                    fontSize: 10, fontWeight: 700, lineHeight: 1.3,
-                    background: on ? "rgba(0,0,0,0.04)" : "transparent",
-                    border: `1px solid ${on ? color : "var(--line)"}`,
-                    color: on ? color : "var(--ink-4)",
-                    cursor: "pointer",
-                    opacity: on ? 1 : 0.5,
-                    transition: "all 140ms ease",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  <span style={{
-                    width: 5, height: 5, borderRadius: "50%",
-                    background: on ? color : "var(--ink-4)",
-                  }} />
-                  {label}
-                  <span className="mono" style={{ opacity: 0.65 }}>{n}</span>
-                </button>
-              );
-            })}
-            {!allVisible && (
-              <button
-                onClick={() => setHiddenKinds(new Set())}
-                title="전체 표시"
-                style={{
-                  background: "transparent", border: "none",
-                  color: "var(--ink-4)", cursor: "pointer",
-                  fontSize: 11, lineHeight: 1, padding: "2px 4px",
-                }}
-              >↻</button>
-            )}
-          </div>
+          {/* 상태 필터 배지(정상/AI/위험/경고 칩 + 전체표시)는 지저분해서 제거 (사용자 요청) */}
         </div>
       </PanelHeader>
       {/* 검색 입력창 */}
@@ -879,7 +880,7 @@ function mockAIResponse(input, ctx = {}) {
   const lower = text.toLowerCase();
 
   // 1) 노드 ID 직접 조회
-  const nodeMatch = text.match(/TB24-5JN\d+/i);
+  const nodeMatch = text.match(/TB24-[A-Z0-9-]+/i);
   if (nodeMatch) {
     const node = nodeMatch[0].toUpperCase();
     const eq = equipment.find((e) => e.deviceId === node);
@@ -887,8 +888,8 @@ function mockAIResponse(input, ctx = {}) {
     const lines = [
       `📍 ${node} (${eq.zone || "-"})`,
       `• 상태: ${STATUS_KO_BY_KEY[eq.status] || eq.status}`,
-      `• MSE: ${eq.mse != null ? eq.mse.toFixed(3) : "—"} (임계 ${eq.threshold ?? 0.409})`,
-      `• 최근 라벨: ${eq.label || "정상"}`,
+      `• MSE: ${formatMse(eq.aiMse ?? eq.mse)} (임계 ${formatMse(eq.aiThreshold ?? eq.threshold)})`,
+      `• 최근 라벨: ${eq.aiRisk ? `AI ${eq.aiRisk}` : eq.label || "정상"}`,
       eq.contribution?.length ? `• 기여도 1순위: ${eq.contribution[0].sensor} ${eq.contribution[0].pct}%` : null,
       `• 마지막 갱신: ${eq.updatedAt || "—"}`,
     ].filter(Boolean);
@@ -931,16 +932,16 @@ function mockAIResponse(input, ctx = {}) {
     return "통신 품질은 노드 신호 세기(dBm). -65 이상 양호, -75 이하 주의, -85 이하 통신 두절 임박. 게이트웨이 위치·안테나 점검.";
   }
   if (/임계|threshold|mse/.test(lower)) {
-    return "MSE 임계값(현재 0.409) 초과 시 이상으로 분류. 0.85 이상은 위험, 0.28~0.85 이상 의심. 임계는 모델 학습 시 결정.";
+    return "MSE 임계값은 단말별로 다릅니다. 현재 MSE가 threshold의 70% 미만이면 정상, 70~100%이면 관찰, 100% 초과이면 이상으로 분류합니다.";
   }
 
   // 4) 도움말
   if (/도움|help|\?$|메뉴/.test(lower)) {
-    return "사용 예시:\n• 'TB24-5JN042' 특정 장비 조회\n• '위험' / '이상 의심' / '장애' 현재 목록\n• '요약' 전체 상태\n• '방식전위' / '희생전류' / 'AC유입' 도메인 설명";
+    return "사용 예시:\n• 'TB24-250448' 특정 장비 조회\n• '위험' / '이상 의심' / '장애' 현재 목록\n• '요약' 전체 상태\n• '방식전위' / '희생전류' / 'AC유입' 도메인 설명";
   }
 
   // 5) fallback
-  return `"${text}" — 아직 LLM 미연동 상태라 일반 응답이 어렵습니다.\n노드 ID(예: TB24-5JN042) 또는 도메인 키워드로 질문해 주세요. '도움'을 입력하면 사용법을 안내합니다.`;
+  return `"${text}" — 아직 LLM 미연동 상태라 일반 응답이 어렵습니다.\n노드 ID(예: TB24-250448) 또는 도메인 키워드로 질문해 주세요. '도움'을 입력하면 사용법을 안내합니다.`;
 }
 
 // 컨텍스트 추출 (equipment + weather → LLM 시스템 프롬프트용)
@@ -981,9 +982,12 @@ function buildChatContext(equipment, weather) {
   // 시각 정보
   const now = new Date();
   const nowText = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  // 날씨 (있을 때만)
+  // 날씨 (있을 때만) — precip(강수 mm)/humidity(상대습도 %)도 LLM 컨텍스트로 전달
   const weatherCtx = weather && !weather.stale
-    ? { temp: weather.temp, ko: weather.ko, code: weather.code, time: weather.time }
+    ? {
+        temp: weather.temp, ko: weather.ko, code: weather.code, time: weather.time,
+        precip: weather.precip ?? null, humidity: weather.humidity ?? null,
+      }
     : null;
   return { counts, criticalNodes, warnNodes, offlineNodes, offlineDetails, trends, nowText, weather: weatherCtx };
 }
@@ -1017,12 +1021,28 @@ async function callLLM(message, context, history) {
 //   onError(err)                     — 에러
 async function callLLMStream(message, context, history, sessionId, demoMode, { onDelta, onTool, onSession, onDone, onError, signal }) {
   let acc = "";
+  // 무응답 가드 — STALL_MS 동안 새 데이터가 한 조각도 안 오면 abort.
+  //   Ollama 첫 토큰 스톨·도구 지연·터널(SSE) 끊김 등으로 '생성 중' 인디케이터가
+  //   영구 고착되는 것을 방지. 활성 스트림은 매 청크마다 타이머를 리셋하므로
+  //   정상 응답(도구 라운드 포함)은 끊기지 않는다.
+  const ctrl = new AbortController();
+  const STALL_MS = 60_000;
+  let stallTimer = null;
+  const armStall = () => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => ctrl.abort(), STALL_MS);
+  };
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+  }
   try {
+    armStall();   // fetch 응답 자체가 안 와도 가드
     const res = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, context, history, sessionId: sessionId || undefined, demo: !!demoMode }),
-      signal,
+      signal: ctrl.signal,
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
@@ -1033,6 +1053,7 @@ async function callLLMStream(message, context, history, sessionId, demoMode, { o
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+      armStall();   // 데이터 받을 때마다 무응답 타이머 리셋
       buf += decoder.decode(value, { stream: true });
       // SSE block: event: X\ndata: Y\n\n
       let sep;
@@ -1072,6 +1093,8 @@ async function callLLMStream(message, context, history, sessionId, demoMode, { o
   } catch (err) {
     onError && onError(err);
     return { ok: false, error: err.message };
+  } finally {
+    if (stallTimer) clearTimeout(stallTimer);
   }
 }
 
@@ -1429,8 +1452,9 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     setSending(false);
 
     // 응답에서 노드 ID 추출 → 지도 자동 zoom
-    const matches = (finalReply || "").match(/TB24-5JN\d+/g) || [];
-    const nodes = [...new Set(matches)];
+    //   실제 단말 체계 TB24-250xxx + 데모 단말 DEMO-### 모두 매칭 (대소문자 무시).
+    const matches = (finalReply || "").match(/(?:TB24-[A-Za-z0-9]+|DEMO-[A-Za-z0-9]+)/g) || [];
+    const nodes = [...new Set(matches.map((s) => s.toUpperCase()))];
     if (nodes.length > 0 && onBotReply) onBotReply(nodes);
 
     // 응답에서 단일 status 추출 → 자동 KPI 필터 (30초)
@@ -1453,13 +1477,6 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0, position: "relative" }}>
       <PanelHeader
         right={(() => {
-          // 모드: null = 아직 호출 X, true = LLM 연결됨, false = mock fallback
-          const isLlm  = llmActive === true;
-          const isMock = llmActive === false;
-          const bg  = isLlm  ? "rgba(16,185,129,0.10)" : isMock ? "rgba(245,158,11,0.10)" : "rgba(79,70,229,0.10)";
-          const fg  = isLlm  ? "#047857"               : isMock ? "#b45309"               : "var(--brand)";
-          const dot = isLlm  ? "#10b981"                : isMock ? "#f59e0b"               : "var(--brand)";
-          const lbl = isLlm  ? "LLM 연결됨"             : isMock ? "mock fallback"         : "대기";
           return (
             <div style={{ display: "flex", alignItems: "center", gap: 6, position: "relative" }}>
               {/* 수동 분석 버튼 — 클릭 시 즉시 cron 로직 실행 + 현재 채팅에 push */}
@@ -1531,16 +1548,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
               >
                 <Icons.refresh size={11} />
               </button>
-              {/* 세션 목록 토글은 좌상단 [📋 N] 알약으로 이동 (5/26 사이드바 패턴) */}
-              <div style={{
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "2px 10px", borderRadius: 999,
-                background: bg, color: fg,
-                fontSize: 10, fontWeight: 700,
-              }}>
-                <span style={{ width: 6, height: 6, borderRadius: "50%", background: dot, animation: "pulse-dot 1.2s infinite" }} />
-                {lbl}
-              </div>
+              {/* LLM 연결 상태 배지 제거 (사용자 요청 — 상단 'AI 연동됨' 표시와 중복) */}
 
               {/* 세션 목록은 좌측 사이드바로 이동 — 이 영역에서는 제거 (5/26)
                   아래 false 블록은 빌드 영향 없도록 임시 비활성. 다음 commit 에서 완전 삭제 예정. */}
@@ -1682,7 +1690,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
       </div>
 
       {/* 빠른 질문 알약 — 입력창 위에 항상 표시 (sending 중에는 dim) */}
-      <QuickPrompts onPick={(q) => send(null, q)} disabled={sending} />
+      <QuickPrompts equipment={equipment} onPick={(q) => send(null, q)} disabled={sending} />
 
       <form onSubmit={send} style={{
         display: "flex", gap: 6,
@@ -1902,18 +1910,37 @@ function DayDivider({ dateKey }) {
 }
 
 // 빠른 질문 알약 — 입력창 위에 가로 wrap.
-// 클릭 = 바로 전송. 메시지 갯수 무관 항상 표시. sending 중엔 dim·비활성.
-function QuickPrompts({ onPick, disabled }) {
-  // 6 카테고리 — 과거 채팅 로그 best (5/26 사용자 결정).
-  //   현황 1 / 점검 2 / 위치 1 / 분석 1 / 도메인 1
-  //   실제 운영자가 자주 묻고 응답 풍부했던 질문 패턴 선별.
+// 화면에는 짧은 작전명, 실제 전송은 구체 질문으로 분리한다.
+function QuickPrompts({ onPick, disabled, equipment = [] }) {
+  const counts = equipment.reduce((acc, d) => {
+    if (acc[d.status] != null) acc[d.status] += 1;
+    return acc;
+  }, { critical: 0, warn: 0, offline: 0 });
   const items = [
-    "지금 상태 한 줄로 요약",
-    "빨리 점검할 단말 추천",
-    "통신장애 시설 어디 있어",
-    "은파호수공원 근처 위험 단말",
-    "데이터 원인 분석",
-    "방식전위가 뭐야?",
+    {
+      label: "즉시 점검 TOP 5",
+      prompt: "지금 현장 점검 우선순위 TOP 5를 뽑고, 각 단말의 근거 수치와 조치만 짧게 정리해줘",
+    },
+    {
+      label: `위험 ${counts.critical}건 근거`,
+      prompt: "현재 위험 단말의 AI MSE, AI 기준 대비, 주요 원인 피처, 권장 조치를 정리해줘",
+    },
+    {
+      label: `통신장애 ${counts.offline}건`,
+      prompt: "통신 장애 단말의 위치, 마지막 측정 시각, 두절 시간을 정리해줘",
+    },
+    {
+      label: "AC 500mV 초과",
+      prompt: "AC유입이 500mV 이상인 단말을 찾아서 위치와 즉시 점검 조치를 알려줘",
+    },
+    {
+      label: `이상 의심 ${counts.warn}건`,
+      prompt: "이상 의심/관찰 단말 중 AI 기준 대비가 높은 순서로 TOP 5를 정리하고 원인 피처를 붙여줘",
+    },
+    {
+      label: "방식전위 기준초과",
+      prompt: "방식전위가 -850mV 기준을 초과한 단말을 찾아 우선순위와 조치안을 알려줘",
+    },
   ];
   return (
     <div style={{
@@ -1922,11 +1949,11 @@ function QuickPrompts({ onPick, disabled }) {
       borderTop: "1px solid var(--line-soft)",
       background: "var(--bg-elev)",
     }}>
-      {items.map((q, idx) => (
+      {items.map((item, idx) => (
         <button
           key={idx}
           type="button"
-          onClick={() => !disabled && onPick(q)}
+          onClick={() => !disabled && onPick(item.prompt)}
           disabled={disabled}
           style={{
             padding: "5px 12px",
@@ -1950,7 +1977,7 @@ function QuickPrompts({ onPick, disabled }) {
             e.currentTarget.style.color       = "var(--ink-3)";
           }}
         >
-          {q}
+          {item.label}
         </button>
       ))}
     </div>
@@ -2428,32 +2455,31 @@ function DashboardEquipmentDrawer({ item, onClose, onDetailRequest }) {
             <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>{item.facilityId} · {item.zone}</div>
             {item.location && <div style={{ fontSize: 12, color: "var(--ink-2)", marginTop: 6 }}>{item.location}</div>}
           </div>
-          <button onClick={onClose} style={{ color: "var(--ink-3)" }}><Icons.close size={16} /></button>
+          {/* 상단 우측: 상세 분석 pill(보조 액션) + 닫기 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            {onDetailRequest && (
+              <button
+                onClick={() => onDetailRequest(item.deviceId)}
+                title="상세 분석"
+                style={{
+                  padding: "5px 11px", borderRadius: 999,
+                  background: "var(--brand)", color: "#fff",
+                  border: "none",
+                  fontSize: 11, fontWeight: 700,
+                  letterSpacing: "0.01em",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  transition: "filter 140ms",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.08)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
+              >
+                상세 분석 →
+              </button>
+            )}
+            <button onClick={onClose} style={{ color: "var(--ink-3)", flexShrink: 0 }}><Icons.close size={16} /></button>
+          </div>
         </div>
-        {/* 상세 분석 풀폭 버튼 — 클릭 시 챗봇에 자동 메시지 푸쉬 (5/26) */}
-        {onDetailRequest && (
-          <button
-            onClick={() => onDetailRequest(item.deviceId)}
-            style={{
-              marginTop: 12, width: "100%",
-              padding: "10px 14px", borderRadius: 8,
-              background: "var(--brand)",
-              color: "#fff",
-              border: "none",
-              fontSize: 12.5, fontWeight: 700,
-              letterSpacing: "0.02em",
-              cursor: "pointer",
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              boxShadow: "0 4px 12px -4px rgba(99,102,241,0.4)",
-              transition: "filter 140ms",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.08)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
-          >
-            <span style={{ fontSize: 14 }}>🤖</span>
-            상세 분석 →
-          </button>
-        )}
       </div>
       <div className="scroll" style={{ padding: 18, overflowY: "auto", flex: 1 }}>
         {item.volt != null && (
@@ -2472,7 +2498,7 @@ function DashboardEquipmentDrawer({ item, onClose, onDetailRequest }) {
                 { l: "AC 유입", v: `${(item.ac ?? 0).toLocaleString()}mV` },
                 { l: "희생전류",  v: `${item.sacrificial ?? 0}mA` },
                 { l: "온도",     v: `${item.temp ?? "-"}°C` },
-                { l: "습도",     v: `${item.hum ?? "-"}%` },
+                { l: "습도(단말 원본)", v: `${item.hum ?? "-"}%` },
                 { l: "통신품질", v: item.commOk ? `${item.commDbm}dBm` : "단절", a: !item.commOk ? "var(--err)" : null },
               ].map((s) => (
                 <div key={s.l} style={{ padding: "10px 12px", borderRadius: 8, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
@@ -2502,7 +2528,7 @@ function DashboardEquipmentDrawer({ item, onClose, onDetailRequest }) {
   );
 }
 
-export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], aiEvents = [], demoMode = false, logOpen = false, onLogClose, onToggleLog }) {
+export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], commOutage = [], aiEvents = [], demoMode = false, logOpen = false, onLogClose, onToggleLog }) {
   const [activeKpi, setActiveKpi] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [focused, setFocused] = useState(null); // {lat, lng, node, ts}
@@ -2737,7 +2763,7 @@ export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equip
           <TableSummary data={tableData} onRowClick={handleRowClick} activeKpi={activeKpi} />
           {logOpen
             ? <LogPanel lines={lines} onToggleLog={onToggleLog} />
-            : <AIPanels anomalies={anomalies} watch={watch} onAnalyze={handleAnalyze} onToggleLog={onToggleLog} />}
+            : <AIPanels anomalies={anomalies} watch={watch} commOutage={commOutage} onAnalyze={handleAnalyze} onToggleLog={onToggleLog} />}
         </div>
       </div>
 

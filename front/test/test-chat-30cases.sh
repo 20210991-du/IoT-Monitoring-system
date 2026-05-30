@@ -20,6 +20,10 @@ green() { printf "\033[32m%s\033[0m" "$1"; }
 yellow() { printf "\033[33m%s\033[0m" "$1"; }
 red()   { printf "\033[31m%s\033[0m" "$1"; }
 gray()  { printf "\033[90m%s\033[0m" "$1"; }
+preview() {
+  local n="${1:-120}"
+  python3 -c "import sys; print(sys.stdin.read().replace('\n', ' ')[:$n], end='')"
+}
 
 test_case() {
   local title="$1"
@@ -78,7 +82,7 @@ JSON
     PASS=$((PASS + 1))   # SOFT 도 일단 PASS 카운트
   fi
 
-  printf "  %s %s%s\n" "$(gray "A:")" "$(echo "$reply" | head -c 110 | tr '\n' ' ')" "$([ ${#reply} -gt 110 ] && echo "...")"
+  printf "  %s %s%s\n" "$(gray "A:")" "$(printf "%s" "$reply" | preview 110)" "$([ ${#reply} -gt 110 ] && echo "...")"
 }
 
 echo "============================================================"

@@ -6,6 +6,13 @@ function fmtTime(d = new Date()) {
   return d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+function formatMse(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  if (Math.abs(n) >= 0.01) return n.toFixed(4);
+  return n.toFixed(6);
+}
+
 const INITIAL_LOG = [
   { id: "boot-1", time: fmtTime(new Date(Date.now() - 4000)), kind: "ok", text: "SYS: 시스템 시작 · AI 엔진 초기화",     tail: "OK" },
   { id: "boot-2", time: fmtTime(new Date(Date.now() - 2000)), kind: "ai", text: "AI: LSTM-AutoEncoder 모델 로드 완료"            },
@@ -356,14 +363,18 @@ function LiveLog({ C, isDark }) {
     // 이상 탐지 폴링
     const t1 = setInterval(async () => {
       const data = await get("/api/anomalies");
-      if (!data?.length) return;
-      const item    = data[Math.floor(Math.random() * data.length)];
-      const isAlert = item.status === "critical";
+      const rows = [
+        ...((data?.anomalies || []).map((x) => ({ ...x, kind: "alert" }))),
+        ...((data?.watch || []).map((x) => ({ ...x, kind: "warn" }))),
+      ];
+      if (!rows.length) return;
+      const item    = rows[Math.floor(Math.random() * rows.length)];
+      const isAlert = item.kind === "alert";
       push([{
-        id:   `anml-${item.deviceId}-${Date.now()}`,
+        id:   `anml-${item.node}-${Date.now()}`,
         time: fmtTime(),
         kind: isAlert ? "alert" : "warn",
-        text: `AI: ${item.deviceId} ${isAlert ? "이상 감지" : "이상 의심"} (MSE ${item.mse?.toFixed(3) ?? "-"})`,
+        text: `AI: ${item.node} ${isAlert ? "이상 감지" : "이상 의심"} (MSE ${formatMse(item.mse)})`,
         tail: isAlert ? "ALERT" : "WARN",
       }]);
     }, 9000);
@@ -371,8 +382,9 @@ function LiveLog({ C, isDark }) {
     // 디바이스 상태 폴링
     const t2 = setInterval(async () => {
       const data = await get("/api/devices");
-      if (!data?.length) return;
-      const item    = data[Math.floor(Math.random() * data.length)];
+      const rows = data?.devices || [];
+      if (!rows.length) return;
+      const item    = rows[Math.floor(Math.random() * rows.length)];
       const kindMap = { normal: "ok", critical: "alert", warn: "warn", offline: "warn" };
       const textMap = { normal: "정상 수신", critical: "위험 확인 필요", warn: "이상 의심", offline: "통신 장애" };
       push([{
