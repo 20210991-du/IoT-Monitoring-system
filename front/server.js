@@ -70,6 +70,9 @@ function classifyMse(deviceId, mse) {
 const PORT         = process.env.PORT          || 5050;
 const OLLAMA_URL   = process.env.OLLAMA_URL    || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "qwen3.5:9b";
+// UI 에서 선택 가능한 챗봇 모델 화이트리스트 (그 외 값은 기본 모델로 폴백 — 안전)
+const SELECTABLE_MODELS = ["qwen3.5:9b", "qwen3:14b", "qwen3.5:27b"];
+const pickModel = (m) => (SELECTABLE_MODELS.includes(m) ? m : OLLAMA_MODEL);
 
 const SIWON_DB_HOST = process.env.SIWON_DB_HOST || "127.0.0.1";
 const SIWON_DB_PORT = parseInt(process.env.SIWON_DB_PORT || "3306", 10);
@@ -1536,7 +1539,7 @@ async function execToolInternal(name, args, demoMode = false) {
 //   - tool_calls 가 있으면 execTool 실행 후 messages 에 append → 다음 라운드
 //   - tool_calls 가 없으면 최종 응답 (content) 반환
 //   - toolTrace 로 어떤 도구가 호출됐는지 추적 (디버깅용)
-async function runChatWithTools(messages, signal, demoMode = false) {
+async function runChatWithTools(messages, signal, demoMode = false, model = OLLAMA_MODEL) {
   const MAX_ROUNDS = 5;
   const working = [...messages];
   const toolTrace = [];
@@ -1546,7 +1549,7 @@ async function runChatWithTools(messages, signal, demoMode = false) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: OLLAMA_MODEL,
+        model,
         messages: working,
         tools: TOOLS,
         stream: false,
@@ -1596,7 +1599,8 @@ async function runChatWithTools(messages, signal, demoMode = false) {
 //   - 서버가 execTool() 로 MySQL 조회 → 결과를 messages 에 append → 다시 LLM 호출
 //   - 최대 5 라운드 (runChatWithTools 내부 MAX_ROUNDS)
 app.post("/api/chat", async (req, res) => {
-  const { message, context = {}, history = [], sessionId } = req.body || {};
+  const { message, context = {}, history = [], sessionId, model } = req.body || {};
+  const useModel = pickModel(model);
   if (!message || typeof message !== "string") {
     return res.status(400).json({ ok: false, error: "message 필드가 비어있습니다." });
   }
@@ -1622,7 +1626,7 @@ app.post("/api/chat", async (req, res) => {
   try {
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), 120_000); // 120s (최대 5 tool 라운드 여유)
-    const result = await runChatWithTools(messages, ctrl.signal, demoMode);
+    const result = await runChatWithTools(messages, ctrl.signal, demoMode, useModel);
     clearTimeout(timeout);
 
     const reply = (result.content || "(빈 응답)").trim();
@@ -1630,14 +1634,14 @@ app.post("/api/chat", async (req, res) => {
     // chat_messages 영구화 (background, best-effort)
     if (sid) {
       persistMessage(sid, "user", message, context, null, null);
-      persistMessage(sid, "ai", reply, { rounds: result.rounds, toolCalls: result.toolTrace }, result.tokens, OLLAMA_MODEL);
+      persistMessage(sid, "ai", reply, { rounds: result.rounds, toolCalls: result.toolTrace }, result.tokens, useModel);
     }
 
     return res.json({
       ok:        true,
       sessionId: sid,
       reply,
-      model:     OLLAMA_MODEL,
+      model:     useModel,
       rounds:    result.rounds,
       toolCalls: result.toolTrace || [],
       tokens:    result.tokens || {},
@@ -1660,7 +1664,8 @@ app.post("/api/chat", async (req, res) => {
 //   - done  : { reply, tokens, rounds, toolCalls }   최종 완성 답변
 //   - error : { message }
 app.post("/api/chat/stream", async (req, res) => {
-  const { message, context = {}, history = [], sessionId } = req.body || {};
+  const { message, context = {}, history = [], sessionId, model } = req.body || {};
+  const useModel = pickModel(model);
   if (!message || typeof message !== "string") {
     return res.status(400).json({ ok: false, error: "message 필드가 비어있습니다." });
   }
@@ -1720,7 +1725,7 @@ app.post("/api/chat/stream", async (req, res) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: OLLAMA_MODEL,
+          model: useModel,
           messages: working,
           tools: TOOLS,
           stream: true,
@@ -1783,7 +1788,7 @@ app.post("/api/chat/stream", async (req, res) => {
         send("done", {
           reply:     finalReply,
           sessionId: sid,
-          model:     OLLAMA_MODEL,
+          model:     useModel,
           rounds:    round + 1,
           toolCalls: toolTrace,
           tokens:    lastTokens,
@@ -1791,7 +1796,7 @@ app.post("/api/chat/stream", async (req, res) => {
         // chat_messages 영구화 (background)
         if (sid) {
           persistMessage(sid, "user", message, context, null, null);
-          persistMessage(sid, "ai", finalReply, { rounds: round + 1, toolCalls: toolTrace }, lastTokens, OLLAMA_MODEL);
+          persistMessage(sid, "ai", finalReply, { rounds: round + 1, toolCalls: toolTrace }, lastTokens, useModel);
         }
         clearTimeout(timeout);
         return res.end();
@@ -1818,7 +1823,7 @@ app.post("/api/chat/stream", async (req, res) => {
     // MAX_ROUNDS 초과
     send("done", {
       reply: "(도구 호출 한도 초과 — 정보가 충분하지 않아 답변을 마무리하지 못했습니다.)",
-      model: OLLAMA_MODEL,
+      model: useModel,
       rounds: MAX_ROUNDS,
       toolCalls: toolTrace,
       tokens: lastTokens,

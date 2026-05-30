@@ -43,52 +43,49 @@ const PIN_INNER_ICON = {
   offline: `<path d="M2 2l20 20"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M2 8.8A17 17 0 0 1 7 6"/><path d="M22 8.8A17 17 0 0 0 16 5.8"/><circle cx="12" cy="20" r="1.2" fill="white" stroke="none"/>`,
 };
 
-function makeIcon(status) {
-  // 정상 마커는 작은 초록 동그라미로 단순화 — 비정상이 시각적으로 두드러지도록 (Gemini 5/26 피드백)
-  if (status === "normal") {
-    const svg = `<svg width="14" height="14" viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.25))">
-      <circle cx="7" cy="7" r="5" fill="#10b981" stroke="rgba(255,255,255,0.9)" stroke-width="1.4"/>
-    </svg>`;
-    return L.divIcon({ html: svg, className: "", iconSize: [14, 14], iconAnchor: [7, 7], popupAnchor: [0, -10] });
+// 상태별 핀 채움색 (정상/위험/이상의심/통신장애)
+const PIN_FILL = { critical: "#dc2626", warn: "#f59e0b", normal: "#10b981", offline: "#64748b" };
+
+// 모든 단말 = 동일한 원형 핀 + 상태별 아이콘. selected 일 때 확대 + 링 (카카오/네이버식 선택 강조).
+function makeIcon(status, selected = false) {
+  const color = PIN_FILL[status] || "#4f46e5";
+  // critical 은 PIN_INNER_ICON 에 별도 없음 → anomaly(경보) 아이콘 사용
+  const paths = PIN_INNER_ICON[status] || PIN_INNER_ICON.anomaly || "";
+
+  // 선택 시 = 물방울(teardrop) 핀 + 확대 (꼭지점이 위치에 닿고 위로 솟음)
+  if (selected) {
+    const tinner = paths
+      ? `<g transform="translate(9 7) scale(0.583)" stroke="white" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round">${paths}</g>`
+      : `<circle cx="16" cy="14" r="5" fill="rgba(255,255,255,0.92)"/>`;
+    const tripple = status === "critical"
+      ? `<circle cx="16" cy="14" r="13" fill="none" stroke="#dc2626" stroke-width="2.4"><animate attributeName="r" values="13;22" dur="1.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.85;0" dur="1.6s" repeatCount="indefinite"/></circle>`
+      : "";
+    const tsvg = `<svg width="32" height="40" viewBox="0 0 32 40" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;filter:drop-shadow(0 3px 4px rgba(0,0,0,0.35))">${tripple}<path d="M16 0 C 8 0 2 6 2 14 C 2 24 16 40 16 40 C 16 40 30 24 30 14 C 30 6 24 0 16 0 Z" fill="${color}" stroke="white" stroke-width="1.5"/>${tinner}</svg>`;
+    return L.divIcon({ html: tsvg, className: "", iconSize: [32, 40], iconAnchor: [16, 40], popupAnchor: [0, -44] });
   }
-  const color =
-    status === "critical" ? "#991b1b" :
-    status === "anomaly"  ? "#ef4444" :
-    status === "warn"     ? "#f59e0b" :
-    status === "offline"  ? "#64748b" : "#4f46e5";
-  const iconPaths = PIN_INNER_ICON[status] || "";
-  const inner = iconPaths
-    ? `<g transform="translate(9 7) scale(0.583)" stroke="white" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round">${iconPaths}</g>`
-    : `<circle cx="16" cy="14" r="5" fill="rgba(255,255,255,0.92)"/>`;
-  // 위험(critical) 마커: 강조 효과 — halo + 3 ripple ring (staggered)
+
+  // 기본 = 동그라미 핀 (16px, 모든 상태 동일)
+  const D = 16, r = D / 2;
+  const pad  = status === "critical" ? 16 : 5;      // ripple 여유
+  const size = D + pad * 2;
+  const c    = size / 2;
+  const sc   = (D * 0.52) / 24;
+  const it   = (c - 12 * sc).toFixed(2);
+  const inner = paths
+    ? `<g transform="translate(${it} ${it}) scale(${sc.toFixed(3)})" stroke="white" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round">${paths}</g>`
+    : `<circle cx="${c}" cy="${c}" r="${(r * 0.38).toFixed(1)}" fill="white"/>`;
   const ripple = status === "critical"
-    ? `<!-- breathing halo (반투명 빨강 후광) -->
-       <circle cx="16" cy="14" r="14" fill="rgba(220,38,38,0.28)">
-         <animate attributeName="r"       values="13;17;13"  dur="1.4s" repeatCount="indefinite"/>
-         <animate attributeName="opacity" values="0.55;0.15;0.55" dur="1.4s" repeatCount="indefinite"/>
-       </circle>
-       <!-- ripple ring 1 -->
-       <circle cx="16" cy="14" r="6" fill="none" stroke="#dc2626" stroke-width="2.6">
-         <animate attributeName="r"       values="7;28"  dur="1.8s" repeatCount="indefinite"/>
-         <animate attributeName="opacity" values="1;0"   dur="1.8s" repeatCount="indefinite"/>
-       </circle>
-       <!-- ripple ring 2 (0.6s 지연) -->
-       <circle cx="16" cy="14" r="6" fill="none" stroke="#dc2626" stroke-width="2.6">
-         <animate attributeName="r"       values="7;28"  dur="1.8s" begin="0.6s" repeatCount="indefinite"/>
-         <animate attributeName="opacity" values="1;0"   dur="1.8s" begin="0.6s" repeatCount="indefinite"/>
-       </circle>
-       <!-- ripple ring 3 (1.2s 지연) -->
-       <circle cx="16" cy="14" r="6" fill="none" stroke="#dc2626" stroke-width="2.6">
-         <animate attributeName="r"       values="7;28"  dur="1.8s" begin="1.2s" repeatCount="indefinite"/>
-         <animate attributeName="opacity" values="1;0"   dur="1.8s" begin="1.2s" repeatCount="indefinite"/>
+    ? `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="#dc2626" stroke-width="2.4">
+         <animate attributeName="r"       values="${r};${r + pad}" dur="1.6s" repeatCount="indefinite"/>
+         <animate attributeName="opacity" values="0.85;0"          dur="1.6s" repeatCount="indefinite"/>
        </circle>`
     : "";
-  // 위험 마커는 빨강 glow drop-shadow 추가 (이중 그림자)
-  const filterCss = status === "critical"
-    ? "overflow:visible;filter:drop-shadow(0 3px 4px rgba(0,0,0,0.35)) drop-shadow(0 0 8px rgba(220,38,38,0.85))"
-    : "overflow:visible;filter:drop-shadow(0 3px 4px rgba(0,0,0,0.35))";
-  const svg = `<svg width="32" height="40" viewBox="0 0 32 40" xmlns="http://www.w3.org/2000/svg" style="${filterCss}">${ripple}<path d="M16 0 C 8 0 2 6 2 14 C 2 24 16 40 16 40 C 16 40 30 24 30 14 C 30 6 24 0 16 0 Z" fill="${color}" stroke="rgba(255,255,255,0.85)" stroke-width="1.5"/>${inner}</svg>`;
-  return L.divIcon({ html: svg, className: "", iconSize: [32, 40], iconAnchor: [16, 40], popupAnchor: [0, -44] });
+  const svg = `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.3))">
+    ${ripple}
+    <circle cx="${c}" cy="${c}" r="${r}" fill="${color}" stroke="white" stroke-width="1"/>
+    ${inner}
+  </svg>`;
+  return L.divIcon({ html: svg, className: "", iconSize: [size, size], iconAnchor: [c, c], popupAnchor: [0, -(r + 4)] });
 }
 
 // 클러스터 색상 — status 별
@@ -167,42 +164,34 @@ function fmtWhen(v) {
   });
 }
 
-// 운영자 우선순위 순서: 단말 ID → 상태 → 위치/구역 → 마지막 측정 → AI 기준 대비/MSE → 상세 보기
+// 마커 팝업 = 장비명만 (상태별 색상). 모든 상세 정보(상태·위치·측정·AI/MSE)는 우측 슬라이드 사이드바에서 (사용자 요청).
 function popupHtml(m) {
   const sd = STATUS_DISPLAY[m.status] || STATUS_DISPLAY.warn;
-  const color = sd.color;
-  const place = [m.zone, m.location].filter(Boolean).join(" · ") || "-";
-  const when = fmtWhen(m.updatedAt);
-  const contrib = (m.contribution || []).slice(0, 2).map((c, i) => {
-    const bg  = i === 0 ? sd.bg : "#f1f5f9";
-    const col = i === 0 ? color : "#64748b";
-    const bd  = i === 0 ? sd.bd : "#e2e8f0";
-    return `<span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:${bg};color:${col};border:1px solid ${bd}">${featureLabel(c.sensor)} ${c.pct}%</span>`;
-  }).join("");
-  return `<div data-popup-node="${m.node}" style="min-width:200px;font-family:system-ui,sans-serif;cursor:pointer" title="클릭하면 단말 상세 사이드바 열림">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-      <span style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;color:${color}">${m.node}</span>
-      <span style="font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:${sd.bg};color:${color};border:1px solid ${sd.bd};white-space:nowrap">${sd.ko}</span>
-    </div>
-    <div style="font-size:11px;color:#64748b;margin-top:5px">${place}</div>
-    ${when ? `<div style="font-size:10px;color:#94a3b8;margin-top:2px">마지막 측정 ${when}</div>` : ""}
-    <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:6px">
-      <div><div style="font-size:9px;color:#888;margin-bottom:1px">AI 기준 대비</div><div style="font-weight:700;font-size:12px;color:${color}">${formatAiRatio(m)}</div></div>
-      <div><div style="font-size:9px;color:#888;margin-bottom:1px">MSE</div><div style="font-weight:700;font-size:12px">${formatMse(m.mse)}</div></div>
-    </div>
-    ${contrib ? `<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">${contrib}</div>` : ""}
-    <div style="margin-top:10px;padding:6px 10px;border-radius:6px;background:#4f46e5;color:#fff;font-size:10px;font-weight:700;text-align:center">상세 보기 →</div>
+  return `<div data-popup-node="${m.node}" style="font-family:system-ui,sans-serif;cursor:pointer;padding:2px 4px;white-space:nowrap" title="클릭하면 단말 상세 사이드바 열림">
+    <span style="font-family:JetBrains Mono,monospace;font-weight:700;font-size:13px;color:${sd.color}">${m.node}</span>
   </div>`;
 }
 
-export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger, boundsRequest }) {
+export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger, boundsRequest, onMapClick, deselectTrigger }) {
   const containerRef    = useRef(null);
   const mapRef          = useRef(null);
   const tileRef         = useRef(null);
   const leafletMarkers  = useRef([]);
   const markerByNode    = useRef(new Map());
+  const selectedNodeRef = useRef(null);   // 현재 선택(확대)된 단말 node
   const mapStyleRef     = useRef(mapStyle);
   const hasInitialFit   = useRef(false);   // markers 첫 로드 시 1회 fitBounds 트리거
+  const onMapClickRef   = useRef(null);
+  onMapClickRef.current = onMapClick;
+
+  // 선택 해제 — 확대된(물방울) 마커를 동그라미로 되돌리고 선택 ref 초기화
+  const deselectMarker = () => {
+    const prev = selectedNodeRef.current;
+    if (!prev) return;
+    const plm = markerByNode.current.get(prev);
+    if (plm && plm._single) plm.setIcon(makeIcon(plm._mStatus, false));
+    selectedNodeRef.current = null;
+  };
 
   // 맵 초기화 (한 번만)
   useEffect(() => {
@@ -218,6 +207,12 @@ export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger, bound
 
     const t = TILES[mapStyleRef.current] || TILES.light;
     tileRef.current = L.tileLayer(t.url, { attribution: t.attribution }).addTo(map);
+
+    // 빈 지도(마커 외) 클릭 → 선택 해제 + 사이드바 닫기 (카카오/네이버식)
+    map.on("click", () => {
+      deselectMarker();
+      if (onMapClickRef.current) onMapClickRef.current();
+    });
 
     return () => {
       map.remove();
@@ -250,13 +245,19 @@ export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger, bound
       const pos  = toLatLng(m);
       const icon = m.kind === "cluster" ? makeClusterIcon(m.count, m.status) : makeIcon(m.status);
       const lm   = L.marker(pos, { icon }).addTo(map);
+      lm._mStatus = m.status;
       if (m.kind === "single") {
-        lm.bindPopup(popupHtml(m));
+        lm._single = true;
         lm.on("click", () => onMarker && onMarker(m));
         if (m.node) markerByNode.current.set(m.node, lm);
       }
       leafletMarkers.current.push(lm);
     });
+    // 선택 상태 유지 (markers 갱신 후 재적용)
+    if (selectedNodeRef.current) {
+      const slm = markerByNode.current.get(selectedNodeRef.current);
+      if (slm && slm._single) slm.setIcon(makeIcon(slm._mStatus, true));
+    }
 
     // markers 가 처음 채워진 시점에 1회 fitBounds — 군산 단말이 다 화면 안에 들어오게
     if (!hasInitialFit.current && markers.length > 0) {
@@ -270,20 +271,34 @@ export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger, bound
     }
   }, [markers, onMarker]);
 
-  // 외부 focus 요청 → flyTo + 매칭 single 마커 popup
+  // 외부 focus 요청 → 오프셋 재중심(우측 사이드바에 안 가리게) + 선택 마커 확대
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !focus || focus.lat == null || focus.lng == null) return;
-    map.flyTo([focus.lat, focus.lng], 15, { duration: 0.8 });
+    const Z = 15;
+    // 핀을 화면 중앙이 아니라 '사이드바를 뺀 좌측 영역' 중앙에 두기 위해 중심을 동쪽으로 오프셋
+    const target = map.unproject(map.project([focus.lat, focus.lng], Z).add([200, 0]), Z);
+    map.flyTo(target, Z, { duration: 0.8 });
     if (focus.node) {
+      // 이전 선택 마커 원복
+      const prev = selectedNodeRef.current;
+      if (prev && prev !== focus.node) {
+        const plm = markerByNode.current.get(prev);
+        if (plm && plm._single) plm.setIcon(makeIcon(plm._mStatus, false));
+      }
       const lm = markerByNode.current.get(focus.node);
       if (lm) {
-        // flyTo 끝난 뒤 팝업 열기 (대략 800ms 후)
-        const id = setTimeout(() => lm.openPopup(), 820);
-        return () => clearTimeout(id);
+        if (lm._single) lm.setIcon(makeIcon(lm._mStatus, true));   // 선택 → 물방울 확대
+        selectedNodeRef.current = focus.node;
       }
     }
   }, [focus]);
+
+  // 외부 deselect 요청 (사이드바 X 버튼 등으로 닫힘) → 선택 마커 원복
+  useEffect(() => {
+    if (!deselectTrigger) return;
+    deselectMarker();
+  }, [deselectTrigger]);
 
   // 외부 fit 요청 → 모든 마커가 보이도록 flyToBounds
   useEffect(() => {
