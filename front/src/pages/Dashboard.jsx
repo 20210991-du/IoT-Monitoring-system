@@ -1,22 +1,40 @@
 import { useState, useEffect, useRef, useMemo, Fragment } from "react";
+import { createPortal } from "react-dom";
 import { Icons } from "../components/Icons.jsx";
 import { MapPanel } from "../components/MapPanel.jsx";
 import { devicesToMarkers } from "../api/client.js";
 import { useWeather } from "../lib/weather.js";
+import { useGuestbook, GuestbookList } from "../components/Guestbook.jsx";
 
 const statusChip = (status) => {
   const map = {
     normal:   { ko: "정상", fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
-    critical: { ko: "위험", fg: "#fff",     bg: "#dc2626",                bd: "#991b1b" },
-    anomaly:  { ko: "위험", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    warn:     { ko: "이상 의심", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
+    critical: { ko: "이상", fg: "#fff",     bg: "#dc2626",                bd: "#991b1b" },
+    anomaly:  { ko: "이상", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
+    warn:     { ko: "관찰", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
     offline:  { ko: "통신 장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
   };
   return map[status] || map.normal;
 };
 
+// 시간 문자열을 한국어 12시간제("오후 7:42")로 정규화.
+//  - 이미 "오전/오후 ..." 형식이면 그대로 통과 (신규 메시지)
+//  - 옛 "HH:MM" / "HH:MM:SS" 24시간제 저장값이면 변환 (기존 localStorage/DB 메시지)
+//  - 파싱 불가하면 원본 반환.
+function to12h(t) {
+  if (!t || typeof t !== "string") return t;
+  if (t.includes("오전") || t.includes("오후")) return t; // 이미 오전/오후
+  const m = t.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return t;
+  const h = parseInt(m[1], 10);
+  if (isNaN(h) || h > 23) return t;
+  const ampm = h < 12 ? "오전" : "오후";
+  let h12 = h % 12; if (h12 === 0) h12 = 12;
+  return `${ampm} ${h12}:${m[2]}`;
+}
+
 function Kpi({ label, value, accent, icon, delta, active, onClick, danger }) {
-  // 위험(danger=true) 카드는 0건이 아닐 때 추가 강조 (bar 펄스 + 빨강 그림자).
+  // '이상'(danger=true) 카드는 0건이 아닐 때 정적 빨강 그림자로만 강조 (깜빡임 펄스는 제거).
   // 모든 카드는 자신의 status accent 색을 숫자에 적용 → 시각적 일관성.
   const alarming = danger && value > 0;
   const valueFg  = value > 0 ? accent : "var(--ink-3)";
@@ -25,10 +43,10 @@ function Kpi({ label, value, accent, icon, delta, active, onClick, danger }) {
     <button
       onClick={onClick}
       style={{
-        position: "relative", flex: 1, minWidth: 0, height: 112, textAlign: "left",
+        position: "relative", flex: 1, minWidth: 0, height: "var(--dash-kpi-row)", textAlign: "left",
         background: "var(--bg-elev)", borderRadius: 16,
         border: `1px solid ${active ? accent : "var(--line)"}`,
-        padding: "18px 20px",
+        padding: "var(--dash-kpi-pad)",
         boxShadow: alarming
           ? `0 0 0 1px rgba(220,38,38,0.18), 0 6px 16px -6px rgba(220,38,38,0.25), var(--shadow-card)`
           : (active ? `0 0 0 3px ${accent}22, var(--shadow-card)` : "var(--shadow-card)"),
@@ -40,7 +58,6 @@ function Kpi({ label, value, accent, icon, delta, active, onClick, danger }) {
         position: "absolute", left: 0, top: 0, bottom: 0,
         width: alarming ? 5 : 4,
         background: accent,
-        animation: alarming ? "danger-bar-pulse 1.4s ease-in-out infinite" : "none",
       }} />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
         <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", letterSpacing: "0.02em" }}>{label}</div>
@@ -64,12 +81,12 @@ function KPIRow({ active, setActive, counts }) {
   const items = [
     { k: "all",      label: "총 장비",   value: counts.all,      accent: "var(--brand)", icon: <Icons.box size={18} /> },
     { k: "normal",   label: "정상",      value: counts.normal,   accent: "var(--ok)",    icon: <Icons.check size={18} /> },
-    { k: "critical", label: "위험",      value: counts.critical, accent: "#dc2626",      icon: <Icons.alert size={18} />, danger: true },
-    { k: "warn",     label: "이상 의심", value: counts.warn,     accent: "var(--warn)",  icon: <Icons.eye size={18} /> },
+    { k: "warn",     label: "관찰",      value: counts.warn,     accent: "var(--warn)",  icon: <Icons.eye size={18} /> },
+    { k: "critical", label: "이상",      value: counts.critical, accent: "#dc2626",      icon: <Icons.alert size={18} />, danger: true },
     { k: "offline",  label: "통신 장애", value: counts.offline,  accent: "var(--ink-3)", icon: <Icons.wifi_off size={18} /> },
   ];
   return (
-    <div style={{ display: "flex", gap: 12 }}>
+    <div style={{ display: "flex", gap: "var(--dash-kpi-gap)", height: "100%" }}>
       {items.map((i) => (
         <Kpi key={i.k} {...i} active={active === i.k} onClick={() => setActive(i.k === active ? null : i.k)} />
       ))}
@@ -77,12 +94,13 @@ function KPIRow({ active, setActive, counts }) {
   );
 }
 
-function PanelHeader({ children, right }) {
+function PanelHeader({ children, right, pad = "16px 20px" }) {
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
       gap: 12,    // children 과 right 가 붙지 않게 (LogPanel 필터 칩 ↔ ← AI 탐지로 간격)
-      padding: "16px 20px", borderBottom: "1px solid var(--line-soft)",
+      flexWrap: "wrap",
+      padding: pad, borderBottom: "1px solid var(--line-soft)",
     }}>
       {children}
       {right}
@@ -103,6 +121,73 @@ function Panel({ children, style, className }) {
     >
       {children}
     </div>
+  );
+}
+
+// 세그먼트 토글 공통 — 활성 칸을 실측(offsetLeft/Width)해 흰 알약을 밀착 + 전환 시 슬라이드(스프링)·젤리(빨려들어갔다 튀어나옴)
+// items: [{ label, dot? }], activeIdx: 현재 칸, onSelect(i, item): 다른 칸 클릭 시
+function SegmentedToggle({ items, activeIdx, onSelect, pad = "4px 12px" }) {
+  const segRefs = useRef([]);
+  const [box, setBox] = useState(null);
+  useEffect(() => {
+    const measure = () => { const el = segRefs.current[activeIdx]; if (el) setBox({ left: el.offsetLeft, width: el.offsetWidth }); };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [activeIdx, items.length]);
+  return (
+    <div style={{
+      position: "relative", display: "inline-flex", flexShrink: 0,
+      padding: 3, borderRadius: 999,
+      background: "var(--bg-sunk)", border: "1px solid var(--line)",
+    }}>
+      {box && (
+        <div aria-hidden style={{
+          position: "absolute", top: 3, bottom: 3, zIndex: 0,
+          left: box.left, width: box.width,
+          transition: "left 440ms cubic-bezier(0.34, 1.56, 0.64, 1), width 440ms cubic-bezier(0.34, 1.56, 0.64, 1)",
+        }}>
+          {/* 안쪽 젤리 — key 변경으로 칸 전환마다 재생(빨려들어갔다 튀어나옴) */}
+          <div key={activeIdx} className="pill-jelly" style={{
+            width: "100%", height: "100%", borderRadius: 999,
+            background: "var(--bg-elev)", boxShadow: "var(--shadow-card)",
+          }} />
+        </div>
+      )}
+      {items.map((it, i) => {
+        const active = i === activeIdx;
+        return (
+          <button key={it.label} ref={(el) => (segRefs.current[i] = el)} type="button" title={it.label}
+            onClick={() => { if (!active && onSelect) onSelect(i, it); }}
+            style={{
+              position: "relative", zIndex: 1,
+              display: "inline-flex", alignItems: "center", gap: 5,
+              padding: pad, borderRadius: 999, border: "none", background: "transparent",
+              color: active ? "var(--ink)" : "var(--ink-3)",
+              fontSize: 12, fontWeight: 700,
+              cursor: active ? "default" : "pointer", whiteSpace: "nowrap",
+              transition: "color 200ms ease",
+            }}
+            onMouseEnter={(e) => { if (!active) e.currentTarget.style.color = "var(--ink)"; }}
+            onMouseLeave={(e) => { if (!active) e.currentTarget.style.color = "var(--ink-3)"; }}
+          >
+            {it.dot && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--ok)", animation: "pulse-dot 1.2s infinite", flexShrink: 0 }} />}
+            {it.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// 전체 장비 현황 요약 ⇄ 시스템 로그 세그먼트 토글 (5/30 — 두 뷰를 한 토글로 스위칭)
+function PanelViewToggle({ logOpen, onToggleLog }) {
+  return (
+    <SegmentedToggle
+      items={[{ label: "장비 현황 요약" }, { label: "시스템 로그" }]}
+      activeIdx={logOpen ? 1 : 0}
+      onSelect={() => { if (onToggleLog) onToggleLog(); }}
+    />
   );
 }
 
@@ -130,7 +215,7 @@ function formatAiRatio(item) {
       ? Number(item.mse) / Number(item.threshold)
       : null;
   if (!Number.isFinite(ratio)) return null;
-  return ratio >= 100 ? `x${Math.round(ratio)}` : `x${ratio.toFixed(2)}`;
+  return `${Math.round(ratio * 100)}%`;
 }
 
 function featureLabel(name) {
@@ -149,7 +234,148 @@ function anomalyLabel(label) {
 
 // (actionFor 제거됨 — AI 탐지 카드 '조치' 줄 미표시, 2026-05-30 요청)
 
-function AnomalyCard({ item, onClick, kind }) {
+// 이두현 3구간 상태 미터 (Threshold Indicator Bar). 정상 0~70% · 관찰 70~100% · 이상 100%↑.
+// 구간을 1/3 폭으로 등분(범주 가독성 우선) + ▲ 현재 포인터. 이상은 무한대라 100~250%를 마지막 칸에 매핑 후 우측 고정.
+function RatioGauge({ ratio, compact = false }) {
+  const r = Number(ratio);
+  if (!Number.isFinite(r)) return null;
+  const pct = Math.round(r * 100);
+  let pos;
+  if (pct <= 70)       pos = (pct / 70) * 33.33;
+  else if (pct <= 100) pos = 33.33 + ((pct - 70) / 30) * 33.33;
+  else                 pos = 66.66 + Math.min((pct - 100) / 150, 1) * 33.34;
+  pos = Math.max(0, Math.min(97, pos));            // 좌측 끝(0)~우측(97). 위치·색은 부모(AiAnalysis)가 카운트업으로 구동.
+  const isN = pct < 70, isW = pct >= 70 && pct < 100, isC = pct >= 100;
+  const col = isC ? "var(--err)" : isW ? "var(--warn)" : "var(--ok)";
+  return (
+    <div style={{ margin: compact ? 0 : "3px 0 8px" }}>
+      {/* 구간 라벨 (현재 구간만 색 강조) */}
+      <div style={{ display: "flex", fontSize: 9, fontWeight: 700, color: "var(--ink-4)" }}>
+        <span style={{ width: "33.33%", textAlign: "center", color: isN ? "var(--ok)" : undefined,   fontWeight: isN ? 800 : 700 }}>정상</span>
+        <span style={{ width: "33.33%", textAlign: "center", color: isW ? "var(--warn)" : undefined, fontWeight: isW ? 800 : 700 }}>관찰</span>
+        <span style={{ width: "33.34%", textAlign: "center", color: isC ? "var(--err)" : undefined,  fontWeight: isC ? 800 : 700 }}>이상</span>
+      </div>
+      {/* 3색 구간 바 + 경계 눈금 */}
+      <div style={{ position: "relative", height: 8, borderRadius: 999, overflow: "hidden", display: "flex", marginTop: 2 }}>
+        <div style={{ width: "33.33%", background: "var(--ok)" }} />
+        <div style={{ width: "33.33%", background: "var(--warn)" }} />
+        <div style={{ width: "33.34%", background: "var(--err)" }} />
+        <div style={{ position: "absolute", left: "33.33%", top: 0, bottom: 0, width: 2, background: "var(--bg-elev)" }} />
+        <div style={{ position: "absolute", left: "66.66%", top: 0, bottom: 0, width: 2, background: "var(--bg-elev)" }} />
+      </div>
+      {/* ▲ 현재 포인터 (compact: % 텍스트 생략 — 정보 줄에 이미 표시) */}
+      <div style={{ position: "relative", height: compact ? 10 : 20 }}>
+        <div style={{ position: "absolute", left: `${pos}%`, transform: "translateX(-50%)", textAlign: "center", whiteSpace: "nowrap" }}>
+          <div style={{ fontSize: 7, color: col, lineHeight: "8px", "--glow": `${(2 + Math.min(pct / 500, 1) * 14).toFixed(1)}px`, animation: "arrow-pulse 1.6s ease-in-out infinite" }}>▲</div>
+          {!compact && <div style={{ fontSize: 9, fontWeight: 800, color: col, lineHeight: "9px", marginTop: 3 }}>{pct}%</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// AI 분석 박스 — 단말 선택 시 0 → 실제값 카운트업. % 숫자·게이지 화살표·구간색이 함께 움직임.
+function AiAnalysis({ item }) {
+  const mse   = item.aiMse ?? item.mse;
+  const th    = item.aiThreshold ?? item.threshold;
+  const ratio = item.aiRatio ?? (th > 0 ? mse / th : null);
+  const targetPct = ratio != null ? Math.round(Number(ratio) * 100) : null;
+
+  const [animPct, setAnimPct] = useState(0);
+  useEffect(() => {
+    if (targetPct == null) { setAnimPct(0); return; }
+    setAnimPct(0);
+    let raf, start = null;
+    const DUR = 1500;                                  // 카운트업 시간 (ms)
+    const ease = (t) => 1 - Math.pow(1 - t, 3);        // ease-out-cubic
+    const step = (ts) => {
+      if (start == null) start = ts;
+      const t = Math.min((ts - start) / DUR, 1);
+      setAnimPct(targetPct * ease(t));
+      if (t < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [targetPct, item.deviceId]);
+
+  if (mse == null) return null;
+  const shown = Math.round(animPct);
+  const col = shown >= 100 ? "var(--err)" : shown >= 70 ? "var(--warn)" : "var(--ok)";
+
+  return (
+    <div style={{ marginBottom: 10, padding: "9px 14px 4px", borderRadius: 10, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", columnGap: 18, rowGap: 4 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-3)" }}>AI 분석</div>
+        <span className="mono" style={{ fontSize: 15, fontWeight: 700, color: col }}>{targetPct != null ? `${shown}%` : "-"}</span>
+      </div>
+      {targetPct != null && (
+        <div style={{ marginTop: 4 }}>
+          <RatioGauge ratio={animPct / 100} compact />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 기여도 칩 한 줄 — 넘치면 호버 시 천천히 왼쪽으로 스크롤(마퀴) 후 복귀.
+//   wrap 으로 2줄 되던 걸 nowrap 고정. JS 로 overflow 양 측정해 정확히 그만큼만 이동.
+function ContribChips({ contribution, color }) {
+  const viewRef = useRef(null);
+  const trackRef = useRef(null);
+  const [shift, setShift] = useState(0);     // 호버 시 이동할 px (overflow 양)
+  const [hover, setHover] = useState(false);
+
+  const measure = () => {
+    const v = viewRef.current, t = trackRef.current;
+    if (!v || !t) return;
+    setShift(Math.max(0, t.scrollWidth - v.clientWidth));
+  };
+  useEffect(() => { measure(); }, [contribution]);
+
+  // 이동 거리에 비례한 시간(천천히): 40px/s, 최소 0.6s, 최대 6s
+  const dur = shift > 0 ? Math.min(6, Math.max(0.6, shift / 40)) : 0;
+
+  return (
+    <div
+      ref={viewRef}
+      onMouseEnter={() => { measure(); setHover(true); }}
+      onMouseLeave={() => setHover(false)}
+      style={{ overflow: "hidden", width: "100%" }}
+    >
+      <div
+        ref={trackRef}
+        style={{
+          display: "flex", gap: 4, width: "max-content",
+          transform: hover && shift > 0 ? `translateX(-${shift}px)` : "translateX(0)",
+          // 호버: 천천히 스크롤(dur, linear) / 떼면: 즉각 복귀(0.1s, ease-out)
+          transition: hover && shift > 0
+            ? `transform ${dur}s linear`
+            : "transform 0.1s ease-out",
+        }}
+      >
+        {contribution.map((c, i) => (
+          <span
+            key={i}
+            style={{
+              fontSize: 9, fontWeight: 600,
+              padding: "2px 6px", borderRadius: 4,
+              background: i === 0
+                ? color.replace("var(--err)", "rgba(239,68,68,0.15)").replace("var(--warn)", "rgba(245,158,11,0.15)")
+                : "var(--bg-elev)",
+              color: i === 0 ? color : "var(--ink-3)",
+              border: `1px solid ${i === 0 ? color : "var(--line)"}`,
+              whiteSpace: "nowrap", flexShrink: 0,
+            }}
+          >
+            {featureLabel(c.sensor)} {c.pct}%
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AnomalyCard({ item, onClick, kind, highlighted = false }) {
   const color = kind === "offline" ? "var(--ink-3)" : kind === "warn" ? "var(--warn)" : "var(--err)";
   // 통신 두절(offline) 카드는 label 이 "통신 두절..." 로 시작 → 우측 박스 = 두절 일/시간
   // 일반 anomaly 는 threshold 대비 배수 표시. 퍼센트는 극단값에서 너무 과장되어 보임.
@@ -163,30 +389,22 @@ function AnomalyCard({ item, onClick, kind }) {
       style={{
         display: "block", width: "100%", textAlign: "left",
         padding: "10px 12px",
-        background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
+        background: highlighted ? "var(--brand-wash)" : "var(--bg-sunk)",
+        border: highlighted ? "1px solid var(--brand-wash)" : "1px solid var(--line-soft)",
         borderRadius: 10, marginBottom: 6,
-        transition: "all 160ms", cursor: "pointer",
+        boxShadow: highlighted ? "0 0 0 3px var(--brand-wash)" : "none",
+        transition: "all 200ms", cursor: "pointer",
       }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 8 }}>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-            <span className="mono" style={{ fontSize: 11, fontWeight: 700, color: "var(--ink)", whiteSpace: "nowrap" }}>{item.node}</span>
-            <span style={{
-              fontSize: 9, color: "var(--ink-4)", fontWeight: 600,
-              padding: "1px 5px", borderRadius: 3,
-              background: "var(--bg-elev)", border: "1px solid var(--line)",
-              flexShrink: 0,
-            }}>
-              {item.zone}
-            </span>
-          </div>
-          <div style={{
-            fontSize: 11, color, marginTop: 3, fontWeight: 600,
-            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+        <div style={{ minWidth: 0, flex: 1, display: "flex", alignItems: "baseline", gap: 8 }}>
+          <span className="mono" style={{ fontSize: 11, fontWeight: 700, color: "var(--ink)", whiteSpace: "nowrap", flexShrink: 0 }}>{item.node}</span>
+          <span style={{
+            fontSize: 11, color, fontWeight: 600,
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0,
           }}>
             {anomalyLabel(item.label)}
-          </div>
+          </span>
         </div>
         <div style={{ textAlign: "right", flexShrink: 0 }}>
           {isOffline ? (
@@ -196,9 +414,7 @@ function AnomalyCard({ item, onClick, kind }) {
             </>
           ) : ratioText != null ? (
             <>
-              <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", letterSpacing: "0.03em", whiteSpace: "nowrap" }}>AI 기준 대비</div>
               <div className="mono" style={{ fontSize: 16, fontWeight: 700, color, lineHeight: 1 }}>{ratioText}</div>
-              <div className="mono" style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>MSE {formatMse(item.mse)}</div>
             </>
           ) : (
             <>
@@ -209,31 +425,16 @@ function AnomalyCard({ item, onClick, kind }) {
         </div>
       </div>
       {item.contribution && item.contribution.length > 0 && (
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-          {item.contribution.map((c, i) => (
-            <span
-              key={i}
-              style={{
-                fontSize: 9, fontWeight: 600,
-                padding: "2px 6px", borderRadius: 4,
-                background: i === 0
-                  ? color.replace("var(--err)", "rgba(239,68,68,0.15)").replace("var(--warn)", "rgba(245,158,11,0.15)")
-                  : "var(--bg-elev)",
-                color: i === 0 ? color : "var(--ink-3)",
-                border: `1px solid ${i === 0 ? color : "var(--line)"}`,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {featureLabel(c.sensor)} {c.pct}%
-            </span>
-          ))}
-        </div>
+        <ContribChips contribution={item.contribution} color={color} />
       )}
     </div>
   );
 }
 
-function AIPanels({ onAnalyze, anomalies, watch, commOutage = [] }) {
+function AIPanels({ onAnalyze, anomalies, watch, commOutage = [], focusNode }) {
+  const listRef  = useRef(null);
+  const cardRefs = useRef({});
+  const [flash, setFlash] = useState(null);
   // 이상 + 관찰 + 통신두절 통합 리스트. 심각도 우선, 같은 그룹은 threshold 대비 배수 내림차순.
   const combined = [
     ...anomalies.map((a) => ({ ...a, _kind: "anomaly" })),
@@ -248,17 +449,32 @@ function AIPanels({ onAnalyze, anomalies, watch, commOutage = [] }) {
     return br - ar;
   });
 
+  // 지도 사이드바에서 단말 선택 시 → 해당 카드로 스크롤 + 잠깐 강조 (목록에 없는 정상 단말이면 무시)
+  useEffect(() => {
+    if (!focusNode) return;
+    const el = cardRefs.current[focusNode];
+    const c  = listRef.current;
+    if (!el || !c) return;
+    const top = el.getBoundingClientRect().top - c.getBoundingClientRect().top + c.scrollTop - 8;
+    c.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+    setFlash(focusNode);
+    const t = setTimeout(() => setFlash(null), 300);
+    return () => clearTimeout(t);
+  }, [focusNode]);
+
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
-      <PanelHeader>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Icons.alert size={16} color="var(--err)" />
-          <div style={{ fontSize: 14, fontWeight: 700 }}>AI 탐지 목록</div>
+      <PanelHeader pad="8px 18px">
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 30 }}>
+          {/* 항목은 하나지만 옆 패널(장비 현황 요약 | 시스템 로그) 세그먼트 토글과 디자인 통일 */}
+          <SegmentedToggle items={[{ label: "AI 탐지 목록" }]} activeIdx={0} />
         </div>
       </PanelHeader>
-      <div className="scroll" style={{ padding: 12, flex: 1, overflowY: "auto", minHeight: 0 }}>
+      <div ref={listRef} className="scroll" style={{ padding: 12, flex: 1, overflowY: "auto", minHeight: 0 }}>
         {combined.map((a) => (
-          <AnomalyCard key={a.node} item={a} kind={a._kind} onClick={onAnalyze} />
+          <div key={a.node} ref={(el) => { cardRefs.current[a.node] = el; }}>
+            <AnomalyCard item={a} kind={a._kind} onClick={onAnalyze} highlighted={flash === a.node} />
+          </div>
         ))}
       </div>
     </Panel>
@@ -314,7 +530,7 @@ function MarkerPopup({ m, onClose }) {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 8 }}>
         <Metric label="MSE" value={formatMse(m.mse)} color={color} />
         <Metric label="구역" value={m.zone} />
-        <Metric label="상태" value={m.status === "critical" ? "위험" : "이상 의심"} color={color} />
+        <Metric label="상태" value={m.status === "critical" ? "이상" : "관찰"} color={color} />
       </div>
       <div style={{
         marginTop: 10, padding: "8px 10px", borderRadius: 8,
@@ -341,9 +557,8 @@ function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrig
       <MapPanel markers={markers} onMarker={onMarker} mapStyle={mapStyle} focus={focus} fitTrigger={fitTrigger} boundsRequest={boundsRequest} onMapClick={onMapClick} deselectTrigger={deselectTrigger} />
 
       {/* Legend */}
-      <div style={{
+      <div className="glass-soft" style={{
         position: "absolute", left: 16, top: 16, zIndex: 1000,
-        background: "var(--bg-elev)", backdropFilter: "blur(10px)",
         border: "1px solid var(--line-soft)", borderRadius: 10,
         padding: "10px 14px",
         boxShadow: "0 8px 24px -10px rgba(0,0,0,0.2)",
@@ -359,10 +574,10 @@ function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrig
             <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#10b981" }} />정상
           </span>
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#991b1b" }} />위험
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--warn)" }} />관찰
           </span>
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--warn)" }} />이상 의심
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#991b1b" }} />이상
           </span>
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#64748b" }} />통신 장애
@@ -370,63 +585,7 @@ function MapPanelWrap({ markers, onMarker, mapStyle, setMapStyle, focus, fitTrig
         </div>
       </div>
 
-      {/* 정상 핀 토글 (우상단) */}
-      <button
-        onClick={() => setShowNormal && setShowNormal(!showNormal)}
-        title={showNormal ? "정상 핀 숨기기" : "정상 핀 표시"}
-        style={{
-          position: "absolute", right: 16, top: 16, zIndex: 1000,
-          display: "flex", alignItems: "center", gap: 8,
-          padding: "7px 14px",
-          borderRadius: 999,
-          background: showNormal ? "rgba(16,185,129,0.12)" : "var(--bg-elev)",
-          border: `1px solid ${showNormal ? "rgba(16,185,129,0.4)" : "var(--line)"}`,
-          boxShadow: "0 8px 24px -10px rgba(0,0,0,0.2)",
-          fontSize: 11, fontWeight: 700,
-          color: showNormal ? "#047857" : "var(--ink-3)",
-          cursor: "pointer",
-          transition: "all 160ms ease",
-          backdropFilter: "blur(10px)",
-        }}
-      >
-        <span style={{
-          width: 8, height: 8, borderRadius: "50%",
-          background: showNormal ? "#10b981" : "var(--ink-4)",
-          transition: "background 160ms ease",
-        }} />
-        정상 {showNormal ? "표시" : "숨김"}
-      </button>
 
-      {/* AI 자동 보기 카운트다운 칩 (지도 상단 중앙) */}
-      {autoKpiSec > 0 && (
-        <button
-          onClick={onCancelAutoKpi}
-          title="클릭 시 즉시 전체 보기로 복귀"
-          style={{
-            position: "absolute", left: "50%", top: 16,
-            transform: "translateX(-50%)",
-            zIndex: 1000,
-            display: "flex", alignItems: "center", gap: 5,
-            padding: "4px 10px",
-            borderRadius: 999,
-            background: "linear-gradient(135deg, #4f46e5, #8b83ff)",
-            color: "#fff", fontSize: 10, fontWeight: 700,
-            border: "none", cursor: "pointer",
-            boxShadow: "0 4px 12px -3px rgba(79,70,229,0.45)",
-            animation: "slide-in-up 200ms ease both",
-            backdropFilter: "blur(10px)",
-          }}
-        >
-          <Icons.sparkle size={10} color="#fff" />
-          <span>AI 자동 보기</span>
-          <span style={{
-            padding: "0 5px", borderRadius: 999,
-            background: "rgba(255,255,255,0.22)",
-            fontFamily: "ui-monospace, Menlo, monospace",
-          }}>{autoKpiSec}s</span>
-          <span style={{ opacity: 0.85 }}>· 해제</span>
-        </button>
-      )}
 
       {/* 지도 스타일 스위처는 Header 설정 아이콘 드롭다운으로 이동 (2026-05-04) */}
     </Panel>
@@ -454,7 +613,7 @@ function MiniTable({ data, onRowClick }) {
                   key={h}
                   style={{
                     textAlign: align,
-                    padding: "14px 16px",
+                    padding: "8px 16px",
                     fontWeight: 700, fontSize: 12, color: "var(--ink-3)",
                     borderBottom: "1px solid var(--line)",
                     background: "var(--bg-elev)",
@@ -491,29 +650,28 @@ function MiniTable({ data, onRowClick }) {
                 }}
               >
                 <td className="mono" style={{
-                  padding: "14px 16px", fontWeight: 700,
+                  padding: "11px 16px", fontWeight: 700,
                   color: "var(--ink)", letterSpacing: "-0.01em",
                 }}>
                   {r.facilityId}
                 </td>
                 <td className="mono" style={{
-                  padding: "14px 16px", color: "var(--ink-2)",
+                  padding: "11px 16px", color: "var(--ink-2)",
                   fontWeight: 500,
                 }}>
                   {r.deviceId}
                 </td>
                 <td style={{
-                  padding: "14px 16px", color: "var(--ink-2)",
+                  padding: "11px 16px", color: "var(--ink-2)",
                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                 }}>
                   {r.location}
                 </td>
-                <td style={{ padding: "14px 16px", textAlign: "center" }}>
+                <td style={{ padding: "11px 16px", textAlign: "center" }}>
+                  {/* 필 박스 제거 — 글자색만. KPI 카드 색과 일치 (정상=var(--ok) · 관찰=var(--warn) · 이상=#dc2626) */}
                   <span style={{
-                    display: "inline-block", padding: "4px 10px", borderRadius: 999,
-                    fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
-                    background: c.bg, color: c.fg, border: `1px solid ${c.bd}`,
-                    minWidth: 48,
+                    fontSize: 13, fontWeight: 700, whiteSpace: "nowrap",
+                    color: ({ "정상": "var(--ok)", "관찰": "var(--warn)", "이상": "#dc2626" })[c.ko] || (c.fg === "#fff" ? c.bg : c.fg),
                   }}>
                     {c.ko}
                   </span>
@@ -531,8 +689,8 @@ function MiniTable({ data, onRowClick }) {
 const TABLE_HEADER_BY_KPI = {
   all:      { ko: "전체",      bar: "var(--brand)", chipBg: "var(--brand-wash)",         chipFg: "var(--brand)" },
   normal:   { ko: "정상",      bar: "#10b981",       chipBg: "rgba(16,185,129,0.12)",     chipFg: "#047857"      },
-  critical: { ko: "위험",      bar: "#dc2626",       chipBg: "rgba(220,38,38,0.12)",      chipFg: "#991b1b"      },
-  warn:     { ko: "이상 의심", bar: "var(--warn)",   chipBg: "rgba(245,158,11,0.14)",     chipFg: "#b45309"      },
+  critical: { ko: "이상",      bar: "#dc2626",       chipBg: "rgba(220,38,38,0.12)",      chipFg: "#991b1b"      },
+  warn:     { ko: "관찰",      bar: "var(--warn)",   chipBg: "rgba(245,158,11,0.14)",     chipFg: "#b45309"      },
   offline:  { ko: "통신 장애", bar: "#64748b",       chipBg: "rgba(100,116,139,0.14)",    chipFg: "#475569"      },
 };
 
@@ -549,51 +707,15 @@ function TableSummary({ data, onRowClick, activeKpi, logOpen, onToggleLog }) {
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <PanelHeader
+        pad="8px 18px"
         right={
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {/* 시스템 로그 ⇄ AI 탐지 목록 토글 (5/30 AI탐지 헤더에서 여기로 이동) */}
-            {onToggleLog && (
-              <button
-                onClick={onToggleLog}
-                title={logOpen ? "AI 탐지 목록으로 돌아가기 (ESC)" : "실시간 시스템 로그로 전환 (ESC 로 돌아오기)"}
-                style={{
-                  display: "inline-flex", alignItems: "center", gap: 5,
-                  padding: "6px 11px", borderRadius: 999,
-                  background: logOpen ? "var(--brand)" : "transparent",
-                  border: `1px solid ${logOpen ? "var(--brand)" : "var(--line)"}`,
-                  color: logOpen ? "#fff" : "var(--ink-3)",
-                  fontSize: 10, fontWeight: 700,
-                  cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
-                  transition: "all 140ms ease",
-                }}
-                onMouseEnter={(e) => {
-                  if (logOpen) return;
-                  e.currentTarget.style.borderColor = "var(--brand)";
-                  e.currentTarget.style.color       = "var(--brand)";
-                }}
-                onMouseLeave={(e) => {
-                  if (logOpen) return;
-                  e.currentTarget.style.borderColor = "var(--line)";
-                  e.currentTarget.style.color       = "var(--ink-3)";
-                }}
-              >
-                {logOpen ? "← AI 탐지 목록" : (
-                  <>
-                    <span style={{
-                      width: 6, height: 6, borderRadius: "50%",
-                      background: "var(--ok)",
-                      animation: "pulse-dot 1.2s infinite",
-                    }} />
-                    시스템 로그
-                  </>
-                )}
-              </button>
-            )}
+            {/* 시스템 로그 토글은 헤더 좌측 세그먼트 컨트롤(PanelViewToggle)로 이동 (5/30) */}
             <div style={{
               display: "flex", alignItems: "center", gap: 8,
-              padding: "6px 12px", borderRadius: 10,
+              padding: "5px 12px", borderRadius: 10,
               background: "var(--bg-sunk)", border: "1px solid var(--line)",
-              width: 240,
+              width: "clamp(160px, 16vw, 240px)",
             }}>
               <Icons.search size={13} color="var(--ink-4)" />
               <input
@@ -610,13 +732,9 @@ function TableSummary({ data, onRowClick, activeKpi, logOpen, onToggleLog }) {
         }
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{
-            width: 4, height: 18, background: meta.bar, borderRadius: 2,
-            transition: "background 200ms ease",
-          }} />
-          <div style={{ fontSize: 14, fontWeight: 700 }}>
-            {meta.ko} 장비 현황 요약
-          </div>
+          {onToggleLog
+            ? <PanelViewToggle logOpen={logOpen} onToggleLog={onToggleLog} />
+            : <div style={{ fontSize: 14, fontWeight: 700 }}>{meta.ko} 장비 현황 요약</div>}
           <span style={{
             fontSize: 10, fontWeight: 700, padding: "2px 8px",
             background: meta.chipBg, color: meta.chipFg, borderRadius: 999,
@@ -642,19 +760,12 @@ function LogLine({ line }) {
     auth: "var(--ink-3)",
     warn: "var(--warn)",
   };
-  const bg =
-    line.kind === "alert" ? "rgba(239,68,68,0.08)" :
-    line.kind === "warn"  ? "rgba(245,158,11,0.08)" : "transparent";
-  const border =
-    line.kind === "alert" ? "1px solid rgba(239,68,68,0.3)" :
-    line.kind === "warn"  ? "1px solid rgba(245,158,11,0.3)" : "1px solid transparent";
   return (
     <div
       className="mono"
       style={{
-        padding: "4px 10px", borderRadius: 6, marginBottom: 3,
+        padding: "4px 10px", marginBottom: 3,
         fontSize: 11, display: "flex", gap: 10, alignItems: "center",
-        background: bg, border: border,
         animation: "slide-in-up 220ms ease",
       }}
     >
@@ -681,7 +792,7 @@ function LogLine({ line }) {
 const LOG_KINDS = [
   { k: "ok",    label: "정상",  color: "var(--ok)"    },
   { k: "ai",    label: "AI",   color: "var(--brand)" },
-  { k: "alert", label: "위험",  color: "var(--err)"   },
+  { k: "alert", label: "이상",  color: "var(--err)"   },
   { k: "warn",  label: "경고",  color: "var(--warn)"  },
 ];
 
@@ -694,14 +805,22 @@ function LogPanel({ lines, onToggleLog }) {
     for (const l of lines) { if (c[l.kind] !== undefined) c[l.kind]++; }
     return c;
   }, [lines]);
-  // kind + search 필터 동시 적용
+  // kind + search 필터 + 전역 시간정렬(최신이 위)
+  // lines 는 외부 가상이벤트와 polling 데이터가 append 된 순서라 정렬이 안 됨 →
+  // 표시 직전 ts 내림차순으로 통합 정렬해야 가상이벤트가 실 DB 로그를 가리지 않음.
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return lines.filter((l) => {
-      if (hiddenKinds.has(l.kind)) return false;
-      if (q && !(l.text || "").toLowerCase().includes(q)) return false;
-      return true;
-    });
+    return lines
+      .filter((l) => {
+        if (hiddenKinds.has(l.kind)) return false;
+        if (q && !(l.text || "").toLowerCase().includes(q)) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const ta = a.ts ? new Date(a.ts).getTime() : 0;
+        const tb = b.ts ? new Date(b.ts).getTime() : 0;
+        return tb - ta;   // 최신 → 과거
+      });
   }, [lines, query, hiddenKinds]);
   const toggleKind = (k) => {
     setHiddenKinds((prev) => {
@@ -716,70 +835,34 @@ function LogPanel({ lines, onToggleLog }) {
       {/* PanelHeader — 제목·카운트 | (우측) 검색창 + ← 장비 현황 요약
           검색창을 헤더로 올려 로그 목록 표시 공간 확보 (5/30 사용자 요청) */}
       <PanelHeader
+        pad="8px 18px"
         right={
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            {/* 종류 필터 칩 제거 (5/30 사용자 요청) — 검색창만 유지 */}
             <div style={{
-              display: "flex", alignItems: "center", gap: 6,
-              padding: "6px 10px", borderRadius: 10,
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "5px 12px", borderRadius: 10,
               background: "var(--bg-sunk)", border: "1px solid var(--line)",
-              width: 220,
+              width: "clamp(150px, 14vw, 200px)",
             }}>
-              <span style={{ color: "var(--ink-4)", fontSize: 12 }}>🔍</span>
+              <Icons.search size={13} color="var(--ink-4)" />
               <input
-                type="text"
+                placeholder="로그 검색..."
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="검색 (예: TB24-250429, ALERT)"
                 style={{
-                  flex: 1, minWidth: 0,
-                  background: "transparent", border: "none", outline: "none",
-                  color: "var(--ink)", fontSize: 12,
-                  fontFamily: "JetBrains Mono, ui-monospace, monospace",
+                  flex: 1, border: "none", outline: "none", background: "transparent",
+                  fontSize: 12,
                 }}
               />
-              {query && (
-                <button
-                  onClick={() => setQuery("")}
-                  title="검색 초기화"
-                  style={{
-                    background: "transparent", border: "none",
-                    color: "var(--ink-4)", cursor: "pointer",
-                    fontSize: 14, lineHeight: 1, padding: 0,
-                  }}
-                >×</button>
-              )}
             </div>
-            {onToggleLog && (
-              <button
-                onClick={onToggleLog}
-                title="전체 장비 현황 요약으로 돌아가기 (ESC)"
-                style={{
-                  display: "inline-flex", alignItems: "center", gap: 5,
-                  padding: "6px 11px", borderRadius: 999,
-                  background: "var(--brand)",
-                  border: "1px solid var(--brand)",
-                  color: "#fff",
-                  fontSize: 10, fontWeight: 700,
-                  cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
-                }}
-              >
-                ← 장비 현황 요약
-              </button>
-            )}
+            {/* ← 장비 현황 요약 버튼은 헤더 좌측 세그먼트 토글로 이동 (5/30) */}
           </div>
         }
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
-          {/* 좌: 제목 + 카운트 */}
-          <span style={{
-            width: 8, height: 8, borderRadius: "50%", background: "var(--ok)",
-            animation: "pulse-dot 1.2s infinite", flexShrink: 0,
-          }} />
-          <div style={{ fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}>실시간 시스템 로그</div>
-          <span className="mono" style={{ fontSize: 10, color: "var(--ink-3)", whiteSpace: "nowrap" }}>
-            {query ? `${filtered.length}/${lines.length}` : `${lines.length}`}
-          </span>
-          {/* 상태 필터 배지(정상/AI/위험/경고 칩 + 전체표시)는 지저분해서 제거 (사용자 요청) */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
+          <PanelViewToggle logOpen={true} onToggleLog={onToggleLog} />
+          {/* 시스템 로그 개수 칩 제거 (사용자 요청) — 합성 로그 줄 수라 정보 가치 낮음 */}
         </div>
       </PanelHeader>
       {/* 검색창은 헤더로 이동 (5/30) — 별도 검색 행 제거하여 로그 목록 공간 확보 */}
@@ -845,7 +928,7 @@ function LogPanel({ lines, onToggleLog }) {
 //   현재 LLM 미연동 — 키워드/노드 ID 매칭 기반 응답.
 //   실제 백엔드 연결 시 mockAIResponse → fetch("/api/chat") 으로 교체 예정.
 
-const STATUS_KO_BY_KEY = { normal: "정상", critical: "위험", warn: "이상 의심", offline: "통신 장애" };
+const STATUS_KO_BY_KEY = { normal: "정상", critical: "이상", warn: "관찰", offline: "통신 장애" };
 
 function mockAIResponse(input, ctx = {}) {
   const equipment = ctx.equipment || [];
@@ -869,16 +952,16 @@ function mockAIResponse(input, ctx = {}) {
     return lines.join("\n");
   }
 
-  // 2) 위험/이상 의심 키워드 → 현재 목록
-  if (/위험|critical/.test(lower)) {
+  // 2) 이상/관찰 키워드 → 현재 목록 (이두현 모델 등급)
+  if (/위험|이상|critical/.test(lower)) {
     const c = equipment.filter((e) => e.status === "critical");
-    if (c.length === 0) return "현재 위험 단계 장비가 없습니다.";
-    return `🚨 위험 ${c.length}건:\n${c.map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
+    if (c.length === 0) return "현재 이상 단계 장비가 없습니다.";
+    return `🚨 이상 ${c.length}건:\n${c.map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
   }
-  if (/이상|의심|관찰|anomaly|watch|warn/.test(lower)) {
+  if (/관찰|의심|anomaly|watch|warn/.test(lower)) {
     const w = equipment.filter((e) => e.status === "warn");
-    if (w.length === 0) return "현재 이상 의심 장비가 없습니다.";
-    return `⚠️ 이상 의심 ${w.length}건:\n${w.slice(0, 6).map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
+    if (w.length === 0) return "현재 관찰 단계 장비가 없습니다.";
+    return `⚠️ 관찰 ${w.length}건:\n${w.slice(0, 6).map((e) => `• ${e.deviceId} · ${e.zone} — ${e.label}`).join("\n")}`;
   }
   if (/장애|offline|통신/.test(lower)) {
     const o = equipment.filter((e) => e.status === "offline");
@@ -888,7 +971,7 @@ function mockAIResponse(input, ctx = {}) {
   if (/요약|상태|summary|현황/.test(lower)) {
     const c = { critical: 0, warn: 0, normal: 0, offline: 0 };
     equipment.forEach((e) => { if (c[e.status] !== undefined) c[e.status]++; });
-    return `📊 전체 ${equipment.length}대\n• 위험 ${c.critical}대 · 이상 의심 ${c.warn}대\n• 통신장애 ${c.offline}대 · 정상 ${c.normal}대`;
+    return `📊 전체 ${equipment.length}대\n• 이상 ${c.critical}대 · 관찰 ${c.warn}대\n• 통신장애 ${c.offline}대 · 정상 ${c.normal}대`;
   }
 
   // 3) 도메인 용어 설명
@@ -910,7 +993,7 @@ function mockAIResponse(input, ctx = {}) {
 
   // 4) 도움말
   if (/도움|help|\?$|메뉴/.test(lower)) {
-    return "사용 예시:\n• 'TB24-250448' 특정 장비 조회\n• '위험' / '이상 의심' / '장애' 현재 목록\n• '요약' 전체 상태\n• '방식전위' / '희생전류' / 'AC유입' 도메인 설명";
+    return "사용 예시:\n• 'TB24-250448' 특정 장비 조회\n• '이상' / '관찰' / '장애' 현재 목록\n• '요약' 전체 상태\n• '방식전위' / '희생전류' / 'AC유입' 도메인 설명";
   }
 
   // 5) fallback
@@ -992,7 +1075,7 @@ async function callLLM(message, context, history) {
 //   onSession({sessionId})           — 서버가 부여한 chat_sessions.id
 //   onDone(payload)                  — 종료 콜백
 //   onError(err)                     — 에러
-async function callLLMStream(message, context, history, sessionId, demoMode, model, { onDelta, onTool, onSession, onDone, onError, signal }) {
+async function callLLMStream(message, context, history, sessionId, demoMode, model, { onDelta, onTool, onSession, onDone, onError, signal, webSearch, clientId }) {
   let acc = "";
   // 무응답 가드 — STALL_MS 동안 새 데이터가 한 조각도 안 오면 abort.
   //   Ollama 첫 토큰 스톨·도구 지연·터널(SSE) 끊김 등으로 '생성 중' 인디케이터가
@@ -1000,7 +1083,7 @@ async function callLLMStream(message, context, history, sessionId, demoMode, mod
   //   정상 응답(도구 라운드 포함)은 끊기지 않는다.
   const ctrl = new AbortController();
   // 27b 는 32GB 에서 prefill/첫토큰이 느려 60s 를 넘길 때가 있음 → mock 폴백 방지 위해 더 길게 (서버 타임아웃 180s 안쪽)
-  const STALL_MS = model === "qwen3.5:27b" ? 150_000 : 60_000;
+  const STALL_MS = model === "qwen3.5:27b" ? 1_200_000 : (model && model.startsWith("gpt-")) ? 120_000 : 60_000;
   let stallTimer = null;
   const armStall = () => {
     if (stallTimer) clearTimeout(stallTimer);
@@ -1015,7 +1098,7 @@ async function callLLMStream(message, context, history, sessionId, demoMode, mod
     const res = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, context, history, sessionId: sessionId || undefined, demo: !!demoMode, model }),
+      body: JSON.stringify({ message, context, history, sessionId: sessionId || undefined, demo: !!demoMode, model, webSearch: !!webSearch, clientId: clientId || undefined }),
       signal: ctrl.signal,
     });
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -1076,8 +1159,8 @@ async function callLLMStream(message, context, history, sessionId, demoMode, mod
 function detectKpiFromReply(text) {
   if (!text) return null;
   const flags = {
-    critical: /위험/.test(text),
-    warn:     /이상\s*의심|이상의심/.test(text),
+    critical: /위험|이상/.test(text),
+    warn:     /관찰/.test(text),
     offline:  /통신\s*장애|통신\s*두절/.test(text),
     normal:   /정상\b|정상\s/.test(text),
   };
@@ -1089,6 +1172,7 @@ function detectKpiFromReply(text) {
 const CHAT_STORAGE_KEY = "siwon.chat.history";
 const CHAT_SESSION_KEY = "siwon.chat.session_id";
 const CHAT_LAST_ACTIVE_KEY = "siwon.chat.last_active_date";   // 자정 자동 새 세션용 (YYYY-MM-DD)
+const SHARED_LOGIN_IDS = new Set(["siwon"]);   // 공유/공개 계정 — 계정 동기화 제외(브라우저-로컬 유지). 백엔드 SHARED_ACCOUNTS 와 일치
 const CHAT_MAX_KEEP = 60; // 최근 60개 메시지만 보관
 
 // 로컬(브라우저 timezone) YYYY-MM-DD 키
@@ -1098,29 +1182,9 @@ function localDateKey(d) {
 }
 function todayKey() { return localDateKey(new Date()); }
 
-// 세션 목록을 updated_at 기준 5 카테고리로 분류 (ChatGPT 사이드바 패턴)
-//   오늘 / 어제 / 이번 주 / 이번 달 / 이전
-function groupSessionsByDate(sessions) {
-  const now = new Date();
-  const todayStart     = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const yesterdayStart = todayStart - 86_400_000;
-  const weekStart      = todayStart - 6 * 86_400_000;   // 오늘 포함 최근 7일
-  const monthStart     = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-  const groups = { "오늘": [], "어제": [], "이번 주": [], "이번 달": [], "이전": [] };
-  for (const s of sessions) {
-    const t = s.updated_at ? new Date(s.updated_at).getTime() : 0;
-    if      (t >= todayStart)     groups["오늘"].push(s);
-    else if (t >= yesterdayStart) groups["어제"].push(s);
-    else if (t >= weekStart)      groups["이번 주"].push(s);
-    else if (t >= monthStart)     groups["이번 달"].push(s);
-    else                          groups["이전"].push(s);
-  }
-  return groups;
-}
-
-function loadChatHistory() {
+function loadChatHistory(key = CHAT_STORAGE_KEY) {
   try {
-    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return null;
     const arr = JSON.parse(raw);
     if (!Array.isArray(arr) || arr.length === 0) return null;
@@ -1129,10 +1193,10 @@ function loadChatHistory() {
   } catch { return null; }
 }
 
-function saveChatHistory(messages) {
+function saveChatHistory(messages, key = CHAT_STORAGE_KEY) {
   try {
     const trimmed = messages.slice(-CHAT_MAX_KEEP);
-    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(trimmed));
+    localStorage.setItem(key, JSON.stringify(trimmed));
   } catch { /* ignore quota */ }
 }
 
@@ -1153,28 +1217,131 @@ async function fetchChatSession(id) {
     return d.ok ? d : null;
   } catch { return null; }
 }
+// 세션 제목 + 메시지 본문 통합 검색. 실패 시 null (호출부에서 제목 폴백 유지)
+async function searchChatSessions(q) {
+  try {
+    const r = await fetch(`/api/chat/search?q=${encodeURIComponent(q)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    return d.ok ? (d.sessions || []) : null;
+  } catch { return null; }
+}
+// 매치 주변(±radius)만 잘라 스니펫 생성 + 양끝 생략부호
+function snippetAround(text, term, radius = 42) {
+  if (!text) return "";
+  const i = text.toLowerCase().indexOf(term.toLowerCase());
+  if (i < 0) return text.length > radius * 2 ? text.slice(0, radius * 2) + "…" : text;
+  const start = Math.max(0, i - radius);
+  const end = Math.min(text.length, i + term.length + radius);
+  return (start > 0 ? "…" : "") + text.slice(start, end) + (end < text.length ? "…" : "");
+}
+// 매치어를 <mark> 로 감싼 노드 배열 (대소문자 무시)
+function highlightTerm(text, term) {
+  if (!term || !text) return text;
+  const out = [];
+  const lc = text.toLowerCase(), t = term.toLowerCase();
+  let from = 0, idx;
+  while ((idx = lc.indexOf(t, from)) !== -1) {
+    if (idx > from) out.push(text.slice(from, idx));
+    out.push(<mark key={idx} style={{ background: "var(--brand-wash)", color: "var(--brand)", padding: "0 1px", borderRadius: 3 }}>{text.slice(idx, idx + term.length)}</mark>);
+    from = idx + term.length;
+  }
+  if (from < text.length) out.push(text.slice(from));
+  return out;
+}
 async function deleteChatSession(id) {
   try {
     const r = await fetch(`/api/chat/sessions/${id}`, { method: "DELETE" });
     return r.ok;
   } catch { return false; }
 }
+async function renameChatSession(id, title) {
+  try {
+    const r = await fetch(`/api/chat/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    return r.ok;
+  } catch { return false; }
+}
+async function pinChatSession(id, pinned) {
+  try {
+    const r = await fetch(`/api/chat/sessions/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned: pinned ? 1 : 0 }),
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
+// 도구 호출 칩 — 비슷한 도구를 카테고리로 묶어 "{카테고리} 도구 호출" 로 표시
+const TOOL_CATEGORY = {
+  list_devices: "단말", get_device_detail: "단말", get_device_history: "단말",
+  get_aggregate: "단말", find_devices_by_value: "단말", get_zone_summary: "단말",
+  compare_devices: "단말", get_recent_changes: "단말", get_summary: "단말",
+  search_devices_by_location: "위치", geocode_location: "위치", find_devices_near: "위치",
+  get_alarms: "알람", get_maintenance_log: "알람",
+  get_predictions: "AI", get_ai_model_info: "AI",
+  execute_safe_sql: "DB", describe_table: "DB",
+  get_weather_forecast: "날씨", get_weather_history: "날씨",
+};
 
 const CHAT_MODELS = [
-  { value: "qwen3.5:9b",  label: "빠름",   hint: "응답 가장 빠름" },
-  { value: "qwen3:14b",   label: "균형",   hint: "속도 중간" },
-  { value: "qwen3.5:27b", label: "고품질", hint: "매우 느림 · 첫 응답 수십초" },
+  { value: "qwen3.5:9b",  label: "Qwen 빠름",   hint: "속도 빠름" },
+  { value: "qwen3:14b",   label: "Qwen 균형",   hint: "속도 중간" },
+  { value: "qwen3.5:27b", label: "Qwen 고품질", hint: "매우 느림" },
+  { value: "gpt-4o-mini", label: "GPT 빠름",   hint: "외부 · 빠름" },
+  { value: "gpt-5",       label: "GPT 고품질", hint: "외부 · 고품질" },
+  { value: "gpt-5.5",     label: "GPT 최고품질", hint: "외부 · 최고품질" },
 ];
 
-function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demoMode = false, autoMessage = null, onAutoConsumed }) {
-  const initialTime = (() => { const d = new Date(); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })();
-  const greeting = { role: "ai", text: "안녕하세요. AI 챗봇입니다.\n노드 ID 또는 키워드(위험/이상/방식전위 등)로 질문해 주세요.", time: initialTime };
-  const [messages, setMessages] = useState(() => loadChatHistory() || [greeting]);
+// 첨부 이미지 → 다운스케일(최대 변 1200px) PNG data URL. 용량 억제.
+function imageFileToDataURL(file, maxPx = 1200) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        if (Math.max(w, h) > maxPx) { const s = maxPx / Math.max(w, h); w = Math.round(w * s); h = Math.round(h * s); }
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        cv.getContext("2d").drawImage(img, 0, 0, w, h);
+        try { resolve(cv.toDataURL("image/png")); } catch (e) { reject(e); }
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demoMode = false, autoMessage = null, onAutoConsumed, user = null }) {
+  // 계정 스코프 — 로그인 개인 계정만 서버 동기화+WS; 게스트(siwon)/익명은 브라우저-로컬(현행)
+  const accountScoped = !!user && !SHARED_LOGIN_IDS.has(user.id);
+  const histKey = accountScoped ? `${CHAT_STORAGE_KEY}::${user.id}` : CHAT_STORAGE_KEY;
+  const sessKey = accountScoped ? `${CHAT_SESSION_KEY}::${user.id}` : CHAT_SESSION_KEY;
+  const initialTime = (() => { const d = new Date(); return d.toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul", hour: "numeric", minute: "2-digit" }); })();
+  const greeting = { role: "ai", text: "안녕하세요. AI 관제 도우미입니다.\n노드 ID 또는 키워드(이상/관찰/방식전위 등)로 질문해 주세요.", time: initialTime, dateKey: todayKey() };
+  const [messages, setMessages] = useState(() => loadChatHistory(histKey) || [greeting]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [llmActive, setLlmActive] = useState(null); // null=미확인, true=LLM, false=mock
+  // 관리자 문의방 (별도 모드 — AI 지원 답변 + 관리자 전달)
+  const [inquiryMode, setInquiryMode] = useState(false);
+  const [inquiryKind, setInquiryKind] = useState("question");
+  const [inquiryChannel, setInquiryChannel] = useState("admin");   // admin(관리자 문의) | developer(개발자 문의·포폴)
+  const [inquiryMsgs, setInquiryMsgs] = useState([]);
+  const [inquirySending, setInquirySending] = useState(false);
+  const [inquiryImages, setInquiryImages] = useState([]);   // 문의 첨부 이미지 배열 (최대 5장, data URL)
+  const [replyToast, setReplyToast] = useState(null);       // 방 안 볼 때 답변 도착 토스트 { target }
+  const [flashQid, setFlashQid] = useState(null);           // 답변 클릭 시 강조할 질문 id
+  const [replyTarget, setReplyTarget] = useState(null);     // 카톡식 답장 대상 { text, role }
   const [sessionId, setSessionId] = useState(() => {
-    try { const v = localStorage.getItem(CHAT_SESSION_KEY); return v ? Number(v) : null; } catch { return null; }
+    try { const v = localStorage.getItem(sessKey); return v ? Number(v) : null; } catch { return null; }
   });
   const [lastActiveDate, setLastActiveDate] = useState(() => {
     try { return localStorage.getItem(CHAT_LAST_ACTIVE_KEY) || null; } catch { return null; }
@@ -1187,9 +1354,29 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
   });
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const modelBtnRef = useRef(null);
+  const [webSearch, setWebSearch] = useState(false);   // 🌐 웹검색 토글 (DuckDuckGo)
+  const [promptsOpen, setPromptsOpen] = useState(false); // + 추천문구 팝업
+  const [promptIndex, setPromptIndex] = useState(0);     // 추천 질문 목록 하이라이트 (↑/↓)
+  const [cmdPrompt, setCmdPrompt] = useState(null);      // 선택한 추천 질문(스킬) 객체 {title,prompt,icon,arg}. 칩으로 표시, 입력칸엔 인자를 받아 전송 시 결합
+  const taRef = useRef(null);                            // textarea 자동높이
   const abortRef = useRef(null);   // 진행 중 스트리밍 중지용 AbortController
   const curModel = CHAT_MODELS.find((m) => m.value === selectedModel) || CHAT_MODELS[0];
+  const provider = curModel.value.startsWith("gpt-") ? "gpt" : "local";   // 로컬 LLM / GPT 그룹
+  const visibleModels = CHAT_MODELS.filter((m) => (m.value.startsWith("gpt-") ? "gpt" : "local") === provider);
+  const switchProvider = (p) => {
+    if (p === provider || sending) return;
+    let next = null;
+    try { next = localStorage.getItem(p === "gpt" ? "siwon.chat.gptModel" : "siwon.chat.localModel"); } catch {}
+    if (!next || !CHAT_MODELS.some((m) => m.value === next)) next = p === "gpt" ? "gpt-4o-mini" : "qwen3:14b";
+    setSelectedModel(next);
+    try { localStorage.setItem("siwon.chat.model", next); } catch {}
+    // 메뉴는 열어둔다 — 전환된 그룹의 모델을 바로 고를 수 있게
+  };
   const listRef = useRef(null);
+  const stickBottomRef = useRef(true);   // 맨아래 고정 상태인지 — onScroll 로 추적, 전송/스트리밍 추적용
+  const [guestbookOpen, setGuestbookOpen] = useState(false);   // 단톡방(방명록) 모드 — 토글 4번째 칸
+  const gb = useGuestbook(guestbookOpen);
+  const isGbAdmin = !!user && (user.role === "admin" || user.role === "superadmin");
   useEffect(() => {
     if (!modelMenuOpen) return;
     const onDoc = (e) => { if (modelBtnRef.current && !modelBtnRef.current.contains(e.target)) setModelMenuOpen(false); };
@@ -1198,6 +1385,12 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     document.addEventListener("keydown", onEsc);
     return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onEsc); };
   }, [modelMenuOpen]);
+
+  // 입력이 비면 textarea 높이 리셋 (전송 후 여러 줄 흔적 제거)
+  useEffect(() => { const t = taRef.current; if (t && !input) t.style.height = "auto"; }, [input]);
+
+  // 답변 토스트 5초 후 자동 사라짐
+  useEffect(() => { if (!replyToast) return; const t = setTimeout(() => setReplyToast(null), 5000); return () => clearTimeout(t); }, [replyToast]);
 
   // 생성 중 실시간 표시 (경과초 · 토큰) — sending 동안 300ms 틱
   const [genTokens, setGenTokens] = useState(0);
@@ -1254,7 +1447,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
       return {
         role: m.role,
         text: m.text,
-        time: `${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}`,
+        time: t.toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul", hour: "numeric", minute: "2-digit" }),
         dateKey: localDateKey(t),    // C1. day-divider 용
       };
     });
@@ -1265,10 +1458,90 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     setLlmActive(true);   // 영구 저장된 세션은 LLM 기록
   };
 
+  // 로그인 개인 계정의 서버 대화 로드 (마운트/로그인/WS 재연결 시). loadSession 매핑 재사용.
+  const loadCurrentServerSession = async () => {
+    if (sending) return;
+    try {
+      const r = await fetch("/api/chat/sessions/current", { credentials: "same-origin" });
+      const d = await r.json();
+      if (!d?.ok || !d.session || !(d.messages || []).length) return;   // 없으면 greeting 유지
+      const msgs = d.messages.map((m) => {
+        const t = m.createdAt ? new Date(m.createdAt) : new Date();
+        return { role: m.role, text: m.text, time: t.toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul", hour: "numeric", minute: "2-digit" }), dateKey: localDateKey(t) };
+      });
+      setMessages(msgs);
+      setSessionId(d.session.id);
+      try { localStorage.setItem(sessKey, String(d.session.id)); } catch {}
+      setLlmActive(true);
+    } catch {}
+  };
+
+  // WS 핸들러 클로저가 항상 현재값을 보도록 ref 동기화
+  const connIdRef = useRef(null);
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+  const inquiryModeRef = useRef(inquiryMode);
+  inquiryModeRef.current = inquiryMode;
+  const inquiryChannelRef = useRef(inquiryChannel);
+  inquiryChannelRef.current = inquiryChannel;
+  const reloadInquiryRef = useRef(null);   // openInquiry 정의 후 할당(TDZ 회피) — WS 문의 이벤트 시 새로고침용
+
+  // 마운트/로그인 시 대화 동기화 — 계정=서버(/sessions/current, 기기 간 동기화), 익명/공유=현행 localStorage.
+  useEffect(() => {
+    if (accountScoped) loadCurrentServerSession();
+    else if (sessionId) loadSession(sessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountScoped, user?.id]);
+
+  // 로그인 개인 계정 → WebSocket 연결. 같은 계정 다른 화면에 새 메시지 실시간 반영. (게스트/익명 미연결)
+  useEffect(() => {
+    if (!accountScoped) return;
+    let stop = false, retry = 0, timer = null, ws = null;
+    const connect = () => {
+      if (stop) return;
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      try { ws = new WebSocket(`${proto}//${location.host}/ws/chat`); } catch { return; }
+      ws.onopen = () => { retry = 0; };
+      ws.onmessage = (ev) => {
+        let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.type === "hello") { connIdRef.current = msg.connId; return; }
+        if (msg.type === "chat:user" || msg.type === "chat:ai") {
+          const role = msg.type === "chat:ai" ? "ai" : "user";
+          if (msg.sessionId && sessionIdRef.current && msg.sessionId !== sessionIdRef.current) return;  // 다른 세션 무시
+          setMessages((cur) => {
+            const last = cur[cur.length - 1];
+            if (last && last.role === role && last.text === msg.text) return cur;   // tail dedup
+            const now = new Date();
+            const base = { role, text: msg.text, time: now.toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul", hour: "numeric", minute: "2-digit" }), dateKey: todayKey() };
+            return [...cur, role === "ai" ? { ...base, meta: { model: msg.model } } : base];
+          });
+          if (msg.sessionId && !sessionIdRef.current) { setSessionId(msg.sessionId); try { localStorage.setItem(sessKey, String(msg.sessionId)); } catch {} }
+        }
+        // 문의 실시간 — 다른 화면의 새 문의 / 관리자·개발자 답변. 현재 그 문의방을 보고 있으면 새로고침.
+        if (msg.type === "inquiry:new" || msg.type === "inquiry:reply") {
+          const viewing = inquiryModeRef.current && inquiryChannelRef.current === msg.target;
+          if (viewing && reloadInquiryRef.current) {
+            reloadInquiryRef.current(msg.target);   // 그 방 보고 있으면 즉시 새로고침
+          } else if (msg.type === "inquiry:reply") {
+            setReplyToast({ target: msg.target, ts: msg.ts || Date.now() });   // 안 보고 있으면 토스트
+          }
+        }
+      };
+      ws.onerror = () => { try { ws.close(); } catch {} };
+      ws.onclose = () => {
+        if (stop) return;
+        retry = Math.min(retry + 1, 6);
+        timer = setTimeout(() => { connect(); loadCurrentServerSession(); }, Math.min(1000 * 2 ** retry, 30000) + Math.random() * 500);
+      };
+    };
+    connect();
+    return () => { stop = true; if (timer) clearTimeout(timer); try { ws && ws.close(); } catch {} };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountScoped, user?.id]);
+
   // 세션 삭제
   const removeSession = async (sid, e) => {
     if (e) { e.stopPropagation(); e.preventDefault(); }
-    if (!confirm(`세션 #${sid} 를 삭제하시겠습니까? (메시지 모두 삭제)`)) return;
     const ok = await deleteChatSession(sid);
     if (ok) {
       setSessions((s) => s.filter((x) => x.id !== sid));
@@ -1281,72 +1554,57 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     }
   };
 
-  // 메시지 변할 때마다 저장 + 자동 스크롤
+  // 새 세션 시작 (SessionSidebar onNew) — '새 대화' 버튼과 동일 리셋. 미정의 시 화면 크래시.
+  const startNewSession = () => {
+    if (sending) return;
+    setMessages([greeting]);
+    setLlmActive(null);
+    setSessionId(null);
+    setShowSessions(false);
+    try {
+      localStorage.removeItem(CHAT_STORAGE_KEY);
+      localStorage.removeItem(CHAT_SESSION_KEY);
+    } catch {}
+  };
+
+  // 세션 이름 변경 (SessionSidebar onRename) — 로컬 목록 즉시 갱신 + best-effort 저장(엔드포인트 없으면 무시)
+  const renameSession = async (sid, title) => {
+    if (!sid || !title) return;
+    setSessions((s) => s.map((x) => (x.id === sid ? { ...x, title, name: title } : x)));
+    try {
+      await fetch(`/api/chat/sessions/${sid}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+    } catch {}
+  };
+
+  // 세션 고정/해제 (SessionSidebar onPin) — 낙관적 토글 + 고정 우선 재정렬
+  const togglePinSession = async (sid, e) => {
+    if (e) { e.stopPropagation(); e.preventDefault(); }
+    const cur = sessions.find((x) => x.id === sid);
+    const next = cur && (cur.pinned ? 1 : 0) ? 0 : 1;
+    setSessions((s) => {
+      const updated = s.map((x) => (x.id === sid ? { ...x, pinned: next } : x));
+      // 고정(pinned=1) 먼저, 그 안에서 updated_at 내림차순
+      return [...updated].sort((a, b) => {
+        if ((b.pinned ? 1 : 0) !== (a.pinned ? 1 : 0)) return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+        return new Date(b.updated_at || 0) - new Date(a.updated_at || 0);
+      });
+    });
+    await pinChatSession(sid, next);
+  };
+
+  // 메시지 변할 때마다 저장 + 자동 스크롤.
+  // 맨아래 고정(stickBottomRef) 상태일 때만 따라 내림 — 전송/생성 중엔 따라가고, 사용자가 위로 올리면 멈춤.
+  // (렌더 후 거리측정은 새 메시지로 콘텐츠가 커지면 오판되므로, onScroll 로 미리 기록한 ref 를 사용)
   useEffect(() => {
-    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
-    saveChatHistory(messages);
+    const c = listRef.current;
+    if (c && stickBottomRef.current) c.scrollTop = c.scrollHeight;
+    saveChatHistory(messages, histKey);
   }, [messages, sending]);
 
-  // 헤더 "자동 분석" 버튼 — POST /api/admin/run-auto-insight 즉시 호출
-  //   백엔드는 매시 cron 과 동일 로직 (도구 5개 + 군산 날씨 + LLM) →
-  //   "🤖 AI 자동 분석 — YYYY-MM-DD" 세션에 영구 INSERT (system role).
-  //   동시에 응답 text 를 현재 채팅에 AI 메시지로 push (사용자 즉시 보임).
-  const runAutoInsight = async () => {
-    if (sending) return;
-    setSending(true);
-    const rtime = (() => {
-      const r = new Date();
-      return `${String(r.getHours()).padStart(2,"0")}:${String(r.getMinutes()).padStart(2,"0")}`;
-    })();
-    const today = todayKey();
-    // 빈 AI 메시지 자리 (streaming) — "AI 응답 생성 중..." 인디케이터 자동 트리거
-    setMessages((m) => [
-      ...m,
-      { role: "ai", text: "", time: rtime, streaming: true, dateKey: today, isAutoInsight: true },
-    ]);
-    const t0 = Date.now();
-    try {
-      const res = await fetch("/api/admin/run-auto-insight", {
-        method: "POST",
-        signal: AbortSignal.timeout(120_000),
-      });
-      const d = await res.json();
-      if (!d.ok) throw new Error(d.error || "자동 분석 실패");
-      const elapsedMs = Date.now() - t0;
-      setMessages((m) => {
-        const arr = m.slice();
-        const last = arr[arr.length - 1];
-        if (last && last.streaming) {
-          arr[arr.length - 1] = {
-            role: "ai",
-            text: d.text,
-            time: rtime,
-            dateKey: today,
-            isAutoInsight: true,
-            meta: { elapsedMs, autoInsight: true, sessionId: d.sessionId, model: "qwen3.5:9b" },
-          };
-        }
-        return arr;
-      });
-      setLlmActive(true);
-    } catch (err) {
-      setMessages((m) => {
-        const arr = m.slice();
-        const last = arr[arr.length - 1];
-        if (last && last.streaming) {
-          arr[arr.length - 1] = {
-            role: "ai",
-            text: `❌ 자동 분석 실패: ${err.message}`,
-            time: rtime,
-            dateKey: today,
-          };
-        }
-        return arr;
-      });
-    } finally {
-      setSending(false);
-    }
-  };
 
   // send(e, q?) — q 지정 시 그것 우선 전송 (빠른 질문 카드용), 없으면 input state 사용
   const send = async (e, q) => {
@@ -1367,10 +1625,11 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     }
 
     const now = new Date();
-    const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    const time = now.toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul", hour: "numeric", minute: "2-digit" });
+    stickBottomRef.current = true;   // 전송 시 맨아래로 따라 내리도록 고정
     const newUserMsg = { role: "user", text: trimmed, time, dateKey: today };
     const r = new Date();
-    const rtime = `${String(r.getHours()).padStart(2, "0")}:${String(r.getMinutes()).padStart(2, "0")}`;
+    const rtime = r.toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul", hour: "numeric", minute: "2-digit" });
     // 사용자 메시지 + 빈 AI 메시지(스트리밍 채워질 자리) 동시 추가
     //   isNewDay 면 base = [greeting] 로 (이전 메시지 자르고 새 세션 시작)
     setMessages((m) => {
@@ -1388,17 +1647,20 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     let usedLLM = false;
     let donePayload = null;
     let stopped = false;
+    let timedOut = false;
     let streamedSoFar = "";
     const t0 = Date.now();
 
     const controller = new AbortController();
     abortRef.current = controller;
     const stream = await callLLMStream(trimmed, ctx, historyForLLM, sessionId, demoMode, selectedModel, {
+      webSearch,
+      clientId: connIdRef.current,
       onSession: (info) => {
         // 서버가 새 세션 발급 또는 기존 세션 확인 — localStorage 에 저장
         if (info?.sessionId && info.sessionId !== sessionId) {
           setSessionId(info.sessionId);
-          try { localStorage.setItem(CHAT_SESSION_KEY, String(info.sessionId)); } catch {}
+          try { localStorage.setItem(sessKey, String(info.sessionId)); } catch {}
         }
       },
       onDelta: (_piece, acc) => {
@@ -1442,8 +1704,13 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
       finalReply = streamedSoFar || "(중지됨)";
       usedLLM = true;
       stopped = true;
+    } else if (Date.now() - t0 > 30_000) {
+      // 오래 끌다 실패 = 모델이 느려 시간 초과 (진짜 '미연동' mock 과 구분)
+      timedOut = true;
+      finalReply = (streamedSoFar ? streamedSoFar + "\n\n" : "")
+        + "⏱ 응답이 너무 오래 걸려 중단됐습니다. 현재 **고품질(27b)** 은 이 서버(32GB)에서 도구를 여러 번 쓰는 분석 질문에 수 분이 걸리거나 시간 초과될 수 있어요. **균형(14b)** 모델을 권장합니다.";
     } else {
-      // 스트리밍 실패 → mock fallback
+      // 스트리밍 실패 → mock fallback (진짜 미연동/연결 실패)
       finalReply = mockAIResponse(trimmed, { equipment });
     }
 
@@ -1451,6 +1718,12 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     const elapsedMs = Date.now() - t0;
     setMessages((m) => {
       const arr = m.slice();
+      // 중지: 이번 턴의 AI 메시지 + 직전 사용자 메시지를 함께 제거 (대화 흔적 남기지 않음)
+      if (stopped) {
+        if (arr.length && arr[arr.length - 1].role === "ai") arr.pop();
+        if (arr.length && arr[arr.length - 1].role === "user") arr.pop();
+        return arr;
+      }
       const last = arr[arr.length - 1];
       if (last && last.role === "ai") {
         arr[arr.length - 1] = {
@@ -1463,7 +1736,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
             rounds: donePayload?.rounds,
             tokens: donePayload?.tokens,
             model:  donePayload?.model,
-          } : stopped ? { elapsedMs, stopped: true }
+          } : timedOut ? { elapsedMs, fallback: "timeout" }
             : { elapsedMs, fallback: "mock" },
         };
       }
@@ -1471,6 +1744,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     });
     setLlmActive(usedLLM);
     setSending(false);
+    if (stopped) return;   // 중지 — 버블 제거됨, 후처리(지도 줌·KPI) 생략
 
     // 응답에서 노드 ID 추출 → 지도 자동 zoom
     //   실제 단말 체계 TB24-250xxx + 데모 단말 DEMO-### 모두 매칭 (대소문자 무시).
@@ -1485,353 +1759,529 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     }
   };
 
+  // ── 문의방 핸들러 (admin: 관리자 문의 / developer: 개발자 문의·포폴) ──
+  const ttime = (d) => { try { return new Date(d).toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul", hour: "numeric", minute: "2-digit" }); } catch { return ""; } };
+  // 답변 말풍선 클릭 → 그 질문으로 스크롤 + 통통 바운스 (반복 클릭 시 재생되도록 null→qid)
+  const scrollToQuestion = (qid) => {
+    const el = document.getElementById(`inqq-${qid}`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    setFlashQid(null);
+    setTimeout(() => setFlashQid(qid), 20);
+    setTimeout(() => setFlashQid((c) => (c === qid ? null : c)), 900);
+  };
+  // 말풍선 답장 버튼 → 인용 대상 지정 + 입력창 포커스
+  const handleReplyTo = (msg) => { setReplyTarget({ text: (msg.text || "사진").slice(0, 300), role: msg.role }); setTimeout(() => taRef.current?.focus(), 0); };
+  const openInquiry = async (channel = "admin") => {
+    setInquiryChannel(channel);
+    setInquiryMode(true);
+    const greet = channel === "developer"
+      ? { role: "ai", text: "👨‍💻 개발자 문의방입니다.\n이 프로젝트가 어떤 기능이고 어떻게 만들어졌는지 무엇이든 물어보세요. 제가 설명드리고, 필요하면 개발자(박지훈)가 직접 답변도 답니다.", time: initialTime }
+      : { role: "ai", text: "📩 상담원 문의방입니다.\n사용 중 불편한 점이나 버그를 남겨 주세요. 접수되면 관리자에게 전달되고, 제가 먼저 도와드립니다.", time: initialTime };
+    const msgs = [greet];
+    try {
+      const r = await fetch(`/api/inquiries/mine?target=${channel}`).then((x) => x.json());
+      if (r?.ok) for (const q of (r.inquiries || [])) {
+        const _qt = ttime(q.createdAt);
+        const _imgs = Array.isArray(q.images) ? q.images : (q.image ? [q.image] : []);
+        for (const _src of _imgs) msgs.push({ role: "user", image: _src, text: "", time: _qt, qid: q.id });   // 사진 먼저(각각)
+        if (q.message) msgs.push({ role: "user", text: q.message, time: _qt, qid: q.id, quote: q.replyQuote || null });  // 글자 다음
+        if (q.botReply) msgs.push({ role: "ai", text: q.botReply, time: ttime(q.createdAt), replyTo: q.id, meta: { model: channel === "developer" ? "AI 설명" : (q.kind === "bug" ? "버그 접수" : "문의 접수") } });
+        if (q.adminReply) msgs.push({ role: "ai", text: q.adminReply, time: ttime(q.createdAt), human: true, replyTo: q.id, meta: { model: channel === "developer" ? "개발자 답변" : "관리자 답변" } });
+      }
+    } catch { /* 비어있어도 진행 */ }
+    setInquiryMsgs(msgs);
+  };
+  reloadInquiryRef.current = openInquiry;   // WS 문의 이벤트 시 현재 문의방 새로고침
+  const submitInquiry = async (e) => {
+    if (e) e.preventDefault();
+    const text = input.trim();
+    const imgs = inquiryImages;
+    if ((!text && imgs.length === 0) || inquirySending) return;
+    const channel = inquiryChannel, kind = inquiryKind;
+    const quoteText = replyTarget?.text || null;
+    setInput(""); setInquiryImages([]); setReplyTarget(null);
+    stickBottomRef.current = true;   // 전송 시 맨아래로 따라 내리도록 고정
+    const _now = ttime(Date.now());
+    setInquiryMsgs((m) => {
+      const add = [];
+      imgs.forEach((src) => add.push({ role: "user", image: src, text: "", time: _now }));   // 사진 말풍선 먼저(각각)
+      if (text) add.push({ role: "user", text, time: _now, quote: quoteText });   // 글자 말풍선 다음
+      return [...m, ...add];
+    });
+    setInquirySending(true);
+    try {
+      const r = await fetch("/api/inquiries", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: channel, kind, message: text, images: imgs, replyQuote: quoteText, clientId: connIdRef.current }),
+      }).then((x) => x.json());
+      const reply = (r && r.reply) || (channel === "developer" ? "질문이 접수되었습니다. 개발자가 확인 후 답변드립니다. 🙇" : "문의가 접수되었습니다. 관리자가 확인 후 반영하겠습니다. 🙇");
+      setInquiryMsgs((m) => [...m, { role: "ai", text: reply, time: ttime(Date.now()), meta: { model: channel === "developer" ? "AI 설명" : (kind === "bug" ? "버그 접수" : "문의 접수") } }]);
+    } catch {
+      setInquiryMsgs((m) => [...m, { role: "ai", text: "접수 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", time: ttime(Date.now()) }]);
+    } finally { setInquirySending(false); }
+  };
+
   // 외부 (AI 탐지 카드 클릭 등) 에서 autoMessage 가 들어오면 자동 전송. send 후 onAutoConsumed 호출로 부모 reset.
   useEffect(() => {
     if (autoMessage && !sending) {
+      setInquiryMode(false);   // 문의 모드여도 AI 관제 도우미로 전환 → '상세 분석' 결과가 그 창에 표시되도록
       send(null, autoMessage);
       onAutoConsumed && onAutoConsumed();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoMessage]);
 
+  const chatView = inquiryMode ? inquiryMsgs : messages;
+  const busy = inquiryMode ? inquirySending : sending;
+  const stopBtn = sending && !inquiryMode;   // 빨간 중지 버튼은 일반 스트리밍일 때만
+  // 봇 아바타 — 일반=chatbot, 관리자 문의=상담원, 개발자 문의=개발자
+  const botAvatar = inquiryMode
+    ? (inquiryChannel === "developer" ? "/avatars/developer.png" : "/avatars/agent.png")
+    : "/chatbot.png";
+  const botLabel = inquiryMode
+    ? (inquiryChannel === "developer" ? "개발자" : "상담원")
+    : "AI 관제 도우미";
+  // 추천 질문 항목 (부모 보유 — 목록·↑/↓ 네비·Enter 선택용). 아이콘 · 요약단어 · 상세설명 · 전송질문.
+  const quickPromptItems = [
+    // 문의 채널 (목록 최상단) — 선택 시 프롬프트 전송이 아니라 문의방을 연다 (channel 필드로 구분)
+    { img: "/avatars/developer.png", title: "개발자 문의", desc: "프로젝트 기능 설명 — 개발자가 답변",   channel: "developer" },
+    { img: "/avatars/agent.png",     title: "상담원 문의", desc: "문의·버그 신고 — 관리자에게 전달", channel: "admin" },
+    // ── 추천 질문 50선 (매설배관 음극방식·AI(XAI)·운영 도메인 — 예리한 진단/분석 질문) ──
+    { icon: Icons.crosshair, title: "우선 점검", desc: "위험도 순 TOP 5 + 근거·조치", prompt: "전체 단말을 AI 위험도 순으로 정렬해 즉시 점검이 필요한 TOP 5와 각 단말의 근거 수치(방식전위·AC유입·MSE)·권장 조치를 표로 정리해줘" },
+    { icon: Icons.alert, title: "즉시 조치", desc: "당장 출동해야 할 단말만", prompt: "지금 당장 현장 출동이 필요한 위험 단말만 골라 위치와 즉시 조치를 알려줘" },
+    { icon: Icons.pin, title: "점검 동선", desc: "같은 구역 묶어 동선 추천", prompt: "이상·관찰 단말을 같은 구역끼리 묶어 한 번에 점검할 최적 동선을 제안해줘" },
+    { icon: Icons.clock, title: "방치 경고", desc: "오래 관찰로 방치된 단말", prompt: "관찰 상태로 가장 오래 방치된 단말 TOP 5와 경과 기간·조치 시급도를 알려줘" },
+    { icon: Icons.cpu, title: "AI 근거", desc: "이상 판정 MSE·기여 피처 분해", prompt: "'이상' 단말의 LSTM-AutoEncoder 재구성오차(MSE)와 AI 기준 대비를 제시하고, 어떤 센서 피처가 가장 크게 기여했는지 분해해 근거를 설명해줘" },
+    { icon: Icons.eye, title: "오탐 의심", desc: "알람 없이 AI만 이상", prompt: "알람은 없는데 AI만 '이상'으로 본 단말을 찾아 오탐 가능성과 추가 확인 포인트를 평가해줘" },
+    { icon: Icons.alert, title: "미탐 점검", desc: "AI 정상인데 수치 경계", prompt: "AI는 '정상'이라 했지만 실측값이 위험 경계에 있는 단말을 찾아 놓친 위험이 없는지 점검해줘" },
+    { icon: Icons.filter, title: "임계 타당성", desc: "이상 임계값 과민/둔감", prompt: "현재 AI 이상 임계값이 과민하거나 둔감한지 MSE 분포로 평가하고 적정 임계 조정안을 제시해줘" },
+    { icon: Icons.activity, title: "MSE 급증", desc: "재구성오차 급등 단말", prompt: "최근 재구성오차(MSE)가 급증한 단말과 그 시점·동반된 센서 변화를 정리해줘" },
+    { icon: Icons.cpu, title: "모델 신뢰", desc: "판정 경계·신뢰 낮음", prompt: "AI 판정이 경계에 가까워 신뢰가 낮은 단말을 추려 추가 점검이 필요한지 알려줘" },
+    { icon: Icons.activity, title: "방식전위", desc: "-850mV 미달 부식위험", prompt: "방식전위가 방식기준 -850mV를 충족하지 못하는 단말을 찾아 부식 위험도·점검 우선순위·조치를 정리해줘" },
+    { icon: Icons.zap, title: "과방식", desc: "-1200mV 초과 도막손상", prompt: "방식전위가 과방식(-1200mV 이하) 영역인 단말을 찾아 도막 손상·수소취화 위험을 평가해줘" },
+    { icon: Icons.trend, title: "방식 추세", desc: "방식전위 지속 악화", prompt: "방식전위가 최근 지속적으로 악화되는 단말을 찾아 조기 경보와 원인 가설을 제시해줘" },
+    { icon: Icons.zap, title: "교류 간섭", desc: "AC유입 과다 교류부식", prompt: "AC유입(교류전압)이 과다한 단말을 찾아 교류부식 위험을 평가하고 배류 등 대책·점검 우선순위를 제시해줘" },
+    { icon: Icons.zap, title: "미주전류", desc: "직류 미주전류 의심", prompt: "방식전위·전류 패턴으로 직류 미주전류(stray current) 간섭이 의심되는 단말을 찾아줘" },
+    { icon: Icons.crosshair, title: "AC 핫스팟", desc: "배류 보강 필요 구간", prompt: "AC 간섭이 집중된 핫스팟을 식별하고 배류시설 보강이 필요한 구간을 알려줘" },
+    { icon: Icons.activity, title: "양극 소모", desc: "희생전류 저하 수명임박", prompt: "희생전류 저하로 희생양극 수명이 임박한 단말을 찾아 교체 우선순위를 알려줘" },
+    { icon: Icons.activity, title: "전류 이상", desc: "희생전류 비정상 변동", prompt: "희생전류가 비정상적으로 급변하는 단말과 가능한 원인을 정리해줘" },
+    { icon: Icons.sun, title: "온도 영향", desc: "온도급변·방식 상관", prompt: "온도 급변과 방식전위 이상이 함께 나타난 단말을 찾아 상관관계를 설명해줘" },
+    { icon: Icons.activity, title: "습도 상관", desc: "습도 상승 부식가속", prompt: "습도가 높은 단말 중 부식 가속이 의심되는 단말을 찾아줘" },
+    { icon: Icons.refresh, title: "센서 드리프트", desc: "비물리적 값 변동", prompt: "측정값이 물리적으로 설명되지 않게 드리프트하는 센서 고장 의심 단말을 찾아줘" },
+    { icon: Icons.database, title: "결측 점검", desc: "측정 결측·신뢰도", prompt: "측정 결측·지연이 잦아 데이터 신뢰도가 낮은 단말을 찾아 보정 필요성을 알려줘" },
+    { icon: Icons.wifi_off, title: "통신 장애", desc: "두절 위치·시간", prompt: "통신 장애 단말의 위치, 마지막 측정 시각, 두절 경과 시간을 정리해줘" },
+    { icon: Icons.clock, title: "측정 지연", desc: "가장 오래된 측정", prompt: "마지막 측정이 가장 오래된 단말 TOP 5와 경과 시간을 알려줘" },
+    { icon: Icons.check, title: "가용성", desc: "24h 측정 누락률", prompt: "최근 24시간 측정 누락률이 높은 단말을 찾아 가용성 문제를 진단해줘" },
+    { icon: Icons.trend, title: "선제 예측", desc: "관찰→이상 전이 예측", prompt: "최근 추세로 곧 '이상'으로 전이될 가능성이 높은 '관찰' 단말을 예측하고 선제 점검 대상·이유를 알려줘" },
+    { icon: Icons.trend, title: "급변 감지", desc: "24h 최대 변동", prompt: "최근 24시간 가장 가파르게 변한 단말 TOP 5와 변화량을 정리해줘" },
+    { icon: Icons.sun, title: "계절성", desc: "온도변화 위험 상승", prompt: "계절·온도 변화로 향후 위험이 오를 가능성이 큰 단말을 사전 경보해줘" },
+    { icon: Icons.layers, title: "구역 비교", desc: "구역별 이상 비율", prompt: "구역별 이상·관찰 비율을 비교해 가장 취약한 구역과 그 특징을 알려줘" },
+    { icon: Icons.crosshair, title: "이상 군집", desc: "이상 밀집 핫스팟", prompt: "이상 단말이 지리적으로 밀집한 군집(핫스팟)을 식별해줘" },
+    { icon: Icons.box, title: "시설별", desc: "시설 유형별 경향", prompt: "시설 유형(방조제·정문·교차로 등)별 위험 경향을 비교 분석해줘" },
+    { icon: Icons.layers, title: "관제 보고", desc: "전체 종합+리스크·조치", prompt: "전체 상태를 관제 보고 형식으로 요약해줘 — 이상/관찰/정상/통신장애 집계, 핵심 리스크 단말, 오늘의 권장 조치 3가지" },
+    { icon: Icons.list, title: "교대 인수", desc: "인계용 현황 요약", prompt: "교대 인계용으로 현재 상황과 주의 깊게 볼 단말을 간결히 요약해줘" },
+    { icon: Icons.mail, title: "일일 브리핑", desc: "오늘 변화·신규·해소", prompt: "오늘의 변화를 브리핑해줘 — 신규 이상, 해소된 단말, 주의할 전이 건" },
+    { icon: Icons.briefcase, title: "임원 보고", desc: "비전문가용 1분 요약", prompt: "비전문가도 이해하게 현재 안전 상태와 핵심 리스크·조치를 1분 분량으로 요약해줘" },
+    { icon: Icons.search, title: "단말 심층", desc: "특정 ID 종합 진단", arg: "단말 ID", prompt: "내가 지정할 단말 ID의 모든 지표를 종합 진단해줘 — 먼저 어떤 단말인지 물어봐줘" },
+    { icon: Icons.clock, title: "변화 이력", desc: "단말 상태 타임라인", arg: "단말 ID", prompt: "특정 단말의 최근 상태 변화 타임라인을 정리해줘 — ID를 먼저 물어봐줘" },
+    { icon: Icons.layers, title: "비교 진단", desc: "두 단말 왜 다른가", arg: "비교할 두 단말 ID", prompt: "비슷해 보이는 두 단말을 비교해 왜 하나만 이상인지 차이를 설명해줘 — 두 ID를 물어봐줘" },
+    { icon: Icons.pin, title: "이웃 영향", desc: "인접 단말 동반 위험", arg: "단말 ID", prompt: "특정 단말 주변 인접 단말이 함께 위험한지(군집성)를 확인해줘 — ID를 물어봐줘" },
+    { icon: Icons.zap, title: "AC 초과", desc: "AC 기준 초과 폭", prompt: "AC유입 기준을 초과한 단말과 초과 폭을 큰 순으로 정리해줘" },
+    { icon: Icons.filter, title: "경계값", desc: "기준에 아슬한 정상", prompt: "'정상'이지만 위험 기준에 가장 근접한 '아슬한' 단말 TOP 5를 뽑아줘" },
+    { icon: Icons.alert, title: "복합 위험", desc: "둘 이상 지표 동시 악화", prompt: "방식전위·AC·MSE 등 둘 이상 지표가 동시에 나쁜 복합 위험 단말을 찾아줘" },
+    { icon: Icons.check, title: "정상 검증", desc: "의심스러운 정상 역검증", prompt: "'정상' 분류 중 통계적으로 의심스러운 단말을 역검증해 오분류 가능성을 평가해줘" },
+    { icon: Icons.crosshair, title: "조치 우선", desc: "효과 대비 우선순위", prompt: "위험 대비 조치 효과가 큰 순서로 처리 우선순위를 제안해줘" },
+    { icon: Icons.clock, title: "점검 주기", desc: "위험도 기반 주기", prompt: "위험도에 따라 단말별 권장 점검 주기를 제안해줘" },
+    { icon: Icons.refresh, title: "재발 단말", desc: "조치 후 재이상", prompt: "조치 후 다시 이상으로 돌아온(재발) 단말을 찾아줘" },
+    { icon: Icons.database, title: "데이터 신선도", desc: "예측 스냅샷 최신성", prompt: "현재 AI 예측 스냅샷이 얼마나 최신인지, 갱신이 필요한지 알려줘" },
+    { icon: Icons.trend, title: "추세 요약", desc: "최근 7일 위험 추이", prompt: "최근 7일 전체 위험 추이(증가/감소)와 변곡점을 요약해줘" },
+    { icon: Icons.eye, title: "관찰 정리", desc: "관찰 단말 우선순위", prompt: "관찰 단말을 AI 기준 대비가 높은 순으로 정리하고 원인 피처를 붙여줘" },
+    { icon: Icons.sparkle, title: "용어 설명", desc: "도메인 용어 쉽게", prompt: "방식전위·교류부식·희생양극 등 핵심 용어를 비전문가용으로 쉽게 설명해줘" },
+  ];
+  // 슬래시 명령 모드 — input 이 '/' 로 시작하면 추천 질문 팝업을 열고, '/' 뒤 글자로 필터링
+  const slashMode = !inquiryMode && input.startsWith("/");
+  const promptQuery = slashMode ? input.slice(1).trim().toLowerCase() : "";
+  const filteredPrompts = promptQuery
+    ? quickPromptItems.filter((it) => (it.title + " " + it.desc + " " + (it.prompt || "")).toLowerCase().includes(promptQuery))
+    : quickPromptItems;
+  const showPrompts = !inquiryMode && (promptsOpen || slashMode);
+  // 슬래시 명령 모드(선택지 있음) — Enter/클릭이 '전송'이 아니라 '추천 항목 선택' → 전송 버튼은 비활성으로 표시
+  const cmdActive = showPrompts && slashMode && filteredPrompts.length > 0;
+  // 추천 질문/문의 항목 선택 — channel 있으면 문의방 열기, 추천 질문은 (전송 대신) 입력칸에 전체 문장 채우기
+  const selectPrompt = (it) => {
+    if (!it) return;
+    setPromptsOpen(false);
+    if (it.channel) { setCmdPrompt(null); setInput(""); openInquiry(it.channel); return; }
+    // 추천 질문을 '스킬 칩'으로 보관(아이콘·제목·전체 프롬프트·인자 힌트). 입력칸은 비워서 '인자(대상·조건)'를 받는다.
+    setCmdPrompt(it);
+    setInput("");
+    requestAnimationFrame(() => {
+      const ta = taRef.current;
+      if (ta) { ta.focus(); ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 140) + "px"; }
+    });
+  };
+  // 전송 — 스킬 칩(cmdPrompt)이 있으면 스킬 프롬프트 + 입력한 인자(대상·조건)를 결합해 보냄 (인자 없으면 스킬만)
+  const doSend = (e) => {
+    if (guestbookOpen) { const t = input.trim(); if (t) { gb.send(t, !!user); setInput(""); } return; }
+    if (busy) return;
+    if (cmdPrompt !== null) {
+      const arg = input.trim();
+      let full = cmdPrompt.prompt;
+      if (arg) full = cmdPrompt.arg
+        ? `${cmdPrompt.prompt}\n\n(${cmdPrompt.arg}: ${arg} — 이미 지정됨, 다시 묻지 말고 바로 분석)`
+        : `${cmdPrompt.prompt}\n\n추가 조건: ${arg}`;
+      setCmdPrompt(null); setInput("");
+      send(null, full);
+      return;
+    }
+    if (!input.trim()) return;
+    (inquiryMode ? submitInquiry : send)(e);
+  };
   return (
     <Panel style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0, position: "relative" }}>
       <PanelHeader
+        pad="8px 18px"
         right={(() => {
           return (
             <div style={{ display: "flex", alignItems: "center", gap: 6, position: "relative" }}>
-              {/* 수동 분석 버튼 — 클릭 시 즉시 cron 로직 실행 + 현재 채팅에 push */}
-              <button
-                onClick={runAutoInsight}
-                disabled={sending}
-                title={sending ? "분석 중..." : "지금 수동 분석 실행 (도구 5개 + 군산 날씨 + LLM 1회)"}
+
+              {/* 헤더 새 대화(새로고침) 버튼 제거 (5/31) — 세션 사이드바 '＋ 새 대화' 로 대체 */}
+              {/* LLM 연결 상태 배지 제거 (사용자 요청 — 상단 'AI 연동됨' 표시와 중복) */}
+
+            </div>
+          );
+        })()}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, minHeight: 30, flex: 1 }}>
+          {/* 세션 목록 토글 버튼 제거(2026-06-01) — 사이드바/핸들러/백엔드 코드는 보존(향후 채팅 확장용),
+              진입로만 차단해 showSessions 가 항상 false → 사이드바 미노출. 되살리려면 이 버튼만 복구. */}
+          {/* 모드 토글 — AI 챗봇(일반) / 관리자 문의 / 개발자 문의 (장비현황 세그먼트 토글 스타일) */}
+          <SegmentedToggle
+            pad="5px 11px"
+            items={[{ label: "AI 관제 도우미" }, { label: "상담원 문의" }, { label: "개발자 문의" }, { label: "단톡방" }]}
+            activeIdx={guestbookOpen ? 3 : (!inquiryMode ? 0 : inquiryChannel === "admin" ? 1 : 2)}
+            onSelect={(i) => {
+              if (i === 3) { setGuestbookOpen(true); }
+              else { setGuestbookOpen(false); if (i === 0) setInquiryMode(false); else openInquiry(i === 1 ? "admin" : "developer"); }
+            }}
+          />
+        </div>
+      </PanelHeader>
+
+      {guestbookOpen ? <GuestbookList gb={gb} isGuest={!user} isAdmin={isGbAdmin} me={user ? { name: user.name, role: user.role } : null} ChatMessage={ChatMessage} /> : (
+      <div ref={listRef} className="scroll"
+        onScroll={(e) => { const c = e.currentTarget; stickBottomRef.current = (c.scrollHeight - c.scrollTop - c.clientHeight) < 80; }}
+        style={{
+        flex: 1, overflow: "auto",
+        padding: "12px 12px clamp(150px, 30vh, 380px)",
+        background: "var(--bg-sunk)",
+        display: "flex", flexDirection: "column", gap: 8,
+      }}>
+        {chatView.map((m, i) => {
+          const prevKey = i > 0 ? chatView[i - 1]?.dateKey : null;
+          // 첫 메시지(i===0)도 날짜 구분선 표시 — 대화 시작 시 연도+날짜 노출
+          const showDivider = m.dateKey && (i === 0 || (prevKey && m.dateKey !== prevKey));
+          // 같은 사람(role)·같은 분(time)·같은 날이 이어지면 시간은 그 묶음의 '마지막' 메시지에만 표시 (분 중복 제거)
+          const nextM = chatView[i + 1];
+          const hideTime = !!nextM && nextM.role === m.role && nextM.time === m.time && nextM.dateKey === m.dateKey;
+          return (
+            <Fragment key={i}>
+              {showDivider && <DayDivider dateKey={m.dateKey} />}
+              <div
+                id={m.qid ? `inqq-${m.qid}` : undefined}
+                onClick={m.replyTo ? () => scrollToQuestion(m.replyTo) : undefined}
+                title={m.replyTo ? "이 답변의 질문으로 이동" : undefined}
                 style={{
-                  display: "inline-flex", alignItems: "center", gap: 5,
-                  padding: "3px 10px", borderRadius: 8,
-                  background: sending ? "var(--bg-sunk)" : "rgba(99,102,241,0.10)",
-                  border: `1px solid ${sending ? "var(--line)" : "rgba(99,102,241,0.35)"}`,
-                  fontSize: 11, fontWeight: 600,
-                  color: sending ? "var(--ink-4)" : "var(--brand)",
-                  cursor: sending ? "wait" : "pointer",
-                  whiteSpace: "nowrap",
-                  transition: "all 140ms ease",
-                }}
-                onMouseEnter={(e) => {
-                  if (sending) return;
-                  e.currentTarget.style.background = "rgba(99,102,241,0.18)";
-                  e.currentTarget.style.borderColor = "var(--brand)";
-                }}
-                onMouseLeave={(e) => {
-                  if (sending) return;
-                  e.currentTarget.style.background = "rgba(99,102,241,0.10)";
-                  e.currentTarget.style.borderColor = "rgba(99,102,241,0.35)";
+                  cursor: m.replyTo ? "pointer" : "default",
+                  borderRadius: 12, transition: "background 300ms ease",
+                  background: m.qid && flashQid === m.qid ? "var(--brand-wash)" : "transparent",
+                  animation: m.qid && flashQid === m.qid ? "reply-bounce 0.6s ease" : "none",
                 }}
               >
-                <span style={{ fontSize: 11 }}>{sending ? "⏳" : "✨"}</span>
-                수동 분석
+                <ChatMessage message={m} botAvatar={botAvatar} botLabel={botLabel} hideTime={hideTime} onReply={inquiryMode ? handleReplyTo : undefined} />
+              </div>
+            </Fragment>
+          );
+        })}
+        {/* 스트리밍 중엔 마지막 AI 메시지의 깜빡 커서가 visual feedback 역할 */}
+        {busy && chatView[chatView.length - 1]?.role !== "ai" && <ChatTyping botAvatar={botAvatar} />}
+      </div>
+      )}
+
+      {/* 컴포저 — GPT식 둥근 카드 (textarea + 하단 액션줄). 대화 위에 띄워 글래스가 메시지를 비추도록 absolute + 투명 */}
+      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: "8px 10px 10px", background: "transparent" }}>
+
+        {/* + 추천 질문 팝업 (위로) */}
+        {!guestbookOpen && showPrompts && (
+          <div className="scroll glass-input" style={{
+            position: "absolute", left: 12, right: 12, bottom: "calc(100% + 2px)", zIndex: 40,
+            borderRadius: 22, padding: 8,
+            maxHeight: "min(260px, 40vh)", overflowY: "auto",
+          }}>
+            {filteredPrompts.length === 0 ? (
+              <div style={{ padding: "8px 10px 12px", fontSize: 12, color: "var(--ink-3)" }}>일치하는 추천 질문이 없습니다</div>
+            ) : (
+              <QuickPrompts items={filteredPrompts} highlightIndex={promptIndex} onHover={setPromptIndex} onPick={selectPrompt} disabled={false} />
+            )}
+          </div>
+        )}
+
+        {/* 입력 카드 */}
+        <form onSubmit={(e) => {
+            e.preventDefault();
+            if (!guestbookOpen && showPrompts && slashMode && filteredPrompts.length) {
+              selectPrompt(filteredPrompts[promptIndex] || filteredPrompts[0]);
+              return;
+            }
+            doSend(e);
+          }} className="glass-input" style={{
+          display: "flex", flexDirection: "column", gap: 7,
+          padding: "10px 12px 9px", borderRadius: 22,
+        }}>
+          {/* 답장 인용 미리보기 — 카톡식 (↳ 원문 · ✕) */}
+          {replyTarget && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "6px 8px", marginBottom: 2, borderRadius: 10,
+              background: "var(--bg-sunk)", borderLeft: "3px solid var(--brand)",
+            }}>
+              <span style={{ fontSize: 13, color: "var(--brand)", flexShrink: 0 }}>↳</span>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{replyTarget.text}</span>
+              <button type="button" onClick={() => setReplyTarget(null)} title="답장 취소" style={{ flexShrink: 0, border: "none", background: "transparent", color: "var(--ink-4)", cursor: "pointer", display: "grid", placeItems: "center", padding: 2 }}>
+                <Icons.close size={12} />
               </button>
-              {/* LLM 모델 선택 — 커스텀 드롭다운 (설명어 강조) */}
-              <div ref={modelBtnRef} style={{ position: "relative" }}>
+            </div>
+          )}
+          {/* 스킬(추천 질문) + 인자 입력 — 한 줄 인라인: 파란 스킬 글자 + 그 뒤 일반 입력 */}
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6, width: "100%" }}>
+            {cmdPrompt && (
+              <span style={{ flexShrink: 0, color: "var(--brand)", fontWeight: 700, fontSize: 13.5, lineHeight: 1.5, whiteSpace: "nowrap" }}>
+                {cmdPrompt.title}
+              </span>
+            )}
+            <textarea
+            ref={taRef}
+            className="scroll"
+            value={input}
+            onChange={(e) => {
+              const v = e.target.value;
+              setInput(v);
+              // '/' 로 시작하면 명령(추천 질문) 모드 — 입력할 때마다 첫 항목으로 하이라이트 리셋
+              if (!inquiryMode && v.startsWith("/")) setPromptIndex(0);
+              const t = e.target; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 140) + "px";
+            }}
+            onKeyDown={(e) => {
+              // ── 스킬 칩(cmdPrompt) 활성 시 입력칸은 '인자' 입력. 인자가 비어 있을 때 Backspace 면 스킬 칩 제거 ──
+              if (cmdPrompt !== null && e.key === "Backspace" && !input && !e.nativeEvent.isComposing) {
+                e.preventDefault(); setCmdPrompt(null);
+                const t = taRef.current; if (t) t.style.height = "auto";
+                return;
+              }
+              // 추천 질문 목록 열림 → ↑/↓ 이동, Enter 선택, Esc 닫기 (필터된 목록 기준)
+              if (showPrompts) {
+                const n = filteredPrompts.length;
+                if (e.key === "ArrowDown") { e.preventDefault(); if (n) setPromptIndex((i) => (i + 1) % n); return; }
+                if (e.key === "ArrowUp")   { e.preventDefault(); if (n) setPromptIndex((i) => (i - 1 + n) % n); return; }
+                if (e.key === "Escape")    { e.preventDefault(); setPromptsOpen(false); if (slashMode) setInput(""); return; }
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  selectPrompt(filteredPrompts[promptIndex]);
+                  return;   // 명령 모드에선 '/쿼리' 를 그대로 전송하지 않음
+                }
+              }
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); doSend(e); }
+            }}
+            onPaste={async (e) => {
+              if (!inquiryMode) return;   // 문의 모드에서만 이미지 붙여넣기
+              const items = e.clipboardData && e.clipboardData.items;
+              if (!items) return;
+              for (const it of items) {
+                if (it.type && it.type.indexOf("image/") === 0) {
+                  const f = it.getAsFile();
+                  if (f) { e.preventDefault(); try { const _d = await imageFileToDataURL(f, 1200); setInquiryImages((arr) => arr.length >= 5 ? arr : [...arr, _d]); } catch { /* 무시 */ } }
+                  return;
+                }
+              }
+            }}
+            placeholder={
+              inquiryMode ? (inquiryKind === "bug" ? "버그 내용을 적어 주세요…" : "문의 내용을 적어 주세요…")
+              : cmdPrompt ? ""   // 스킬 활성 시 안내 문구 없음 (사용자 요청)
+              : "/ 를 입력해 추천 질문 받기"
+            }
+            rows={1}
+            style={{
+              flex: 1, minWidth: 0, padding: 0, resize: "none", border: "none", outline: "none", background: "transparent",
+              fontSize: 13.5, lineHeight: 1.5, color: "var(--ink)", fontWeight: 400, fontFamily: "inherit",
+              minHeight: 22, maxHeight: 140, overflowY: "auto",
+            }}
+          />
+          </div>
+          {inquiryMode && inquiryImages.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, padding: "4px 2px 0" }}>
+              {inquiryImages.map((src, i) => (
+                <div key={i} style={{ position: "relative", display: "inline-block" }}>
+                  <img src={src} alt="첨부 미리보기" style={{ display: "block", height: 56, borderRadius: 8, border: "1px solid var(--line)" }} />
+                  <button type="button" onClick={() => setInquiryImages((arr) => arr.filter((_, j) => j !== i))} aria-label="첨부 제거"
+                    style={{
+                      position: "absolute", top: -7, right: -7,
+                      width: 20, height: 20, borderRadius: "50%", padding: 0,
+                      display: "grid", placeItems: "center",
+                      background: "var(--err)", color: "#fff",
+                      border: "2px solid var(--bg-elev)", boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+                      fontSize: 12, fontWeight: 800, lineHeight: 1, cursor: "pointer",
+                    }}>×</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* 하단 액션줄 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            {inquiryMode && (
+              <label title="이미지 첨부 (PNG/JPG · 최대 5장)" style={{
+                width: 34, height: 34, borderRadius: "50%", display: "grid", placeItems: "center", position: "relative",
+                background: inquiryImages.length ? "var(--brand-wash)" : "transparent",
+                color: inquiryImages.length ? "var(--brand)" : "var(--ink-3)", cursor: "pointer", flexShrink: 0,
+              }}>
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
+                </svg>
+                {inquiryImages.length > 0 && (
+                  <span style={{ position: "absolute", top: -2, right: -2, minWidth: 15, height: 15, padding: "0 3px", borderRadius: 999, background: "var(--brand)", color: "#fff", fontSize: 9, fontWeight: 800, display: "grid", placeItems: "center", border: "1px solid var(--bg-elev)" }}>{inquiryImages.length}</span>
+                )}
+                <input type="file" accept="image/png,image/jpeg" multiple style={{ display: "none" }}
+                  onChange={async (e) => {
+                    const files = Array.from(e.target.files || []);
+                    e.target.value = "";
+                    for (const f of files) {
+                      try { const _d = await imageFileToDataURL(f, 1200); setInquiryImages((arr) => arr.length >= 5 ? arr : [...arr, _d]); } catch { /* 무시 */ }
+                    }
+                  }} />
+              </label>
+            )}
+            {!inquiryMode && (
+              <button type="button" onClick={() => { setPromptsOpen((o) => !o); setPromptIndex(0); }} title="추천 질문"
+                style={{
+                  width: 34, height: 34, borderRadius: "50%", display: "grid", placeItems: "center",
+                  border: "none",
+                  background: promptsOpen ? "var(--brand-wash)" : "transparent",
+                  color: promptsOpen ? "var(--brand)" : "var(--ink-3)", cursor: "pointer", flexShrink: 0,
+                }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" style={{ flexShrink: 0 }}>
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </button>
+            )}
+            {!inquiryMode && (
+              <button type="button" onClick={() => setWebSearch((w) => !w)} title={webSearch ? "웹검색 켜짐 (DuckDuckGo)" : "웹검색 끄기/켜기"}
+                style={{
+                  height: 34, borderRadius: 999, display: "inline-flex", alignItems: "center", gap: 6, justifyContent: "center",
+                  padding: webSearch ? "0 12px" : 0, width: webSearch ? "auto" : 34,
+                  border: "none",
+                  background: webSearch ? "var(--brand)" : "transparent",
+                  color: webSearch ? "#fff" : "var(--ink-3)", cursor: "pointer", flexShrink: 0,
+                  transition: "background 140ms, width 140ms",
+                }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <circle cx="12" cy="12" r="9" />
+                  <line x1="3" y1="12" x2="21" y2="12" />
+                  <ellipse cx="12" cy="12" rx="4" ry="9" />
+                </svg>{webSearch && <span style={{ fontSize: 11.5, fontWeight: 700 }}>검색</span>}
+              </button>
+            )}
+            {/* 모델칩 — 누르면 위로 뜨는 [로컬|GPT] 토글 + 모델 팝업 */}
+            {!inquiryMode && (
+              <div ref={modelBtnRef} style={{ position: "relative", flexShrink: 0 }}>
                 <button
                   type="button"
-                  title="챗봇 LLM 모델 (Mac Studio Ollama 로컬)"
-                  disabled={sending}
-                  onClick={() => { if (!sending) setModelMenuOpen((o) => !o); }}
+                  disabled={busy}
+                  onClick={() => { if (!busy) setModelMenuOpen((o) => !o); }}
+                  title={provider === "gpt" ? "챗봇 모델 — GPT (외부 · OpenAI)" : "챗봇 모델 — 로컬 (Mac Studio Ollama)"}
                   style={{
-                    display: "inline-flex", alignItems: "center", gap: 6,
-                    padding: "3px 8px", borderRadius: 8,
-                    background: "var(--bg-elev)",
-                    border: `1px solid ${modelMenuOpen ? "var(--brand)" : "var(--line)"}`,
-                    cursor: sending ? "not-allowed" : "pointer", whiteSpace: "nowrap",
-                    opacity: sending ? 0.55 : 1,
+                    display: "inline-flex", alignItems: "center",
+                    height: 32, padding: "0 8px", borderRadius: 999,
+                    background: "transparent", border: "none",
+                    cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.55 : 1, whiteSpace: "nowrap",
                   }}
                 >
-                  <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--ink)" }}>{curModel.label}</span>
-                  <span style={{ fontSize: 9, color: "var(--ink-4)", fontFamily: "JetBrains Mono, ui-monospace, monospace" }}>{curModel.value}</span>
-                  <span style={{ fontSize: 8, color: "var(--ink-4)", transform: modelMenuOpen ? "rotate(180deg)" : "none", transition: "transform 120ms" }}>▾</span>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--ink-2)" }}>{curModel.label}</span>
                 </button>
                 {modelMenuOpen && (
                   <div style={{
-                    position: "absolute", top: "calc(100% + 5px)", right: 0, zIndex: 60,
-                    minWidth: 188, padding: 4,
-                    background: "var(--bg-elev)", border: "1px solid var(--line)", borderRadius: 10,
-                    boxShadow: "0 10px 28px rgba(0,0,0,0.20)",
+                    position: "absolute", bottom: "calc(100% + 8px)", left: "50%", transform: "translateX(-50%)", zIndex: 60,
+                    minWidth: 214, padding: 6,
+                    background: "var(--bg-elev)", border: "1px solid var(--line)", borderRadius: 14,
+                    boxShadow: "0 -10px 30px -10px rgba(15,23,42,0.30)",
                   }}>
-                    {CHAT_MODELS.map((m) => {
+                    {/* 말풍선 꼬리 — 팝업 하단 정중앙 */}
+                    <div style={{
+                      position: "absolute", bottom: -6, left: "50%", marginLeft: -6, width: 12, height: 12,
+                      background: "var(--bg-elev)",
+                      borderRight: "1px solid var(--line)", borderBottom: "1px solid var(--line)",
+                      transform: "rotate(45deg)",
+                    }} />
+                    {visibleModels.map((m) => {
                       const active = m.value === selectedModel;
                       return (
-                        <button
-                          key={m.value}
-                          type="button"
+                        <button key={m.value} type="button"
                           onClick={() => {
                             setSelectedModel(m.value);
-                            try { localStorage.setItem("siwon.chat.model", m.value); } catch {}
+                            try { localStorage.setItem("siwon.chat.model", m.value); localStorage.setItem(m.value.startsWith("gpt-") ? "siwon.chat.gptModel" : "siwon.chat.localModel", m.value); } catch {}
                             setModelMenuOpen(false);
                           }}
                           onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "var(--bg-sunk)"; }}
                           onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
                           style={{
-                            display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2,
-                            width: "100%", textAlign: "left",
-                            padding: "7px 10px", borderRadius: 7, border: "none",
-                            background: active ? "var(--brand-wash)" : "transparent",
-                            cursor: "pointer",
-                          }}
-                        >
-                          <span style={{
-                            fontSize: 12.5, fontWeight: 700,
-                            color: active ? "var(--brand)" : "var(--ink)",
-                            display: "inline-flex", alignItems: "center", gap: 5,
+                            display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, width: "100%", textAlign: "left",
+                            padding: "7px 10px", borderRadius: 7, border: "none", background: active ? "var(--brand-wash)" : "transparent", cursor: "pointer",
                           }}>
+                          <span style={{ fontSize: 12.5, fontWeight: 700, color: active ? "var(--brand)" : "var(--ink)", display: "inline-flex", alignItems: "center", gap: 5 }}>
                             {m.label}{active && <span style={{ fontSize: 10 }}>✓</span>}
                           </span>
-                          <span style={{
-                            fontSize: 10, color: "var(--ink-4)",
-                            fontFamily: "JetBrains Mono, ui-monospace, monospace",
-                          }}>
-                            {m.value} · {m.hint}
-                          </span>
+                          <span style={{ fontSize: 10, color: "var(--ink-4)", fontFamily: "JetBrains Mono, ui-monospace, monospace" }}>{m.value} · {m.hint}</span>
                         </button>
                       );
                     })}
+                    {/* 로컬/GPT 토글 — 목록 아래 (간격 띄움) */}
+                    <div style={{ display: "flex", gap: 2, padding: 2, marginTop: 12, borderRadius: 999, background: "var(--bg-sunk)", border: "1px solid var(--line)" }}>
+                      {[["local", "로컬"], ["gpt", "GPT"]].map(([p, lbl]) => {
+                        const on = provider === p;
+                        return (
+                          <button key={p} type="button" onClick={() => switchProvider(p)}
+                            title={p === "gpt" ? "GPT (외부 · OpenAI)" : "로컬 LLM (Mac Studio Ollama)"}
+                            style={{
+                              flex: 1, padding: "5px 0", borderRadius: 999, border: "none", fontSize: 11.5, fontWeight: 700,
+                              background: on ? "var(--bg-elev)" : "transparent", color: on ? "var(--ink)" : "var(--ink-3)",
+                              boxShadow: on ? "var(--shadow-card)" : "none", cursor: on ? "default" : "pointer", transition: "all 140ms ease",
+                            }}>
+                            {lbl}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
               </div>
-              {/* 새 대화 (초기화) */}
-              <button
-                onClick={() => {
-                  if (sending) return;
-                  setMessages([greeting]);
-                  setLlmActive(null);
-                  setSessionId(null);
-                  setShowSessions(false);
-                  try {
-                    localStorage.removeItem(CHAT_STORAGE_KEY);
-                    localStorage.removeItem(CHAT_SESSION_KEY);
-                  } catch {}
-                }}
-                title="대화 초기화 (새 세션 시작)"
-                style={{
-                  display: "grid", placeItems: "center",
-                  width: 22, height: 22, borderRadius: 6,
-                  background: "transparent", border: "1px solid var(--line)",
-                  color: "var(--ink-3)", cursor: sending ? "not-allowed" : "pointer",
-                  opacity: sending ? 0.4 : 1,
-                }}
-              >
-                <Icons.refresh size={11} />
-              </button>
-              {/* LLM 연결 상태 배지 제거 (사용자 요청 — 상단 'AI 연동됨' 표시와 중복) */}
-
-              {/* 세션 목록은 좌측 사이드바로 이동 — 이 영역에서는 제거 (5/26)
-                  아래 false 블록은 빌드 영향 없도록 임시 비활성. 다음 commit 에서 완전 삭제 예정. */}
-              {false && (
-                <div style={{
-                  position: "absolute", top: 30, right: 0, zIndex: 50,
-                  width: 280, maxHeight: 360, overflow: "auto",
-                  background: "var(--bg)",
-                  border: "1px solid var(--line)", borderRadius: 8,
-                  boxShadow: "0 8px 24px -6px rgba(0,0,0,0.18)",
-                }} className="scroll">
-                  <div style={{
-                    padding: "8px 10px", borderBottom: "1px solid var(--line)",
-                    fontSize: 11, fontWeight: 700, color: "var(--ink-3)",
-                    display: "flex", justifyContent: "space-between", alignItems: "center",
-                  }}>
-                    <span>저장된 대화 세션</span>
-                    <button
-                      onClick={() => setShowSessions(false)}
-                      style={{ background: "transparent", border: "none", color: "var(--ink-4)", cursor: "pointer", padding: 0 }}
-                      title="닫기"
-                    ><Icons.close size={11} /></button>
-                  </div>
-                  {sessionsLoading && (
-                    <div style={{ padding: 12, fontSize: 11, color: "var(--ink-4)" }}>불러오는 중...</div>
-                  )}
-                  {!sessionsLoading && sessions.length === 0 && (
-                    <div style={{ padding: 12, fontSize: 11, color: "var(--ink-4)" }}>저장된 세션 없음</div>
-                  )}
-                  {/* A1. 일자 그룹화 — 오늘 / 어제 / 이번 주 / 이번 달 / 이전 */}
-                  {!sessionsLoading && sessions.length > 0 && Object.entries(groupSessionsByDate(sessions)).map(([label, items]) => {
-                    if (items.length === 0) return null;
-                    return (
-                      <div key={label}>
-                        <div style={{
-                          position: "sticky", top: 0, zIndex: 1,
-                          padding: "6px 10px 4px",
-                          fontSize: 10, fontWeight: 700, color: "var(--ink-3)",
-                          letterSpacing: "0.05em", textTransform: "uppercase",
-                          background: "var(--bg)",
-                          borderBottom: "1px solid var(--line-soft)",
-                        }}>
-                          {label} <span style={{ opacity: 0.5, fontWeight: 500 }}>({items.length})</span>
-                        </div>
-                        {items.map((s) => {
-                          const isActive = s.id === sessionId;
-                          const dt = s.updated_at ? new Date(s.updated_at) : null;
-                          const dtLabel = dt ? `${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}` : "";
-                          return (
-                            <div
-                              key={s.id}
-                              onClick={() => loadSession(s.id)}
-                              style={{
-                                padding: "8px 10px",
-                                borderBottom: "1px solid var(--line)",
-                                background: isActive ? "rgba(79,70,229,0.08)" : "transparent",
-                                cursor: "pointer",
-                                display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8,
-                              }}
-                              onMouseOver={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-elev)"; }}
-                              onMouseOut={(e)  => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
-                            >
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{
-                                  fontSize: 12, fontWeight: isActive ? 700 : 500,
-                                  color: isActive ? "var(--brand)" : "var(--ink)",
-                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                                }}>
-                                  {s.title || `세션 #${s.id}`}
-                                </div>
-                                <div style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>
-                                  {dtLabel} · 메시지 {s.messageCount || 0}
-                                </div>
-                              </div>
-                              <button
-                                onClick={(e) => removeSession(s.id, e)}
-                                title="세션 삭제"
-                                style={{
-                                  background: "transparent", border: "none",
-                                  color: "var(--ink-4)", cursor: "pointer", padding: 2,
-                                  opacity: 0.5,
-                                }}
-                                onMouseOver={(e) => { e.currentTarget.style.opacity = 1; e.currentTarget.style.color = "#dc2626"; }}
-                                onMouseOut={(e)  => { e.currentTarget.style.opacity = 0.5; e.currentTarget.style.color = "var(--ink-4)"; }}
-                              ><Icons.close size={10} /></button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })()}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {/* 좌상단 세션 목록 토글 — 클릭 시 ChatPanel 안 좌측 사이드바 슬라이드 (5/26) */}
-          <button
-            onClick={openSessionsList}
-            title={showSessions ? "세션 목록 닫기" : "세션 목록 열기"}
-            style={{
-              display: "inline-flex", alignItems: "center", gap: 4,
-              padding: "3px 9px", borderRadius: 999,
-              background: showSessions ? "var(--brand)" : "var(--bg-elev)",
-              border: `1px solid ${showSessions ? "var(--brand)" : "var(--line)"}`,
-              color: showSessions ? "#fff" : "var(--ink-3)",
-              fontSize: 11, fontWeight: 600, cursor: "pointer",
-              transition: "all 140ms ease",
-            }}
-          >
-            <Icons.list size={11} />
-            {Array.isArray(sessions) && sessions.length > 0 ? sessions.length : ""}
-          </button>
-          <div style={{ fontSize: 13, fontWeight: 700 }}>AI 챗봇</div>
-        </div>
-      </PanelHeader>
-
-      <div ref={listRef} className="scroll" style={{
-        flex: 1, overflow: "auto",
-        padding: "12px 12px 6px",
-        background: "var(--bg-sunk)",
-        display: "flex", flexDirection: "column", gap: 8,
-      }}>
-        {messages.map((m, i) => {
-          const prevKey = i > 0 ? messages[i - 1]?.dateKey : null;
-          const showDivider = m.dateKey && prevKey && m.dateKey !== prevKey;
-          return (
-            <Fragment key={i}>
-              {showDivider && <DayDivider dateKey={m.dateKey} />}
-              <ChatMessage message={m} />
-            </Fragment>
-          );
-        })}
-        {/* 스트리밍 중엔 마지막 AI 메시지의 깜빡 커서가 visual feedback 역할 — 별도 typing indicator 불필요 */}
-        {sending && messages[messages.length - 1]?.role !== "ai" && <ChatTyping />}
-      </div>
-
-      {/* 빠른 질문 알약 — 입력창 위에 항상 표시 (sending 중에는 dim) */}
-      <QuickPrompts equipment={equipment} onPick={(q) => send(null, q)} disabled={sending} />
-
-      {/* 생성 중 실시간 표시줄 — LLM 동작·토큰 사용 가시화 */}
-      {sending && (() => {
-        const sec = Math.max(0, (Date.now() - genStartRef.current) / 1000);
-        const tps = genTokens > 0 && sec > 0.4 ? Math.round(genTokens / sec) : null;
-        return (
-          <div style={{
-            display: "flex", alignItems: "center", gap: 7,
-            padding: "5px 12px 6px", fontSize: 11,
-            borderTop: "1px solid var(--line-soft)", color: "var(--ink-3)",
-          }}>
-            <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--brand)", animation: "pulse-dot 1.2s infinite", flexShrink: 0 }} />
-            <span style={{ fontWeight: 700, color: "var(--brand)" }}>{curModel.label}</span>
-            <span>응답 생성 중…</span>
-            <span style={{ marginLeft: "auto", fontFamily: "JetBrains Mono, ui-monospace, monospace", color: "var(--ink-4)", whiteSpace: "nowrap" }}>
-              {sec.toFixed(1)}s{genTokens > 0 ? ` · ${genTokens} tok` : ""}{tps ? ` · ${tps} tok/s` : ""}
-            </span>
+            )}
+            <div style={{ flex: 1 }} />
+            <button
+              type={stopBtn ? "button" : "submit"}
+              onClick={stopBtn ? () => { try { abortRef.current?.abort(); } catch {} } : undefined}
+              disabled={stopBtn ? false : (busy || cmdActive || (!cmdPrompt && !input.trim()))}
+              title={stopBtn ? "생성 중지" : cmdActive ? "추천 항목 선택 모드" : "전송"}
+              style={{
+                width: 34, height: 34, borderRadius: "50%", display: "grid", placeItems: "center", border: "none", flexShrink: 0,
+                background: stopBtn ? "var(--err)" : (busy || cmdActive || (!cmdPrompt && !input.trim())) ? "var(--line)" : "var(--brand)",
+                color: "#fff", cursor: stopBtn ? "pointer" : (busy || cmdActive || (!cmdPrompt && !input.trim())) ? "not-allowed" : "pointer",
+                transition: "background 140ms",
+              }}>
+              {stopBtn
+                ? <span style={{ width: 10, height: 10, borderRadius: 2, background: "#fff" }} />
+                : <span style={{ fontSize: 17, fontWeight: 800, lineHeight: 1 }}>↑</span>}
+            </button>
           </div>
-        );
-      })()}
-
-      <form onSubmit={send} style={{
-        display: "flex", gap: 6,
-        padding: 10,
-        borderTop: "1px solid var(--line)",
-        background: "var(--bg-elev)",
-      }}>
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="질문을 입력하세요…"
-          disabled={sending}
-          style={{
-            flex: 1,
-            padding: "0 12px",
-            height: 36,
-            background: "var(--bg-sunk)",
-            border: "1px solid var(--line)",
-            borderRadius: 9,
-            fontSize: 13,
-            color: "var(--ink)",
-            outline: "none",
-            fontFamily: "inherit",
-          }}
-        />
-        <button
-          type={sending ? "button" : "submit"}
-          onClick={sending ? () => { try { abortRef.current?.abort(); } catch {} } : undefined}
-          disabled={!sending && !input.trim()}
-          title={sending ? "생성 중지" : "전송"}
-          style={{
-            display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 5,
-            padding: "0 16px",
-            height: 36,
-            background: sending ? "var(--err)" : !input.trim() ? "var(--bg-sunk)" : "linear-gradient(135deg, #4f46e5, #8b83ff)",
-            color: sending ? "#fff" : !input.trim() ? "var(--ink-3)" : "#fff",
-            fontSize: 12, fontWeight: 700,
-            border: "none",
-            borderRadius: 9,
-            cursor: sending ? "pointer" : !input.trim() ? "not-allowed" : "pointer",
-            boxShadow: sending ? "0 6px 14px -4px rgba(239,68,68,0.45)" : !input.trim() ? "none" : "0 6px 14px -4px rgba(79,70,229,0.45)",
-            transition: "background 140ms",
-          }}
-        >
-          {sending
-            ? (<><span style={{ width: 9, height: 9, borderRadius: 2, background: "#fff", display: "inline-block" }} />중지</>)
-            : "전송"}
-        </button>
-      </form>
+        </form>
+      </div>
 
       {/* 좌측 사이드바 — 세션 목록 (오버레이, ChatPanel 안에 갇힘)
           showSessions=true 일 때 좌측에서 슬라이드 인. 외부 클릭/ESC 로 닫힘. */}
@@ -1841,9 +2291,35 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
         sessions={sessions}
         activeSessionId={sessionId}
         onClose={() => setShowSessions(false)}
-        onPick={loadSession}
+        onPick={(id) => { setInquiryMode(false); loadSession(id); }}
         onDelete={removeSession}
+        onNew={() => { setInquiryMode(false); startNewSession(); }}
+        onRename={renameSession}
+        onPin={togglePinSession}
+        onOpenInquiry={(channel) => { openInquiry(channel); setShowSessions(false); }}
+        inquiryActive={inquiryMode ? inquiryChannel : null}
       />
+      {/* 답변 도착 토스트 — 방 안 볼 때 (클릭 시 그 방 열기) */}
+      {replyToast && createPortal(
+        <div
+          onClick={() => { openInquiry(replyToast.target); setReplyToast(null); }}
+          style={{
+            position: "fixed", right: 24, bottom: 24, zIndex: 9999,
+            display: "flex", alignItems: "center", gap: 11,
+            padding: "12px 16px", borderRadius: 14, cursor: "pointer",
+            background: "var(--bg-elev)", border: "1px solid var(--line)",
+            boxShadow: "0 14px 36px -10px rgba(15,23,42,0.32)",
+            animation: "slide-in-up 220ms ease", maxWidth: 320,
+          }}
+        >
+          <span style={{ width: 34, height: 34, borderRadius: 10, flexShrink: 0, display: "grid", placeItems: "center", fontSize: 17, background: "var(--brand)", color: "#fff" }}>💬</span>
+          <span style={{ minWidth: 0 }}>
+            <span style={{ display: "block", fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>{replyToast.target === "developer" ? "개발자" : "상담원"}이 답변했어요</span>
+            <span style={{ display: "block", fontSize: 11.5, color: "var(--brand)", fontWeight: 600, marginTop: 1 }}>탭하여 보기 →</span>
+          </span>
+        </div>,
+        document.body
+      )}
     </Panel>
   );
 }
@@ -1851,42 +2327,116 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
 // 세션 목록 사이드바 — ChatPanel 안 absolute 오버레이
 //   open=true 시 좌측에서 슬라이드 인 (translateX 220ms).
 //   ESC 또는 외부 클릭으로 닫힘. 세션 클릭 시 자동 닫힘 (onPick 안에서 처리).
-function SessionSidebar({ open, loading, sessions, activeSessionId, onClose, onPick, onDelete }) {
+function SessionSidebar({ open, loading, sessions, activeSessionId, onClose, onPick, onDelete, onNew, onRename, onPin, onOpenInquiry, inquiryActive }) {
   const ref = useRef(null);
-  // ESC 닫기
+  const [query, setQuery] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editText, setEditText] = useState("");
+  const [menu, setMenu] = useState(null);   // 세션 행 ⋯ 메뉴: { id, s, pinned, top, left } | null
+  const [search, setSearch] = useState(null);   // 백엔드 통합검색 결과: { q, sessions } | null
+
+  // ESC 닫기 (단, 이름 변경 중이면 편집만 취소)
   useEffect(() => {
     if (!open) return;
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      if (editingId != null) { setEditingId(null); return; }
+      onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, onClose, editingId]);
+
   // 외부 클릭 닫기 (사이드바 영역 밖)
   useEffect(() => {
     if (!open) return;
     const onDoc = (e) => {
+      if (menu != null) return;   // 행 ⋯ 메뉴 열려 있으면 사이드바 닫지 않음 (메뉴 백드롭이 처리)
       if (ref.current && !ref.current.contains(e.target)) onClose();
     };
-    // 마운트 직후 같은 click 으로 닫히지 않게 다음 tick 등록
     const t = setTimeout(() => document.addEventListener("mousedown", onDoc), 0);
     return () => {
       clearTimeout(t);
       document.removeEventListener("mousedown", onDoc);
     };
-  }, [open, onClose]);
+  }, [open, onClose, menu]);
 
-  const grouped = open ? groupSessionsByDate(sessions || []) : null;
+  // 패널 닫히면 검색/편집 상태 초기화
+  useEffect(() => { if (!open) { setQuery(""); setEditingId(null); setMenu(null); setSearch(null); } }, [open]);
+
+  // 통합검색(제목+본문) — 220ms 디바운스. 입력 비면 해제(평상 목록으로 복귀)
+  useEffect(() => {
+    const term = query.trim();
+    if (!term) { setSearch(null); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const r = await searchChatSessions(term);
+      if (!cancelled && r != null) setSearch({ q: term, sessions: r });
+    }, 220);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [query]);
+
+  const term = query.trim();
+  const searchMode = !!term;
+  const searchReady = !!(search && search.q === term);   // 현재어에 대한 백엔드 결과 도착?
+  // 표시 목록: 검색 중이면 백엔드 결과(제목+본문), 응답 전엔 로드된 세션 제목으로 즉시 필터(폴백)
+  const displaySessions = !searchMode
+    ? (sessions || [])
+    : searchReady
+      ? search.sessions
+      : (sessions || []).filter((s) => (s.title || `세션 #${s.id}`).toLowerCase().includes(term.toLowerCase()));
+  // 그룹: 검색 중엔 헤더 없이 평면(__flat). 평상시엔 고정됨 + 최신순 평면
+  let grouped = null;
+  if (open) {
+    if (searchMode) {
+      grouped = displaySessions.length ? { "__flat": displaySessions } : {};
+    } else {
+      const pinnedList = displaySessions.filter((s) => s.pinned);
+      const rest = displaySessions
+        .filter((s) => !s.pinned)
+        .sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0));
+      // 고정됨이 있으면 나머지에 "최근" 헤더를 붙여 두 그룹을 분리, 없으면 헤더 없는 평면
+      grouped = pinnedList.length
+        ? { "고정됨": pinnedList, ...(rest.length ? { "최근": rest } : {}) }
+        : (rest.length ? { "__flat": rest } : {});
+    }
+  }
+
+  const beginEdit = (s, e) => {
+    if (e) { e.stopPropagation(); e.preventDefault(); }
+    setEditingId(s.id);
+    setEditText(s.title || `세션 #${s.id}`);
+  };
+  const commitEdit = async (sid) => {
+    const t = editText.trim();
+    if (t && onRename) await onRename(sid, t);
+    setEditingId(null);
+  };
 
   return (
+    <>
+      {/* 스크림 — 사이드바 열릴 때 뒤 채팅 디밍 (클릭 시 닫힘) */}
+      <div
+        onClick={onClose}
+        style={{
+          position: "absolute", inset: 0, zIndex: 29,
+          background: "rgba(15,23,42,0.32)",
+          opacity: open ? 1 : 0,
+          pointerEvents: open ? "auto" : "none",
+          transition: "opacity 220ms ease",
+        }}
+      />
     <div
       ref={ref}
       style={{
         position: "absolute", left: 0, top: 0, bottom: 0,
         width: 280, zIndex: 30,
         background: "var(--bg)",
-        borderRight: "1px solid var(--line)",
-        boxShadow: open ? "8px 0 24px -10px rgba(0,0,0,0.18)" : "none",
+        border: "1px solid var(--line)",
+        borderRadius: 16,
+        boxShadow: open ? "20px 0 50px -12px rgba(15,23,42,0.45)" : "none",
         transform: open ? "translateX(0)" : "translateX(-100%)",
-        transition: "transform 220ms ease",
+        transition: "transform 220ms ease, box-shadow 220ms ease",
         display: "flex", flexDirection: "column",
         overflow: "hidden",
       }}
@@ -1895,84 +2445,220 @@ function SessionSidebar({ open, loading, sessions, activeSessionId, onClose, onP
       <div style={{
         padding: "12px 14px",
         borderBottom: "1px solid var(--line)",
-        display: "flex", alignItems: "center", justifyContent: "space-between",
+        display: "flex", alignItems: "center", justifyContent: "flex-start",
       }}>
         <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink)" }}>
-          저장된 대화 세션
+          AI 관제 도우미 세션
         </div>
+      </div>
+
+      {/* 새 대화 + 검색 */}
+      <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--line-soft)", display: "flex", flexDirection: "column", gap: 8 }}>
         <button
-          onClick={onClose}
-          title="닫기 (ESC)"
+          onClick={() => { if (onNew) onNew(); }}
           style={{
-            background: "transparent", border: "none",
-            color: "var(--ink-4)", cursor: "pointer", padding: 2,
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            width: "100%", padding: "8px 10px", borderRadius: 8,
+            background: "var(--brand)", color: "#fff", border: "none",
+            fontSize: 12, fontWeight: 700, cursor: "pointer",
+            transition: "filter 140ms",
           }}
-        ><Icons.close size={12} /></button>
+          onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.08)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
+        >
+          <Icons.plus size={13} /> 새 대화
+        </button>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 6,
+          padding: "6px 9px", borderRadius: 8,
+          background: "var(--bg-elev)", border: "1px solid var(--line)",
+        }}>
+          <Icons.search size={12} />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="세션·대화 내용 검색"
+            style={{
+              flex: 1, border: "none", outline: "none", background: "transparent",
+              fontSize: 12, color: "var(--ink)",
+            }}
+          />
+          {query && (
+            <button
+              onClick={() => setQuery("")}
+              title="검색 지우기"
+              style={{ background: "transparent", border: "none", color: "var(--ink-4)", cursor: "pointer", padding: 0, display: "grid", placeItems: "center" }}
+            ><Icons.close size={11} /></button>
+          )}
+        </div>
       </div>
 
       {/* 목록 */}
       <div className="scroll" style={{ flex: 1, overflow: "auto" }}>
+        {/* 고정 — 문의 채널 (항상 최상단): 관리자 문의 + 개발자 문의 (가로 2열 타일) */}
+        {!searchMode && (
+          <div style={{ display: "flex", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--line)" }}>
+            {[
+              { ch: "admin",     icon: "📩",   img: "/avatars/agent.png",     title: "상담원 문의", tip: "문의 · 버그 신고 — 관리자에게 전달" },
+              { ch: "developer", icon: "👨‍💻", img: "/avatars/developer.png", title: "개발자 문의", tip: "프로젝트 기능 설명 — 개발자가 답변" },
+            ].map((it) => {
+              const active = inquiryActive === it.ch;
+              return (
+                <button
+                  key={it.ch}
+                  type="button"
+                  title={it.tip}
+                  onClick={() => onOpenInquiry && onOpenInquiry(it.ch)}
+                  style={{
+                    flex: 1, cursor: "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                    padding: "7px 8px", borderRadius: 9,
+                    background: active ? "var(--brand-wash)" : "var(--bg-elev)",
+                    border: "1px solid " + (active ? "var(--brand)" : "var(--line)"),
+                    transition: "background 140ms, border-color 140ms",
+                  }}
+                  onMouseOver={(e) => { if (!active) e.currentTarget.style.borderColor = "var(--brand)"; }}
+                  onMouseOut={(e)  => { if (!active) e.currentTarget.style.borderColor = "var(--line)"; }}
+                >
+                  <img src={it.img} alt="" style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
+                  <span style={{ fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap", color: active ? "var(--brand)" : "var(--ink)" }}>{it.title}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
         {loading && (
           <div style={{ padding: 14, fontSize: 11, color: "var(--ink-4)" }}>불러오는 중...</div>
         )}
-        {!loading && (!sessions || sessions.length === 0) && (
+        {!loading && !searchMode && (!sessions || sessions.length === 0) && (
           <div style={{ padding: 14, fontSize: 11, color: "var(--ink-4)" }}>저장된 세션 없음</div>
+        )}
+        {searchMode && displaySessions.length === 0 && (
+          <div style={{ padding: 14, fontSize: 11, color: "var(--ink-4)" }}>
+            {searchReady ? "검색 결과 없음" : "검색 중…"}
+          </div>
         )}
         {!loading && grouped && Object.entries(grouped).map(([label, items]) => {
           if (items.length === 0) return null;
           return (
             <div key={label}>
-              <div style={{
-                position: "sticky", top: 0, zIndex: 1,
-                padding: "6px 12px 4px",
-                fontSize: 10, fontWeight: 700, color: "var(--ink-3)",
-                letterSpacing: "0.05em", textTransform: "uppercase",
-                background: "var(--bg)",
-                borderBottom: "1px solid var(--line-soft)",
-              }}>
-                {label} <span style={{ opacity: 0.5, fontWeight: 500 }}>({items.length})</span>
-              </div>
+              {label !== "__flat" && (
+                <div style={{
+                  position: "sticky", top: 0, zIndex: 1,
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                  padding: "7px 12px",
+                  fontSize: 11.5, fontWeight: 800, letterSpacing: "0.01em",
+                  color: "var(--ink)",
+                  background: "var(--chat-group-bg)",
+                  borderBottom: "1px solid var(--line)",
+                }}>
+                  {label === "고정됨" && <Icons.pin size={11} color="var(--err)" />}
+                  <span>{label}</span>
+                  <span style={{
+                    position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)",
+                    fontSize: 10, fontWeight: 700, color: "var(--ink-4)",
+                    background: "var(--bg-elev)", border: "1px solid var(--line)",
+                    borderRadius: 999, padding: "0 7px", lineHeight: "16px",
+                  }}>{items.length}</span>
+                </div>
+              )}
               {items.map((s) => {
                 const isActive = s.id === activeSessionId;
+                const isEditing = s.id === editingId;
                 const dt = s.updated_at ? new Date(s.updated_at) : null;
-                const dtLabel = dt ? `${String(dt.getHours()).padStart(2,"0")}:${String(dt.getMinutes()).padStart(2,"0")}` : "";
+                let dtLabel = "";
+                if (dt) {
+                  const tz = { timeZone: "Asia/Seoul" };
+                  const time = dt.toLocaleTimeString("ko-KR", { ...tz, hour: "numeric", minute: "2-digit" });
+                  const sameDay = dt.toLocaleDateString("en-CA", tz) === new Date().toLocaleDateString("en-CA", tz);
+                  dtLabel = sameDay ? time : `${dt.toLocaleDateString("en-US", { ...tz, month: "numeric", day: "numeric" })} ${time}`;
+                }
                 return (
                   <div
                     key={s.id}
-                    onClick={() => { onPick(s.id); onClose(); }}
+                    onClick={() => { if (!isEditing) { onPick(s.id); onClose(); } }}
+                    className="session-row"
                     style={{
                       padding: "9px 12px",
                       borderBottom: "1px solid var(--line)",
                       background: isActive ? "rgba(79,70,229,0.08)" : "transparent",
-                      cursor: "pointer",
-                      display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8,
+                      cursor: isEditing ? "default" : "pointer",
+                      display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8,
                     }}
-                    onMouseOver={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-elev)"; }}
-                    onMouseOut={(e)  => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                    onMouseOver={(e) => { if (!isActive && !isEditing) e.currentTarget.style.background = "var(--bg-elev)"; }}
+                    onMouseOut={(e)  => { if (!isActive && !isEditing) e.currentTarget.style.background = "transparent"; }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{
-                        fontSize: 12, fontWeight: isActive ? 700 : 500,
-                        color: isActive ? "var(--brand)" : "var(--ink)",
-                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                      }}>
-                        {s.title || `세션 #${s.id}`}
-                      </div>
-                      <div style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>
-                        {dtLabel} · 메시지 {s.messageCount || 0}
-                      </div>
+                      {isEditing ? (
+                        <input
+                          autoFocus
+                          value={editText}
+                          onChange={(e) => setEditText(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") { e.preventDefault(); commitEdit(s.id); }
+                            else if (e.key === "Escape") { e.preventDefault(); setEditingId(null); }
+                          }}
+                          onBlur={() => commitEdit(s.id)}
+                          maxLength={60}
+                          style={{
+                            width: "100%", boxSizing: "border-box",
+                            padding: "3px 6px", borderRadius: 6,
+                            border: "1px solid var(--brand)", outline: "none",
+                            background: "var(--bg-elev)", color: "var(--ink)",
+                            fontSize: 12, fontWeight: 600,
+                          }}
+                        />
+                      ) : (
+                        <>
+                          <div style={{
+                            fontSize: 12, fontWeight: isActive ? 700 : 500,
+                            color: isActive ? "var(--brand)" : "var(--ink)",
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          }}>
+                            {searchMode ? highlightTerm(s.title || `세션 #${s.id}`, term) : (s.title || `세션 #${s.id}`)}
+                          </div>
+                          <div style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}>
+                            {dtLabel} · 메시지 {s.messageCount || 0}
+                          </div>
+                          {searchMode && s.matchSnippet && (
+                            <div style={{
+                              fontSize: 9.5, color: "var(--ink-4)", marginTop: 3, lineHeight: 1.4,
+                              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                            }}>
+                              {highlightTerm(snippetAround(s.matchSnippet, term), term)}
+                            </div>
+                          )}
+                        </>
+                      )}
                     </div>
-                    <button
-                      onClick={(e) => onDelete(s.id, e)}
-                      title="세션 삭제"
-                      style={{
-                        background: "transparent", border: "none",
-                        color: "var(--ink-4)", cursor: "pointer", padding: 2,
-                        opacity: 0.5,
-                      }}
-                      onMouseOver={(e) => { e.currentTarget.style.opacity = 1; e.currentTarget.style.color = "#dc2626"; }}
-                      onMouseOut={(e)  => { e.currentTarget.style.opacity = 0.5; e.currentTarget.style.color = "var(--ink-4)"; }}
-                    ><Icons.close size={10} /></button>
+                    {isEditing ? (
+                      <button
+                        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); commitEdit(s.id); }}
+                        title="저장 (Enter)"
+                        style={{ background: "transparent", border: "none", color: "var(--brand)", cursor: "pointer", padding: 2, display: "grid", placeItems: "center" }}
+                      ><Icons.check size={13} /></button>
+                    ) : (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (menu && menu.id === s.id) { setMenu(null); return; }
+                          const r = e.currentTarget.getBoundingClientRect();
+                          const top = Math.min(r.bottom + 4, window.innerHeight - 178);
+                          setMenu({ id: s.id, s, pinned: s.pinned, top, left: r.right - 170 });
+                        }}
+                        title="더보기"
+                        aria-label="세션 메뉴"
+                        style={{
+                          background: menu && menu.id === s.id ? "var(--bg-sunk)" : "transparent",
+                          border: "none", color: "var(--ink-3)", cursor: "pointer",
+                          padding: "0 6px", height: 24, borderRadius: 6,
+                          fontSize: 18, lineHeight: 1, opacity: 0.65, flexShrink: 0,
+                        }}
+                        onMouseOver={(e) => { e.currentTarget.style.opacity = 1; e.currentTarget.style.background = "var(--bg-sunk)"; }}
+                        onMouseOut={(e) => { e.currentTarget.style.opacity = 0.65; e.currentTarget.style.background = (menu && menu.id === s.id) ? "var(--bg-sunk)" : "transparent"; }}
+                      >⋯</button>
+                    )}
                   </div>
                 );
               })}
@@ -1980,7 +2666,49 @@ function SessionSidebar({ open, loading, sessions, activeSessionId, onClose, onP
           );
         })}
       </div>
+
+      {/* 세션 행 ⋯ 메뉴 (고정 / 이름 바꾸기 / 삭제) */}
+      {menu && createPortal((
+        <>
+          <div onClick={() => setMenu(null)} style={{ position: "fixed", inset: 0, zIndex: 50 }} />
+          <div style={{
+            position: "fixed", top: menu.top, left: Math.max(8, menu.left), zIndex: 51,
+            minWidth: 172, padding: 5,
+            background: "var(--bg-elev)", border: "1px solid var(--line)", borderRadius: 12,
+            boxShadow: "0 14px 36px -10px rgba(15,23,42,0.4)",
+          }}>
+            {[
+              { ic: <Icons.pin size={13} color={menu.pinned ? "var(--brand)" : "var(--ink-3)"} />, label: menu.pinned ? "고정 해제" : "상단 고정", act: () => onPin && onPin(menu.id) },
+              { ic: <Icons.pencil size={13} color="var(--ink-3)" />, label: "이름 바꾸기", act: () => beginEdit(menu.s) },
+            ].map((it, i) => (
+              <button
+                key={i}
+                onClick={() => { it.act(); setMenu(null); }}
+                onMouseOver={(e) => { e.currentTarget.style.background = "var(--bg-sunk)"; }}
+                onMouseOut={(e) => { e.currentTarget.style.background = "transparent"; }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 9, width: "100%", textAlign: "left",
+                  padding: "8px 11px", border: "none", background: "transparent", cursor: "pointer",
+                  borderRadius: 8, fontSize: 12.5, fontWeight: 600, color: "var(--ink)",
+                }}
+              >{it.ic}{it.label}</button>
+            ))}
+            <div style={{ height: 1, background: "var(--line-soft)", margin: "4px 6px" }} />
+            <button
+              onClick={() => { const id = menu.id; setMenu(null); onDelete && onDelete(id); }}
+              onMouseOver={(e) => { e.currentTarget.style.background = "rgba(220,38,38,0.08)"; }}
+              onMouseOut={(e) => { e.currentTarget.style.background = "transparent"; }}
+              style={{
+                display: "flex", alignItems: "center", gap: 9, width: "100%", textAlign: "left",
+                padding: "8px 11px", border: "none", background: "transparent", cursor: "pointer",
+                borderRadius: 8, fontSize: 12.5, fontWeight: 700, color: "#dc2626",
+              }}
+            ><Icons.close size={13} color="#dc2626" />삭제</button>
+          </div>
+        </>
+      ), document.body)}
     </div>
+    </>
   );
 }
 
@@ -1990,6 +2718,7 @@ function DayDivider({ dateKey }) {
   if (!dateKey) return null;
   const d = new Date(dateKey + "T00:00:00");
   if (isNaN(d.getTime())) return null;
+  const y = d.getFullYear();
   const m = d.getMonth() + 1;
   const day = d.getDate();
   const dow = "일월화수목금토"[d.getDay()];
@@ -2001,83 +2730,50 @@ function DayDivider({ dateKey }) {
       letterSpacing: "0.04em",
     }}>
       <div style={{ flex: 1, height: 1, background: "var(--line-soft)" }} />
-      <span>{m}월 {day}일 ({dow})</span>
+      <span>{y}년 {m}월 {day}일 ({dow})</span>
       <div style={{ flex: 1, height: 1, background: "var(--line-soft)" }} />
     </div>
   );
 }
 
-// 빠른 질문 알약 — 입력창 위에 가로 wrap.
-// 화면에는 짧은 작전명, 실제 전송은 구체 질문으로 분리한다.
-function QuickPrompts({ onPick, disabled, equipment = [] }) {
-  const counts = equipment.reduce((acc, d) => {
-    if (acc[d.status] != null) acc[d.status] += 1;
-    return acc;
-  }, { critical: 0, warn: 0, offline: 0 });
-  const items = [
-    {
-      label: "즉시 점검 TOP 5",
-      prompt: "지금 현장 점검 우선순위 TOP 5를 뽑고, 각 단말의 근거 수치와 조치만 짧게 정리해줘",
-    },
-    {
-      label: `위험 ${counts.critical}건 근거`,
-      prompt: "현재 위험 단말의 AI MSE, AI 기준 대비, 주요 원인 피처, 권장 조치를 정리해줘",
-    },
-    {
-      label: `통신장애 ${counts.offline}건`,
-      prompt: "통신 장애 단말의 위치, 마지막 측정 시각, 두절 시간을 정리해줘",
-    },
-    {
-      label: "AC 500mV 초과",
-      prompt: "AC유입이 500mV 이상인 단말을 찾아서 위치와 즉시 점검 조치를 알려줘",
-    },
-    {
-      label: `이상 의심 ${counts.warn}건`,
-      prompt: "이상 의심/관찰 단말 중 AI 기준 대비가 높은 순서로 TOP 5를 정리하고 원인 피처를 붙여줘",
-    },
-    {
-      label: "방식전위 기준초과",
-      prompt: "방식전위가 -850mV 기준을 초과한 단말을 찾아 우선순위와 조치안을 알려줘",
-    },
-  ];
+// 추천 질문 — 입력창 위 팝업에 세로 목록으로. ↑/↓ 하이라이트(부모 onKeyDown) + Enter 선택, 클릭·호버 지원.
+// 항목(items)은 부모가 보유 — 화살표 네비 시 부모가 선택 prompt 를 알아야 하기 때문.
+function QuickPrompts({ items = [], highlightIndex = 0, onHover, onPick, disabled }) {
   return (
-    <div style={{
-      display: "flex", flexWrap: "wrap", gap: 6,
-      padding: "8px 10px 4px",
-      borderTop: "1px solid var(--line-soft)",
-      background: "var(--bg-elev)",
-    }}>
-      {items.map((item, idx) => (
-        <button
-          key={idx}
-          type="button"
-          onClick={() => !disabled && onPick(item.prompt)}
-          disabled={disabled}
-          style={{
-            padding: "5px 12px",
-            borderRadius: 999,
-            background: "var(--bg-sunk)",
-            border: "1px solid var(--line)",
-            color: "var(--ink-3)",
-            fontSize: 11.5, fontWeight: 500, lineHeight: 1.3,
-            cursor: disabled ? "not-allowed" : "pointer",
-            opacity: disabled ? 0.5 : 1,
-            whiteSpace: "nowrap",
-            transition: "border-color 140ms, color 140ms, background 140ms",
-          }}
-          onMouseEnter={(e) => {
-            if (disabled) return;
-            e.currentTarget.style.borderColor = "var(--brand)";
-            e.currentTarget.style.color       = "var(--brand)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.borderColor = "var(--line)";
-            e.currentTarget.style.color       = "var(--ink-3)";
-          }}
-        >
-          {item.label}
-        </button>
-      ))}
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {items.map((item, idx) => {
+        const active = idx === highlightIndex;
+        const Icon = item.icon || Icons.sparkle;
+        return (
+          <button
+            key={idx}
+            type="button"
+            onClick={() => !disabled && onPick(item)}
+            onMouseEnter={() => onHover && onHover(idx)}
+            disabled={disabled}
+            style={{
+              display: "flex", alignItems: "center", gap: 11, width: "100%",
+              padding: "9px 10px", borderRadius: 9, border: "none", textAlign: "left",
+              background: active ? "var(--brand-wash)" : "transparent",
+              cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1,
+              transition: "background 70ms ease-out",
+            }}
+          >
+            {/* 아이콘 → 요약 단어 → 상세 설명 (가로 순) */}
+            <span style={{ flexShrink: 0, display: "grid", placeItems: "center", color: active ? "var(--brand)" : "var(--ink-3)", transition: "color 70ms ease-out" }}>
+              {item.img
+                ? <img src={item.img} alt="" style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover", display: "block" }} />
+                : <Icon size={18} />}
+            </span>
+            <span style={{ fontSize: 13, fontWeight: 700, flexShrink: 0, whiteSpace: "nowrap", color: active ? "var(--brand)" : "var(--ink)" }}>
+              {item.title}
+            </span>
+            <span style={{ fontSize: 12, color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+              {item.desc}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -2131,17 +2827,21 @@ function renderInlineMD(text) {
   return tokens;
 }
 
-function ChatMessage({ message }) {
+function ChatMessage({ message, botAvatar = "/chatbot.png", botLabel = "AI 관제 도우미", onReply, hideTime = false }) {
   const isAi = message.role === "ai";
+  const [hov, setHov] = useState(false);
   return (
-    <div style={{
+    <div
+      onMouseEnter={() => onReply && setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      style={{
       display: "flex",
       flexDirection: isAi ? "row" : "row-reverse",
       gap: 8,
       alignItems: isAi ? "flex-start" : "flex-end",
     }}>
       {isAi && (
-        <div style={{
+        <div className={message.human ? "neon-green" : undefined} style={{
           width: 34, height: 34, borderRadius: "50%",
           background: "linear-gradient(135deg, #4f46e5, #8b83ff)",
           color: "#fff",
@@ -2150,27 +2850,39 @@ function ChatMessage({ message }) {
           marginTop: 1,
           overflow: "hidden",
         }}>
-          <img src="/chatbot.png" alt="AI" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          <img src={botAvatar} alt="AI" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         </div>
       )}
       <div style={{ maxWidth: "min(85%, 360px)", display: "flex", flexDirection: "column", gap: 3 }}>
         {isAi && (
           <div style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-3)", paddingLeft: 2, marginBottom: 1 }}>
-            AI 챗봇
+            {botLabel}
           </div>
         )}
         <div style={{
           padding: "8px 11px",
-          background: isAi ? "#FCFCF0" : "linear-gradient(135deg, #6D5DF6 0%, #4F46E5 100%)",
-          color: isAi ? "#111827" : "#FFFFFF",
-          border: isAi ? "1px solid #ECEAD9" : "none",
+          background: isAi ? "var(--chat-ai-bg)" : "var(--chat-user-bg)",
+          color: isAi ? "var(--chat-ai-fg)" : "#FFFFFF",
+          border: "none",
           borderRadius: isAi ? "18px 18px 18px 4px" : "18px 18px 4px 18px",
           fontSize: 12.5,
           lineHeight: 1.55,
           whiteSpace: "pre-wrap",
           wordBreak: "break-word",
-          boxShadow: isAi ? "0 4px 12px rgba(15,23,42,0.05)" : "0 6px 14px rgba(79,70,229,0.18)",
+          boxShadow: isAi ? "none" : "0 6px 14px rgba(79,70,229,0.18)",
+          ...(isAi && message.streaming && !message.text && !(message.toolCalls?.length)
+            ? { alignSelf: "flex-start", width: "fit-content", padding: "9px 12px" }
+            : {}),
         }}>
+          {/* 답장 인용 — 카톡식 (원문 일부를 말풍선 상단에) */}
+          {message.quote && (
+            <div style={{
+              borderLeft: `3px solid ${isAi ? "rgba(0,0,0,0.18)" : "rgba(255,255,255,0.55)"}`,
+              paddingLeft: 8, marginBottom: 6, fontSize: 11.5, lineHeight: 1.4,
+              opacity: 0.72, maxHeight: 46, overflow: "hidden",
+              whiteSpace: "pre-wrap", wordBreak: "break-word",
+            }}>{message.quote}</div>
+          )}
           {/* 도구 호출 칩 (function calling) — 스트리밍 중이거나 호출이력 있을 때 표시
               상태 분기:
                 · 스트리밍 中 + 마지막 칩 = 보라 + pulse (조회 중)
@@ -2178,51 +2890,44 @@ function ChatMessage({ message }) {
                 · 스트리밍 완료 후 = 회색 + ✓ prefix (모두 완료, 흔적) */}
           {isAi && Array.isArray(message.toolCalls) && message.toolCalls.length > 0 && (
             <div style={{
-              display: "flex", flexWrap: "wrap", gap: 4,
+              display: "flex", flexWrap: "wrap", rowGap: 2, columnGap: 12,
               marginBottom: message.text ? 6 : 0,
             }}>
-              {message.toolCalls.map((tc, idx, arr) => {
-                const isInProgress = message.streaming && idx === arr.length - 1;
-                return (
+              {(() => {
+                // 같은 카테고리 도구 호출은 하나로 묶고 횟수 표시
+                //   (14× "AI 도구 호출" → "AI 도구 14회 호출"). 진행 중인 마지막 호출의 카테고리만 pulse.
+                const groups = [];
+                const at = {};
+                const lastIdx = message.toolCalls.length - 1;
+                message.toolCalls.forEach((tc, i) => {
+                  const cat = TOOL_CATEGORY[tc.name] || tc.name;
+                  if (at[cat] == null) { at[cat] = groups.length; groups.push({ cat, count: 0, active: false }); }
+                  groups[at[cat]].count += 1;
+                  if (message.streaming && i === lastIdx) groups[at[cat]].active = true;
+                });
+                return groups.map((g, idx) => (
                   <span key={idx} style={{
                     display: "inline-flex", alignItems: "center", gap: 4,
-                    padding: "2px 7px",
-                    fontSize: 10.5, lineHeight: 1.3,
-                    borderRadius: 999,
-                    background: isInProgress ? "rgba(79,70,229,0.12)" : "rgba(16,185,129,0.08)",
-                    color:      isInProgress ? "var(--brand)"        : "#047857",
-                    border: `1px solid ${isInProgress ? "rgba(79,70,229,0.25)" : "rgba(16,185,129,0.25)"}`,
+                    fontSize: 10.5, lineHeight: 1.3, fontWeight: 700,
+                    color: g.active ? "var(--brand)" : "var(--ok)",
                     whiteSpace: "nowrap",
-                    animation: isInProgress ? "pulse-dot 1.4s ease-in-out infinite" : "none",
-                    transition: "background 200ms, color 200ms, border-color 200ms",
+                    transition: "color 200ms",
                   }}>
-                    <span style={{ fontSize: 9 }}>{isInProgress ? "🔧" : "✓"}</span>
-                    <span style={{ fontFamily: "JetBrains Mono, ui-monospace, monospace" }}>{tc.name}</span>
-                    {tc.args && Object.keys(tc.args).length > 0 && (
-                      <span style={{ opacity: 0.7, fontSize: 9.5 }}>
-                        ({Object.entries(tc.args).map(([k,v]) => `${k}:${String(v).slice(0,16)}`).join(", ")})
-                      </span>
-                    )}
+                    {g.active
+                      ? <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--brand)", animation: "blink-fade 1.2s ease-in-out infinite", flexShrink: 0 }} />
+                      : <Icons.check size={11} color="var(--ok)" />}
+                    <span>{g.cat + " 도구 " + (g.count > 1 ? g.count + "회 호출" : "호출")}</span>
                   </span>
-                );
-              })}
+                ));
+              })()}
             </div>
           )}
           {/* AI 응답 생성 중 인디케이터 — streaming + 아직 텍스트·도구 X */}
           {isAi && message.streaming && !message.text && !(message.toolCalls?.length) ? (
-            <span style={{
-              display: "inline-flex", alignItems: "center", gap: 7,
-              color: "var(--ink-3)", fontSize: 12, fontWeight: 500,
-            }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" style={{
-                animation: "spin 0.9s linear infinite", display: "block",
-              }}>
-                <circle cx="12" cy="12" r="9" fill="none"
-                  stroke="currentColor" strokeWidth="2.5"
-                  strokeDasharray="42 14" strokeLinecap="round"
-                  opacity="0.65" />
-              </svg>
-              AI 응답 생성 중...
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--ink-3)", animation: "pulse-dot 1.2s 0s infinite" }} />
+              <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--ink-3)", animation: "pulse-dot 1.2s 0.2s infinite" }} />
+              <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--ink-3)", animation: "pulse-dot 1.2s 0.4s infinite" }} />
             </span>
           ) : (
             <>
@@ -2230,13 +2935,25 @@ function ChatMessage({ message }) {
               {message.streaming && (
                 <span style={{
                   display: "inline-block",
-                  width: 7, height: 13, marginLeft: 2,
+                  width: 2, height: 14, marginLeft: 3, borderRadius: 1,
                   verticalAlign: "text-bottom",
-                  background: "var(--brand)",
+                  background: "var(--ink-3)", opacity: 0.7,
                   animation: "blink 0.9s step-start infinite",
                 }} />
               )}
             </>
+          )}
+          {message.image && (
+            <img
+              src={message.image}
+              alt="첨부 이미지"
+              loading="lazy"
+              style={{
+                display: "block", maxWidth: "100%", maxHeight: 240,
+                marginTop: (message.text || message.toolCalls?.length) ? 6 : 0,
+                borderRadius: 10, border: "1px solid rgba(0,0,0,0.10)",
+              }}
+            />
           )}
         </div>
         <div style={{
@@ -2245,26 +2962,48 @@ function ChatMessage({ message }) {
           paddingLeft: isAi ? 4 : 0,
           paddingRight: isAi ? 0 : 4,
           display: "flex",
-          justifyContent: isAi ? "flex-start" : "flex-end",
+          justifyContent: isAi ? "space-between" : "flex-end",
           gap: 8,
         }}>
-          <span>{message.time}</span>
-          {/* 응답 메타 (AI 메시지만, 스트리밍 끝난 후) */}
-          {isAi && message.meta && !message.streaming && (
-            <span style={{ opacity: 0.7 }}>
-              {message.meta.elapsedMs != null && `${(message.meta.elapsedMs / 1000).toFixed(1)}s`}
-              {message.meta.rounds && ` · ${message.meta.rounds}R`}
-              {message.meta.tokens?.completion != null && ` · ${message.meta.tokens.completion}tok`}
-              {message.meta.fallback && ` · ${message.meta.fallback}`}
-            </span>
-          )}
+          {!hideTime && <span>{to12h(message.time)}</span>}
+          {/* 모델 · 토큰 · 걸린시간 — 시간과 분리된 생성 메타 그룹 */}
+          {isAi && message.meta && !message.streaming && (() => {
+            const parts = [];
+            if (message.meta.model) parts.push(message.meta.model);
+            if (message.meta.tokens) {
+              const p = Number(message.meta.tokens.prompt) || 0;
+              const c = Number(message.meta.tokens.completion) || 0;
+              const nf = (n) => n.toLocaleString("en-US");
+              if (p > 0)      parts.push(`${nf(p + c)}tok`);
+              else if (c > 0) parts.push(`${nf(c)}tok`);
+            }
+            if (message.meta.elapsedMs != null) parts.push(`${(message.meta.elapsedMs / 1000).toFixed(1)}s`);
+            if (message.meta.fallback) parts.push(message.meta.fallback);
+            return parts.length ? <span style={{ opacity: 0.45 }}>{parts.join(" · ")}</span> : null;
+          })()}
         </div>
       </div>
+      {onReply && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onReply(message); }}
+          title="답장"
+          style={{
+            alignSelf: "center", flexShrink: 0,
+            width: 26, height: 26, borderRadius: "50%",
+            display: "grid", placeItems: "center", border: "1px solid var(--line)",
+            background: "var(--bg-elev)", color: "var(--ink-3)", cursor: "pointer",
+            fontSize: 13, lineHeight: 1,
+            opacity: hov ? 1 : 0, transition: "opacity 140ms",
+            pointerEvents: hov ? "auto" : "none",
+          }}
+        >↩</button>
+      )}
     </div>
   );
 }
 
-function ChatTyping() {
+function ChatTyping({ botAvatar = "/chatbot.png" }) {
   return (
     <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
       <div style={{
@@ -2275,7 +3014,7 @@ function ChatTyping() {
         flexShrink: 0,
         overflow: "hidden",
       }}>
-        <img src="/chatbot.png" alt="AI" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        <img src={botAvatar} alt="AI" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
       </div>
       <div style={{
         padding: "10px 14px",
@@ -2298,17 +3037,9 @@ function fmtTime(d) {
 }
 
 function useLogStream(externalEvents = []) {
-  const [lines, setLines] = useState(() => {
-    const now = new Date();
-    const base = now.getTime() - 4000;
-    const d1 = new Date(base), d2 = new Date(base + 2000), d3 = new Date(base + 4000);
-    return [
-      { id: 1, ts: d1.toISOString(), time: fmtTime(d1), kind: "ok", text: "SYS: 시스템 시작 · AI 엔진 초기화", tail: "OK" },
-      { id: 2, ts: d2.toISOString(), time: fmtTime(d2), kind: "ai", text: "AI: LSTM-AutoEncoder 모델 로드 완료" },
-      { id: 3, ts: d3.toISOString(), time: fmtTime(d3), kind: "ai", text: "AI: 백엔드 연결 대기 중..." },
-    ];
-  });
-  const processedIds = useRef(new Set([1, 2, 3]));
+  // 초기값: 빈 배열 — 부팅 하드코딩 메시지 제거 (실데이터가 polling 으로 즉시 채워짐, 5/30)
+  const [lines, setLines] = useState([]);
+  const processedIds = useRef(new Set());
   const latestTsRef  = useRef(null);   // 백엔드 polling 증분용
 
   // (A) 페이지 진입 시 App.jsx 가 생성한 즉시 이벤트 추가
@@ -2331,16 +3062,14 @@ function useLogStream(externalEvents = []) {
         const r = await fetch(url);
         if (!r.ok || aborted) return;
         const d = await r.json();
-        if (!d?.ok || !Array.isArray(d.events) || d.events.length === 0) return;
+        if (!d?.ok || aborted) return;
+        // 증분 cursor — 서버가 준 nextCursor(KST DATETIME 문자열)를 파싱 없이 그대로 사용.
+        // (e.ts 를 new Date 로 재파싱하면 타임존 변환 오차로 매번 9시간치를 중복 조회함)
+        if (d.nextCursor) latestTsRef.current = d.nextCursor;
+        if (!Array.isArray(d.events) || d.events.length === 0) return;
         const fresh = d.events.filter((e) => !processedIds.current.has(e.id));
         if (fresh.length === 0) return;
         fresh.forEach((e) => processedIds.current.add(e.id));
-        // 가장 최신 ts 갱신 (poll 증분 cursor)
-        const newest = d.events.reduce((acc, e) => {
-          const t = new Date(e.ts).getTime();
-          return !acc || t > acc.t ? { t, ts: e.ts } : acc;
-        }, null);
-        if (newest) latestTsRef.current = newest.ts;
         // 시간순 (오래된 → 최신) 으로 누적
         const sorted = fresh.slice().sort((x, y) => new Date(x.ts).getTime() - new Date(y.ts).getTime());
         setLines((prev) => [...prev.slice(-200), ...sorted]);
@@ -2588,9 +3317,8 @@ function DashboardEquipmentDrawer({ item, onClose, onDetailRequest, closing }) {
   };
 
   return (
-    <div style={{
+    <div className="glass-panel" style={{
       position: "absolute", right: 0, top: 0, bottom: 0, width: w, zIndex: 30,
-      background: "var(--bg-elev)",
       border: "1px solid var(--line)",
       borderRadius: 16,
       overflow: "hidden",
@@ -2620,10 +3348,10 @@ function DashboardEquipmentDrawer({ item, onClose, onDetailRequest, closing }) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", gap: 8 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-              <span className="mono" style={{ fontSize: 16, fontWeight: 800, color: c.fg === "#fff" ? c.bg : c.fg }}>{item.deviceId}</span>
+              <span className="mono" style={{ fontSize: 16, fontWeight: 800, color: ({ "정상": "var(--ok)", "관찰": "var(--warn)", "이상": "#dc2626" })[c.ko] || (c.fg === "#fff" ? c.bg : c.fg) }}>{item.deviceId}</span>
               <span style={{
-                padding: "3px 10px", borderRadius: 6, fontSize: 11, fontWeight: 700,
-                background: c.bg, color: c.fg, border: `1px solid ${c.bd}`,
+                fontSize: 12, fontWeight: 800,
+                color: ({ "정상": "var(--ok)", "관찰": "var(--warn)", "이상": "#dc2626" })[c.ko] || (c.fg === "#fff" ? c.bg : c.fg),
               }}>
                 {c.ko}
               </span>
@@ -2635,22 +3363,25 @@ function DashboardEquipmentDrawer({ item, onClose, onDetailRequest, closing }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             {onDetailRequest && (
               <button
+                className="attn-shine"
                 onClick={() => onDetailRequest(item.deviceId)}
-                title="상세 분석"
+                title="AI 관제 도우미가 이 단말을 분석·요약해 드려요"
                 style={{
-                  display: "inline-flex", alignItems: "center", gap: 4,
-                  padding: "4px 11px", borderRadius: 8,
-                  background: "rgba(99,102,241,0.10)",
-                  border: "1px solid rgba(99,102,241,0.35)",
-                  color: "var(--brand)",
-                  fontSize: 11, fontWeight: 600,
+                  display: "inline-flex", alignItems: "center", gap: 5,
+                  padding: "7px 14px", borderRadius: "16px 16px 4px 16px",
+                  background: "var(--chat-user-bg)",
+                  border: "1px solid var(--brand)",
+                  color: "#fff",
+                  fontSize: 11, fontWeight: 700,
                   cursor: "pointer",
                   whiteSpace: "nowrap",
+                  boxShadow: "0 2px 7px -1px rgba(79,70,229,0.45)",
                   transition: "all 140ms ease",
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(99,102,241,0.18)"; e.currentTarget.style.borderColor = "var(--brand)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(99,102,241,0.10)"; e.currentTarget.style.borderColor = "rgba(99,102,241,0.35)"; }}
+                onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(0.93)"; e.currentTarget.style.boxShadow = "0 5px 12px -2px rgba(79,70,229,0.5)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.filter = "brightness(1)"; e.currentTarget.style.boxShadow = "0 2px 7px -1px rgba(79,70,229,0.45)"; }}
               >
+                <img src="/chatbot.png" alt="" style={{ width: 16, height: 16, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
                 상세 분석
               </button>
             )}
@@ -2658,29 +3389,7 @@ function DashboardEquipmentDrawer({ item, onClose, onDetailRequest, closing }) {
         </div>
       </div>
       <div className="scroll" style={{ padding: 18, overflowY: "auto", flex: 1 }}>
-        {(item.aiMse ?? item.mse) != null && (() => {
-          const mse   = item.aiMse ?? item.mse;
-          const risk  = item.aiRisk ?? item.riskLevel ?? null;
-          const th    = item.aiThreshold ?? item.threshold;
-          const ratio = item.aiRatio ?? (th > 0 ? mse / th : null);
-          const aiColor = risk === "이상" ? "var(--err)" : risk === "관찰" ? "var(--warn)" : "var(--ink-2)";
-          const mseStr = mse < 0.01 ? mse.toFixed(6) : mse.toFixed(4);
-          return (
-            <div style={{ marginBottom: 10, padding: "9px 14px", borderRadius: 10, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)",
-                          display: "flex", alignItems: "center", flexWrap: "wrap", columnGap: 18, rowGap: 4 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-3)" }}>AI 분석</div>
-              <span style={{ display: "inline-flex", alignItems: "baseline", gap: 6 }}>
-                <span style={{ fontSize: 10, color: "var(--ink-4)" }}>AI 기준 대비</span>
-                <span className="mono" style={{ fontSize: 15, fontWeight: 700, color: aiColor }}>{ratio != null ? `×${Number(ratio).toFixed(2)}` : "-"}</span>
-              </span>
-              <span style={{ display: "inline-flex", alignItems: "baseline", gap: 6 }}>
-                <span style={{ fontSize: 10, color: "var(--ink-4)" }}>MSE</span>
-                <span className="mono" style={{ fontSize: 15, fontWeight: 700 }}>{mseStr}</span>
-              </span>
-              {risk && <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: aiColor }}>{risk}</span>}
-            </div>
-          );
-        })()}
+        <AiAnalysis key={item.deviceId} item={item} />
         {item.volt != null && (
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
@@ -2697,7 +3406,7 @@ function DashboardEquipmentDrawer({ item, onClose, onDetailRequest, closing }) {
                 { l: "AC 유입", v: `${(item.ac ?? 0).toLocaleString()}mV` },
                 { l: "희생전류",  v: `${item.sacrificial ?? 0}mA` },
                 { l: "온도",     v: `${item.temp ?? "-"}°C` },
-                { l: "습도(단말 원본)", v: `${item.hum ?? "-"}%` },
+                { l: "습도", v: `${item.hum ?? "-"}%` },
                 { l: "통신품질", v: item.commOk ? `${item.commDbm}dBm` : "단절", a: !item.commOk ? "var(--err)" : null },
               ].map((s) => (
                 <div key={s.l} style={{ padding: "10px 12px", borderRadius: 8, background: "var(--bg-sunk)", border: "1px solid var(--line-soft)" }}>
@@ -2727,7 +3436,7 @@ function DashboardEquipmentDrawer({ item, onClose, onDetailRequest, closing }) {
   );
 }
 
-export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], commOutage = [], aiEvents = [], demoMode = false, logOpen = false, onLogClose, onToggleLog }) {
+export function Dashboard({ user = null, mapStyle, setMapStyle, theme, autoPlay = true, equipment = [], markers = [], anomalies = [], watch = [], commOutage = [], aiEvents = [], demoMode = false, logOpen = false, onLogClose, onToggleLog }) {
   const [activeKpi, setActiveKpi] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [focused, setFocused] = useState(null); // {lat, lng, node, ts}
@@ -2866,22 +3575,10 @@ export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equip
 
   // 챗봇 응답에서 status 추출 → 자동 KPI 활성 (30초 후 자동 해제)
   const handleAutoKpi = (kpi) => {
+    // 타이머/카운트다운 제거 — 챗봇이 status 언급 시 해당 KPI 필터만 적용(자동 복귀·칩 없음)
     cancelAutoKpi();
     setActiveKpi(kpi);
     setFitTrigger(Date.now());
-    if (!kpi) return; // 총 장비(전체) 복귀는 타이머 X
-    const TOTAL = 30;
-    setAutoKpiSec(TOTAL);
-    // 1초마다 카운트다운
-    autoKpiTick.current = setInterval(() => {
-      setAutoKpiSec((s) => Math.max(0, s - 1));
-    }, 1000);
-    // 30초 후 전체 복귀
-    autoKpiTimer.current = setTimeout(() => {
-      setActiveKpi(null);
-      setFitTrigger(Date.now());
-      cancelAutoKpi();
-    }, TOTAL * 1000);
   };
 
   // 언마운트 시 타이머 정리
@@ -2924,13 +3621,13 @@ export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equip
         AI 탐지 → 옛 LogPanel 자리(좌측 row 3 우측 영역) 로 이동.
         AI 챗봇 → 우측 전체 column 차지 (옛 AIPanels + 옛 ChatPanel 자리 합쳐서).
       */}
-      <div style={{
+      <div className="dashboard-grid" style={{
         position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
-        padding: 24,
+        padding: "var(--dash-pad)",
         display: "grid",
-        gridTemplateColumns: "1fr 460px",
-        gridTemplateRows: "112px minmax(300px, 1.2fr) minmax(240px, 1fr)",
-        gap: 16,
+        gridTemplateColumns: "minmax(0, 1fr) var(--dash-chat-col)",
+        gridTemplateRows: "var(--dash-kpi-row) minmax(var(--dash-map-min), 1.2fr) minmax(var(--dash-bottom-min), 1fr)",
+        gap: "var(--dash-gap)",
         minHeight: 0,
         overflow: "auto",
       }}>
@@ -2942,6 +3639,7 @@ export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equip
         {/* (col 2, row 1~3) — AI 챗봇 (전체 우측 column · 옴니 5/22 확장) */}
         <div style={{ gridColumn: 2, gridRow: "1 / span 3", minHeight: 0 }}>
           <ChatPanel
+            user={user}
             equipment={equipment}
             weather={weather}
             onBotReply={fitToNodes}
@@ -2981,18 +3679,18 @@ export function Dashboard({ mapStyle, setMapStyle, theme, autoPlay = true, equip
 
         {/* (col 1, row 3) — 표 + (AI 탐지 ⇄ 시스템 로그 swap, 5/26)
             헤더 알약 클릭 시 in-place swap. 드로어 X. */}
-        <div style={{
+        <div className="dashboard-bottom-grid" style={{
           gridColumn: 1, gridRow: 3,
           display: "grid",
-          gridTemplateColumns: "minmax(440px, 1fr) minmax(280px, 0.6fr)",
-          gap: 16, minHeight: 0,
+          gridTemplateColumns: "var(--dash-table-col) var(--dash-ai-col)",
+          gap: "var(--dash-gap)", minHeight: 0,
         }}>
           {/* 좌측 셀: 전체 장비 현황 요약 ⇄ 실시간 시스템 로그 (버튼이 있는 패널 자체가 swap, 5/30) */}
           {logOpen
             ? <LogPanel lines={lines} onToggleLog={onToggleLog} />
             : <TableSummary data={tableData} onRowClick={handleRowClick} activeKpi={activeKpi} logOpen={logOpen} onToggleLog={onToggleLog} />}
           {/* 우측 셀: AI 탐지 목록 고정 */}
-          <AIPanels anomalies={anomalies} watch={watch} commOutage={commOutage} onAnalyze={handleAnalyze} />
+          <AIPanels anomalies={anomalies} watch={watch} commOutage={commOutage} onAnalyze={handleAnalyze} focusNode={sidebarDevice?.deviceId} />
         </div>
       </div>
 

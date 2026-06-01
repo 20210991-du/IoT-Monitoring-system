@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Icons } from "../components/Icons.jsx";
-import { signIn } from "../lib/authMock.js";
+import { signIn, RULES, checkUserId } from "../lib/authMock.js";
 
 function fmtTime(d = new Date()) {
   return d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -374,7 +374,7 @@ function LiveLog({ C, isDark }) {
         id:   `anml-${item.node}-${Date.now()}`,
         time: fmtTime(),
         kind: isAlert ? "alert" : "warn",
-        text: `AI: ${item.node} ${isAlert ? "이상 감지" : "이상 의심"} (MSE ${formatMse(item.mse)})`,
+        text: `AI: ${item.node} ${isAlert ? "이상 감지" : "관찰"} (MSE ${formatMse(item.mse)})`,
         tail: isAlert ? "ALERT" : "WARN",
       }]);
     }, 9000);
@@ -386,7 +386,7 @@ function LiveLog({ C, isDark }) {
       if (!rows.length) return;
       const item    = rows[Math.floor(Math.random() * rows.length)];
       const kindMap = { normal: "ok", critical: "alert", warn: "warn", offline: "warn" };
-      const textMap = { normal: "정상 수신", critical: "위험 확인 필요", warn: "이상 의심", offline: "통신 장애" };
+      const textMap = { normal: "정상 수신", critical: "이상 확인 필요", warn: "관찰", offline: "통신 장애" };
       push([{
         id:   `dev-${item.deviceId}-${Date.now()}`,
         time: fmtTime(),
@@ -539,20 +539,24 @@ function Field({ icon, label, focused, filled, C, children }) {
 }
 
 // ── 메인 ──────────────────────────────────────────────────
-export function Login({ onLogin, onSignUp, prefillId }) {
+export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
   const isDark = useTheme();
   const C      = isDark ? DARK : LIGHT;
 
-  const [booting,   setBooting]   = useState(true);
-  const [id,        setId]        = useState(prefillId || "admin");
-  const [pw,        setPw]        = useState(prefillId ? "" : "11111111");
+  const [booting,   setBooting]   = useState(!skipBoot);  // 로그아웃 진입 시 부팅 생략
+  const [id,        setId]        = useState(prefillId || "");
+  const [pw,        setPw]        = useState("");
   const [remember,  setRemember]  = useState(true);
   const [loading,   setLoading]   = useState(false);
   const [focus,     setFocus]     = useState(null);
   const [error,     setError]     = useState("");
   const [errStatus, setErrStatus] = useState(null);
   const [failCount, setFailCount] = useState(0);
-  const [idFilled,  setIdFilled]  = useState(!!id);
+  const [idOk, setIdOk] = useState(false);            // 체크표시 = 실제 존재하는 활성 계정일 때만
+  const idChkTimer = useRef(null);                    // ID 존재확인 디바운스 타이머
+  useEffect(() => {                                   // 프리필 ID 가 있으면 마운트 시 1회 확인
+    if (RULES.ID_RE.test(id)) checkUserId(id).then(setIdOk);
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
   const [pwFilled,  setPwFilled]  = useState(!!pw);
 
   const typedText   = useTyping("통합관제 시스템", 75, 500);
@@ -597,8 +601,8 @@ export function Login({ onLogin, onSignUp, prefillId }) {
   const submit = (e) => {
     e && e.preventDefault();
     setLoading(true); setError(""); setErrStatus(null);
-    setTimeout(() => {
-      const res = signIn({ id, pw, remember });
+    setTimeout(async () => {
+      const res = await signIn({ id, pw, remember });
       if (!res.ok) {
         setLoading(false); setError(res.error); setErrStatus(res.status || null);
         if (!res.status) setFailCount((c) => c + 1);
@@ -817,12 +821,17 @@ export function Login({ onLogin, onSignUp, prefillId }) {
             </div>
 
             <form onSubmit={submit}>
-              <Field icon={<Icons.user size={16} />} label="운영자 ID" focused={focus === "id"} filled={idFilled && focus !== "id"} C={C}>
+              <Field icon={<Icons.user size={16} />} label="운영자 ID" focused={focus === "id"} filled={idOk} C={C}>
                 <input
                   value={id}
-                  onChange={(e) => { setId(e.target.value); setIdFilled(false); }}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setId(v); setIdOk(false);
+                    if (idChkTimer.current) clearTimeout(idChkTimer.current);
+                    if (RULES.ID_RE.test(v)) idChkTimer.current = setTimeout(async () => { setIdOk(await checkUserId(v)); }, 350);
+                  }}
                   onFocus={() => setFocus("id")}
-                  onBlur={() => { setFocus(null); setIdFilled(!!id); }}
+                  onBlur={() => setFocus(null)}
                   style={inputStyle} placeholder="ID 를 입력하세요" autoComplete="username"
                 />
               </Field>
@@ -923,10 +932,10 @@ export function Login({ onLogin, onSignUp, prefillId }) {
                 }}>
                   {failCount >= 3 ? "비밀번호는 관리자에게 문의" : "·"}
                 </span>
-                <a onClick={(e) => { e.preventDefault(); onSignUp && onSignUp(); }} href="#"
-                  style={{ color: C.brand, fontWeight: 600, cursor: "pointer" }}>
-                  회원가입
-                </a>
+                <button type="button" onClick={() => onSignUp && onSignUp()} style={{
+                  fontSize: 12.5, fontWeight: 700, color: isDark ? "#a5b4fc" : "#4f46e5",
+                  background: "none", border: "none", cursor: "pointer", padding: 0,
+                }}>회원가입 →</button>
               </div>
             </form>
           </div>

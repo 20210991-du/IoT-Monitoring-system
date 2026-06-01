@@ -147,6 +147,28 @@ def get_last_pk(dst_conn, table_name, pk_col):
     return r[0] if r and r[0] is not None else None
 
 
+def record_sync_log(dst_conn, table_name, rows_added, last_pk=None, latest_data_ts=None, notes=None):
+    """sync_log 이력 테이블에 이번 주기 결과를 한 행 INSERT (시스템 로그 표시용).
+    rows_added 가 0 이어도 '동기화 시도' 기록을 남겨 라이브함을 보여줌은 과하므로,
+    실제 신규 유입이 있을 때(rows_added>0)만 기록한다."""
+    if not rows_added:
+        return
+    dc = dst_conn.cursor()
+    dc.execute("""
+      INSERT INTO sync_log (synced_at, table_name, rows_added, last_pk, latest_data_ts, notes)
+      VALUES (NOW(), %s, %s, %s, %s, %s)
+    """, (table_name, rows_added, last_pk, latest_data_ts, notes))
+    dst_conn.commit()
+
+
+def get_max_ts(dst_conn, table_name, ts_col):
+    """대상 테이블의 최신 측정 시각 (latest_data_ts 기록용)."""
+    dc = dst_conn.cursor()
+    dc.execute(f"SELECT MAX({ts_col}) FROM {table_name}")
+    r = dc.fetchone()
+    return r[0] if r and r[0] is not None else None
+
+
 # ───────── 명령 핸들러 ─────────
 
 def cmd_backfill():
@@ -188,7 +210,9 @@ def cmd_sync_alarm():
                          "CONTENTS STATUS VALUE CONDITION_ID SITE_ID",
                          where=f"ALARM_ID > {last_pk}")
         new_pk = get_last_pk(dst_conn, "kscg_alarm_log", "ALARM_ID")
+        latest_ts = get_max_ts(dst_conn, "kscg_alarm_log", "GEN_DATE")
         record_sync(dst_conn, "kscg_alarm_log", n, last_pk=new_pk)
+        record_sync_log(dst_conn, "kscg_alarm_log", n, last_pk=new_pk, latest_data_ts=latest_ts)
         if n:
             print(f"[{datetime.now():%H:%M:%S}] alarm: +{n} rows (last_pk {last_pk} → {new_pk})")
     finally:
@@ -206,7 +230,9 @@ def cmd_sync_sensor():
                          "DATA_ID SENSOR_ID WRITE_DATE VALUE VALUE_INDEX",
                          where=f"DATA_ID > {last_pk}", chunk=5000)
         new_pk = get_last_pk(dst_conn, "kscg_sensor_data", "DATA_ID")
+        latest_ts = get_max_ts(dst_conn, "kscg_sensor_data", "WRITE_DATE")
         record_sync(dst_conn, "kscg_sensor_data", n, last_pk=new_pk)
+        record_sync_log(dst_conn, "kscg_sensor_data", n, last_pk=new_pk, latest_data_ts=latest_ts)
         # RECENT_DATA 전체 refresh (440 row 라 부담 X)
         n2 = upsert_table(src_conn, dst_conn, "kscg_recent_data", "TB_RECENT_DATA",
                           "SENSOR_ID DATE VALUE")

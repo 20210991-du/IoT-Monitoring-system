@@ -7,10 +7,11 @@ import { useWeather } from "../lib/weather.js";
 
 // 역할별 라벨/그라디언트 (Header 아바타 · 드롭다운 톤)
 const ROLE_META = {
-  admin:    { label: "관리자", grad: "linear-gradient(135deg, #8b5cf6, #6d28d9)", glow: "rgba(139,92,246,0.45)" },
-  operator: { label: "관제사", grad: "linear-gradient(135deg, #38bdf8, #0284c7)", glow: "rgba(56,189,248,0.45)" },
+  superadmin: { label: "총관리자", grad: "linear-gradient(135deg, #f43f5e, #9f1239)", glow: "rgba(244,63,94,0.45)", avatar: "/avatars/developer.png" },
+  admin:    { label: "관리자", grad: "linear-gradient(135deg, #8b5cf6, #6d28d9)", glow: "rgba(139,92,246,0.45)", avatar: "/avatars/admin.png" },
+  operator: { label: "관제사", grad: "linear-gradient(135deg, #38bdf8, #0284c7)", glow: "rgba(56,189,248,0.45)", avatar: "/avatars/operator.png" },
   viewer:   { label: "뷰어",   grad: "linear-gradient(135deg, #94a3b8, #64748b)", glow: "rgba(148,163,184,0.4)"  },
-  guest:    { label: "게스트", grad: "linear-gradient(135deg, #fbbf24, #d97706)", glow: "rgba(245,158,11,0.45)" },
+  guest:    { label: "게스트", grad: "linear-gradient(135deg, #fbbf24, #d97706)", glow: "rgba(245,158,11,0.45)", avatar: "/avatars/guest.png" },
 };
 
 export function useClock() {
@@ -297,8 +298,8 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
               display: "grid", placeItems: "center",
               color: "#fff", fontWeight: 800, fontSize: 13,
               boxShadow: `0 0 0 2px var(--bg-sunk)`,
-              flexShrink: 0,
-            }}>{initial}</div>
+              flexShrink: 0, overflow: "hidden",
+            }}>{roleMeta.avatar ? <img src={roleMeta.avatar} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : initial}</div>
             <span style={{
               color: "var(--ink-3)",
               transform: open ? "rotate(90deg)" : "rotate(0deg)",
@@ -337,9 +338,9 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
                   display: "grid", placeItems: "center",
                   color: "#fff", fontWeight: 800, fontSize: 14,
                   boxShadow: `0 4px 12px -3px ${roleMeta.glow}`,
-                  flexShrink: 0,
+                  flexShrink: 0, overflow: "hidden",
                 }}>
-                  {initial}
+                  {roleMeta.avatar ? <img src={roleMeta.avatar} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : initial}
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{
@@ -531,7 +532,7 @@ export function SubNav({ tab, setTab, apiStatus = "mock", dbStatus = null, dbInf
     { k: "dashboard", ko: "대시보드" },
     { k: "equipment", ko: "전체 장비 현황" },
   ];
-  const tabs = user?.role === "admin"
+  const tabs = (user?.role === "admin" || user?.role === "superadmin")
     ? [...baseTabs, { k: "users", ko: "관리자 페이지", badge: pendingCount }]
     : baseTabs;
   const st = API_STATUS_STYLE[apiStatus] || API_STATUS_STYLE.mock;
@@ -640,62 +641,82 @@ export function SubNav({ tab, setTab, apiStatus = "mock", dbStatus = null, dbInf
   );
 }
 
-export function EmergencyBanner({ onDismiss, onOpen, criticalDevices = [] }) {
-  // criticalDevices: equipment 중 status === "critical" 인 항목 배열
-  const count = criticalDevices.length;
-  if (count === 0) return null;
-  const first = criticalDevices[0] || {};
-  const time  = (first.updatedAt || "").trim();
-  const head  = count === 1
-    ? `[위험] ${first.zone || ""} ${first.deviceId || ""} — ${first.label || "이상 감지"} · 즉각 현장 점검`
-    : `[위험] ${count}건 동시 발생 — ${first.zone || ""} ${first.deviceId || ""} 외 ${count - 1}건. 즉각 현장 점검`;
+// 공지 갱신 시각 표기: 오늘이면 HH:MM, 아니면 M/D HH:MM.
+function fmtNoticeTime(iso, now) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return sameDay ? `${hh}:${mm}` : `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
+}
 
+// 상시 표시 배너: 관리자 공지가 활성이면 빨강 긴급 스타일(고정)로, 없으면 중립 회색 바.
+//   공지 텍스트는 React 가 텍스트로 이스케이프 → 저장 XSS 없음. 강조 애니메이션(펄스)은 사용하지 않음.
+export function EmergencyBanner({ announcement }) {
+  const now = useClock();                                  // Date, 매초 갱신 (중립바 시계용)
+  const a   = announcement;
+  const showNotice = !!(a && a.active && (a.message || "").trim());
+
+  // ── 등록된 활성 공지가 있으면 빨강 긴급 스타일로 표시 (레벨 무관 고정) ──
+  if (showNotice) {
+    const when = fmtNoticeTime(a.updatedAt, now);
+    return (
+      <div style={{
+        position: "absolute", left: 0, right: 0, top: 104, height: 40,
+        // 빨강 긴급 톤 — 강한 그라디언트 + 대각선 스트라이프 (예전 프리미엄 디자인)
+        background: "#991b1b",
+        // 입체감 — 상단 하이라이트(빛) + 하단 내부음영 + 아래로 떠 있는 그림자 (색 그라데이션 X)
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.30), inset 0 -3px 7px rgba(0,0,0,0.32), 0 6px 18px -5px rgba(60,0,0,0.55)",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "0 32px", color: "#fff", zIndex: 35, overflow: "hidden",
+      }}>
+        <div style={{
+          position: "absolute", inset: 0,
+          background: "repeating-linear-gradient(45deg, transparent, transparent 20px, rgba(255,255,255,0.06) 20px, rgba(255,255,255,0.06) 40px)",
+          pointerEvents: "none",
+        }} />
+        <div style={{ position: "relative", zIndex: 1, flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
+          <span className="banner-marquee" style={{ display: "inline-flex", alignItems: "center", gap: 12, textShadow: "0 1px 1px rgba(0,0,0,0.35)" }}>
+            <span style={{ display: "inline-flex", width: 22, height: 22, flexShrink: 0, filter: "drop-shadow(0 1px 1px rgba(0,0,0,0.4))" }}>
+              <Icons.alert size={22} />
+            </span>
+            <span style={{
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              fontSize: 14,
+              fontWeight: 700,
+            }}>{a.message}</span>
+            {when && (
+              <span className="mono" style={{ fontSize: 11, opacity: 0.9, letterSpacing: "0.04em" }}>
+                {when}
+              </span>
+            )}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // ── 등록된 공지가 없으면 — 중립 회색 바 (상시) ──
+  const clk = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   return (
     <div style={{
       position: "absolute", left: 0, right: 0, top: 104, height: 40,
-      // 위험 톤 — 강한 빨강 그라디언트
-      background: "linear-gradient(90deg, #dc2626 0%, #991b1b 100%)",
-      boxShadow: "0 4px 14px -4px rgba(220,38,38,0.65)",
+      background: "var(--bg-elev)", borderBottom: "1px solid var(--line)",
       display: "flex", alignItems: "center", justifyContent: "space-between",
-      padding: "0 32px", color: "#fff", zIndex: 35,
-      overflow: "hidden",
-      animation: "danger-pulse 1.6s ease-in-out infinite",
+      padding: "0 32px", zIndex: 35,
     }}>
-      <div style={{
-        position: "absolute", inset: 0,
-        background: "repeating-linear-gradient(45deg, transparent, transparent 20px, rgba(255,255,255,0.06) 20px, rgba(255,255,255,0.06) 40px)",
-        pointerEvents: "none",
-      }} />
-      <div style={{ display: "flex", alignItems: "center", gap: 12, zIndex: 1, minWidth: 0 }}>
-        <div style={{
-          width: 22, height: 22,
-          animation: "pulse-dot 1.0s infinite",
-        }}>
-          <Icons.alert size={22} />
-        </div>
-        <div style={{
-          fontSize: 14, fontWeight: 700,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        }}>
-          {head}
-        </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--ok)", flexShrink: 0 }} />
+        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-2)" }}>운영 중</span>
+        <span style={{ fontSize: 12, color: "var(--ink-3)" }}>· 등록된 공지 없음</span>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 16, zIndex: 1 }}>
-        {time && (
-          <div className="mono" style={{ fontSize: 11, opacity: 0.9, letterSpacing: "0.04em" }}>
-            발생 시각 {time}
-          </div>
-        )}
-        <button onClick={onOpen} style={{
-          padding: "4px 14px", borderRadius: 999,
-          background: "rgba(255,255,255,0.22)", color: "#fff",
-          fontSize: 12, fontWeight: 700,
-          border: "1px solid rgba(255,255,255,0.4)",
-          cursor: "pointer",
-        }}>자세히 보기</button>
-        <button onClick={onDismiss} title="닫기" style={{ color: "#fff", opacity: 0.85, background: "transparent", border: "none", cursor: "pointer" }}>
-          <Icons.close size={16} />
-        </button>
+      <div className="mono" style={{ flexShrink: 0, fontSize: 11, color: "var(--ink-3)", letterSpacing: "0.04em" }}>
+        {clk} 기준
       </div>
     </div>
   );

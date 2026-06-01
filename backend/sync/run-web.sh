@@ -5,6 +5,7 @@
 set -euo pipefail
 set -a
 . "$HOME/PJHwork/secrets/local/siwon-db.env"
+if [ -f "$HOME/PJHwork/secrets/local/openai.env" ]; then . "$HOME/PJHwork/secrets/local/openai.env"; fi
 set +a
 export PORT="${PORT:-5050}"
 exec /Users/pjh/local/node/bin/node /Users/pjh/PJHwork/projects/team/IoT-Monitoring-system/front/server.js

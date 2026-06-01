@@ -1,210 +1,60 @@
 /**
- * authMock.js — localStorage 기반 mock 인증 (캡스톤 데모용)
+ * authMock.js — 백엔드 인증 클라이언트 (이전 localStorage 목업 대체).
  *
- * ⚠️ 데모 전용. 실제 운영은 백엔드 /api/auth/* 로 교체 예정.
- *    교체 인터페이스 정의: vault `02. 기획/04. 기획결정사항/ADR-010-인증-백엔드인터페이스.md`
+ *   서버: /api/auth/*  (MySQL `users` + bcrypt + JWT httpOnly 쿠키)
+ *   세션 토큰은 httpOnly 쿠키(JS 접근 불가) → XSS 토큰 탈취 완화.
+ *   여기선 "표시용 user 캐시"만 localStorage 에 둔다 (UI 게이팅용, 권한의 근거 아님).
+ *   실제 권한 검증은 매 요청마다 서버가 수행한다.
  *
- * 저장 위치: localStorage["siwon.auth.users"] (JSON 배열)
- *           localStorage["siwon.auth.session"] (현재 세션, JSON)
+ *   동기 API:  currentSession(), findUser(self)   — 캐시 읽기 (즉시 렌더용)
+ *   비동기 API: signIn/signOut/validateSession/listAllUsers/adminCreateUser/
+ *              adminResetPassword/updateProfile/changePassword  — fetch
  *
- * 비밀번호는 해시 X (mock). 실제 백엔드는 bcrypt 등 사용 가정.
+ *   ※ 파일명은 호환을 위해 유지(authMock). 더 이상 목업 아님.
  */
 
-const USERS_KEY   = "siwon.auth.users";
-const SESSION_KEY = "siwon.auth.session";
-const MIGRATION_KEY = "siwon.auth.migration"; // 시드 admin 동기화 버전
-const SEED_VERSION = "2026-05-04-admin-id";   // 시드 변경 시 이 값 갱신 → 다음 로드 1회 동기화
+const SESSION_KEY = "siwon.auth.session"; // 표시용 캐시 {id,name,role,status,createdAt,lastLoginAt,...}
 
-// ── 시드 계정 (최초 부팅 시 1회) ─────────────────────────
-//
-//  status: "active" — 정상 사용
-//          "pending" — 가입 신청, 관리자 승인 대기
-//          "rejected" — 관리자 반려
-//
-const SEED_USERS = [
-  {
-    id: "admin",
-    pw: "11111111",
-    name: "관리자",
-    role: "admin",
-    status: "active",
-    createdAt: "2026-04-20T00:00:00.000Z",
-    approvedAt: "2026-04-20T00:00:00.000Z",
-    approvedBy: "system",
-  },
-];
-
-function load() {
-  try {
-    const raw = localStorage.getItem(USERS_KEY);
-    if (!raw) {
-      localStorage.setItem(USERS_KEY, JSON.stringify(SEED_USERS));
-      localStorage.setItem(MIGRATION_KEY, SEED_VERSION);
-      return [...SEED_USERS];
-    }
-    let arr = JSON.parse(raw);
-    if (!Array.isArray(arr)) arr = [];
-
-    // 시드 동기화: SEED_VERSION 이 바뀌었을 때만 1회 적용.
-    // (시드 admin 의 pw/role/status 를 SEED_USERS 와 강제 동기화 — 데모 편의)
-    if (localStorage.getItem(MIGRATION_KEY) !== SEED_VERSION) {
-      // 구 admin ID(admin.siwon) → 신 ID(admin) 마이그레이션 (있을 때만)
-      const oldAdminIdx = arr.findIndex((u) => u.id === "admin.siwon");
-      if (oldAdminIdx >= 0) {
-        // 같은 id="admin" 신규 사용자가 이미 있으면 구계정 제거, 아니면 rename
-        const newAdminExists = arr.some((u, i) => u.id === "admin" && i !== oldAdminIdx);
-        if (newAdminExists) {
-          arr.splice(oldAdminIdx, 1);
-        } else {
-          arr[oldAdminIdx] = { ...arr[oldAdminIdx], id: "admin" };
-        }
-        // 활성 세션이 admin.siwon 이었으면 무효화 (재로그인 강제)
-        try {
-          const sess = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
-          if (sess && sess.id === "admin.siwon") localStorage.removeItem(SESSION_KEY);
-        } catch { /* ignore */ }
-      }
-
-      let changed = true;  // 위에서 이미 손댔거나, 시드 sync 로 변경 가능성
-      SEED_USERS.forEach((seed) => {
-        const idx = arr.findIndex((u) => u.id === seed.id);
-        if (idx < 0) {
-          arr.push({ ...seed });
-        } else {
-          arr[idx] = {
-            ...arr[idx],
-            pw:     seed.pw,
-            role:   seed.role,
-            status: seed.status,
-            name:   arr[idx].name || seed.name,
-          };
-        }
-      });
-      if (changed) localStorage.setItem(USERS_KEY, JSON.stringify(arr));
-      localStorage.setItem(MIGRATION_KEY, SEED_VERSION);
-    }
-    return arr;
-  } catch {
-    return [...SEED_USERS];
-  }
-}
-
-function save(users) {
-  localStorage.setItem(USERS_KEY, JSON.stringify(users));
-}
-
-// ── 검증 규칙 ────────────────────────────────────────────
-// 데모용 느슨한 검증 규칙 (실 운영 전환 시 강화 — ADR-010 참조)
+// ── 검증 규칙 / 라벨 (프론트 표시·입력검증용) ────────────
 export const RULES = {
-  ID_RE:    /^[A-Za-z0-9._-]{2,20}$/,            // 2~20자, 영숫·._-
-  PW_RE:    /^.{4,}$/,                            // 4자 이상, 종류 무관
-  NAME_RE:  /^.{1,20}$/,                          // 1~20자, 종류 무관
-  ROLES:    ["admin", "operator", "viewer", "guest"],
-  STATUSES: ["pending", "active", "rejected"],
+  ID_RE:    /^[A-Za-z0-9._-]{2,20}$/,
+  PW_RE:    /^.{4,}$/,
+  NAME_RE:  /^.{1,20}$/,
+  ROLES:    ["superadmin", "admin", "operator", "guest"], // viewer 제외 (superadmin=총관리자, 임명은 총관리자만 — 백엔드 강제)
+  STATUSES: ["active", "disabled"],
 };
 
 export const ROLE_LABEL = {
+  superadmin: "총관리자",
   admin:    "관리자",
   operator: "관제사",
-  viewer:   "뷰어",
+  viewer:   "뷰어",      // 레거시 계정 표시용 폴백 (신규 생성 불가)
   guest:    "게스트",
 };
 
-export const STATUS_LABEL = {
-  pending:  "승인 대기",
-  active:   "활성",
-  rejected: "반려",
+// 역할별 아바타 이미지 (public/avatars/). viewer 는 신규 불가 → 사용처에서 guest 로 폴백.
+export const ROLE_AVATAR = {
+  superadmin: "/avatars/developer.png",
+  admin:    "/avatars/admin.png",
+  operator: "/avatars/operator.png",
+  guest:    "/avatars/guest.png",
 };
 
-// ── API ──────────────────────────────────────────────────
+export const STATUS_LABEL = {
+  active:   "활성",
+  disabled: "비활성",
+  pending:  "대기",      // 레거시 폴백
+};
 
-export function listUsers() {
-  return load();
+// ── 표시용 세션 캐시 ──────────────────────────────────────
+function cacheSession(user) {
+  try {
+    if (user) localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+    else      localStorage.removeItem(SESSION_KEY);
+  } catch { /* localStorage 비활성 환경 무시 */ }
 }
 
-export function findUser(id) {
-  return load().find((u) => u.id === id) || null;
-}
-
-/**
- * 회원가입.
- * @returns {{ok:true, user}} | {ok:false, error:string, field?:string}
- */
-export function signUp({ id, pw, pw2, name, role }) {
-  // 입력 검증 (데모 — 느슨함)
-  if (!RULES.ID_RE.test(id))       return { ok: false, error: "ID 는 2~20자 (영문/숫자/._-).", field: "id" };
-  if (!RULES.PW_RE.test(pw))       return { ok: false, error: "비밀번호는 4자 이상.", field: "pw" };
-  if (pw !== pw2)                  return { ok: false, error: "비밀번호 확인이 일치하지 않습니다.", field: "pw2" };
-  if (!RULES.NAME_RE.test(name))   return { ok: false, error: "이름은 1~20자.", field: "name" };
-  if (!RULES.ROLES.includes(role)) return { ok: false, error: "역할을 선택해 주세요.", field: "role" };
-
-  const users = load();
-  if (users.some((u) => u.id === id))
-    return { ok: false, error: "이미 사용 중인 ID 입니다.", field: "id" };
-
-  const user = {
-    id, pw, name, role,
-    status: "pending",                 // 신규 가입은 무조건 승인 대기
-    createdAt: new Date().toISOString(),
-    approvedAt: null,
-    approvedBy: null,
-  };
-  users.push(user);
-  save(users);
-  return { ok: true, user: { ...user, pw: undefined }, pending: true };
-}
-
-/**
- * 로그인.
- * @returns {{ok:true, user}} | {ok:false, error, status?}
- */
-export function signIn({ id, pw, remember = true }) {
-  const u = findUser(id);
-  if (!u)            return { ok: false, error: "존재하지 않는 ID 입니다." };
-  if (u.pw !== pw)   return { ok: false, error: "비밀번호가 일치하지 않습니다." };
-
-  // 상태 확인 (pending/rejected 차단)
-  if (u.status === "pending") {
-    return {
-      ok: false,
-      status: "pending",
-      error: "관리자 승인 대기 중인 계정입니다. 승인 완료 후 로그인할 수 있습니다.",
-    };
-  }
-  if (u.status === "rejected") {
-    return {
-      ok: false,
-      status: "rejected",
-      error: "가입이 반려된 계정입니다. 관리자에게 문의해 주세요.",
-    };
-  }
-
-  // 마지막 접속 기록 (이전값을 lastLoginAt 에 보관 → 모달에서 "직전 접속" 표시 가능)
-  const nowIso = new Date().toISOString();
-  const users = load();
-  const idx   = users.findIndex((x) => x.id === u.id);
-  if (idx >= 0) {
-    users[idx] = {
-      ...users[idx],
-      previousLoginAt: users[idx].lastLoginAt || null,
-      lastLoginAt:     nowIso,
-    };
-    save(users);
-  }
-
-  const session = {
-    id: u.id, name: u.name, role: u.role,
-    status: u.status,
-    loggedInAt: nowIso,
-  };
-  if (remember) localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-  return { ok: true, user: session };
-}
-
-export function signOut() {
-  localStorage.removeItem(SESSION_KEY);
-}
-
+/** 현재 세션(표시용 캐시) — 동기. UI 게이팅/초기 렌더용. */
 export function currentSession() {
   try {
     const raw = localStorage.getItem(SESSION_KEY);
@@ -214,186 +64,148 @@ export function currentSession() {
   }
 }
 
-// ── 본인 계정: 프로필 수정 / 비밀번호 변경 ───────────────
+/** 본인 레코드(동기) — UserModals fullRecord 용. 본인 id 일 때만 캐시 반환. */
+export function findUser(id) {
+  const s = currentSession();
+  return s && s.id === id ? s : null;
+}
 
-/**
- * 내 정보 수정 (이름).
- * @returns {{ok:true, user}} | {ok:false, error, field?}
- */
-export function updateProfile(actor, { name }) {
-  if (!actor) return { ok: false, error: "로그인이 필요합니다." };
-  const users = load();
-  const idx = users.findIndex((u) => u.id === actor.id);
-  if (idx < 0) return { ok: false, error: "사용자를 찾을 수 없습니다." };
-
-  const trimmedName = (name || "").trim();
-  if (!RULES.NAME_RE.test(trimmedName)) return { ok: false, error: "이름은 1~20자.", field: "name" };
-
-  users[idx] = {
-    ...users[idx],
-    name:      trimmedName,
-    updatedAt: new Date().toISOString(),
-  };
-  save(users);
-
-  // 세션도 갱신 (Header 즉시 반영)
-  const session = currentSession();
-  if (session && session.id === actor.id) {
-    const newSession = { ...session, name: trimmedName };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(newSession));
-    return { ok: true, user: newSession };
+// ── fetch 헬퍼 (same-origin → 쿠키 자동 동봉) ─────────────
+async function jfetch(url, method, body) {
+  const opt = { method, credentials: "same-origin" };
+  if (body !== undefined) {
+    opt.headers = { "Content-Type": "application/json" };
+    opt.body = JSON.stringify(body || {});
   }
-  return { ok: true, user: { ...users[idx], pw: undefined } };
-}
-
-/**
- * 비밀번호 변경 (현재 비번 검증 후).
- * @returns {{ok:true}} | {ok:false, error, field?}
- */
-export function changePassword(actor, { currentPw, newPw, newPw2 }) {
-  if (!actor) return { ok: false, error: "로그인이 필요합니다." };
-  const users = load();
-  const idx = users.findIndex((u) => u.id === actor.id);
-  if (idx < 0) return { ok: false, error: "사용자를 찾을 수 없습니다." };
-
-  if (users[idx].pw !== currentPw) return { ok: false, error: "현재 비밀번호가 일치하지 않습니다.", field: "currentPw" };
-  if (!RULES.PW_RE.test(newPw))    return { ok: false, error: "비밀번호는 4자 이상.", field: "newPw" };
-  if (newPw !== newPw2)            return { ok: false, error: "새 비밀번호 확인이 일치하지 않습니다.", field: "newPw2" };
-  if (newPw === currentPw)         return { ok: false, error: "새 비밀번호가 현재와 동일합니다.", field: "newPw" };
-
-  users[idx] = {
-    ...users[idx],
-    pw: newPw,
-    passwordChangedAt: new Date().toISOString(),
-  };
-  save(users);
-  return { ok: true };
-}
-
-// ── 관리자 전용: 사용자 승인/반려 ─────────────────────────
-//
-//  실제 백엔드는 JWT 의 role=admin 검증으로 보호. mock 은 호출자가
-//  admin role 인지를 actor 로 받아 클라이언트 측에서 가드.
-
-function requireAdmin(actor) {
-  if (!actor || actor.role !== "admin") {
-    return { ok: false, error: "관리자 권한이 필요합니다." };
+  let http = 0, data = {};
+  try {
+    const r = await fetch(url, opt);
+    http = r.status;
+    try { data = await r.json(); } catch { data = {}; }
+  } catch (e) {
+    return { ok: false, error: "서버에 연결할 수 없습니다.", http: 0 };
   }
-  return null;
+  return { http, ...data };
+}
+const jget   = (u)    => jfetch(u, "GET");
+const jpost  = (u, b) => jfetch(u, "POST", b ?? {});
+const jpatch = (u, b) => jfetch(u, "PATCH", b ?? {});
+
+// ── 인증 ──────────────────────────────────────────────────
+
+/** 로그인. @returns {{ok:true,user}}|{{ok:false,error,status?}} */
+export async function signIn({ id, pw }) {
+  const res = await jpost("/api/auth/login", { id, pw });
+  if (res.ok && res.user) {
+    cacheSession(res.user);
+    return { ok: true, user: res.user };
+  }
+  return { ok: false, error: res.error || "로그인에 실패했습니다.", status: res.status };
 }
 
-/**
- * 모든 사용자 조회 (admin).
- * status 필터 가능: "pending" | "active" | "rejected" | undefined(전체)
- */
-export function listAllUsers(actor, status) {
-  const guard = requireAdmin(actor);
-  if (guard) return guard;
-  const users = load().map((u) => ({ ...u, pw: undefined }));
-  return {
-    ok: true,
-    users: status ? users.filter((u) => u.status === status) : users,
-  };
+/** 로그아웃 — 서버 쿠키 무효화 + 캐시 제거. */
+export async function signOut() {
+  cacheSession(null);                       // 로컬 캐시 먼저 제거 (UI 즉시 반영)
+  try { await jpost("/api/auth/logout", {}); } catch { /* best-effort */ }
 }
 
-export function listPending(actor) {
-  return listAllUsers(actor, "pending");
+/** 부팅/새로고침 시 서버 세션 검증 → 캐시 갱신. @returns {{ok:true,user}}|{{ok:false}} */
+export async function validateSession() {
+  const res = await jget("/api/auth/me");
+  if (res.ok && res.user) {
+    cacheSession(res.user);
+    return { ok: true, user: res.user };
+  }
+  // 서버가 명확히 "세션 없음"(HTTP 200 + ok:false)일 때만 캐시 비움.
+  // 네트워크/5xx 는 일시 오류로 보고 캐시 유지 (blip 으로 로그아웃 방지).
+  if (res.http === 200) { cacheSession(null); return { ok: false, authed: false }; }
+  return { ok: false, transient: true };
 }
 
-/**
- * 가입 신청 승인 (status: pending → active).
- */
-export function approveUser(actor, userId) {
-  const guard = requireAdmin(actor);
-  if (guard) return guard;
-  const users = load();
-  const idx = users.findIndex((u) => u.id === userId);
-  if (idx < 0)                       return { ok: false, error: "존재하지 않는 사용자입니다." };
-  if (users[idx].status === "active") return { ok: false, error: "이미 활성화된 계정입니다." };
-
-  users[idx] = {
-    ...users[idx],
-    status: "active",
-    approvedAt: new Date().toISOString(),
-    approvedBy: actor.id,
-    rejectedReason: undefined,
-  };
-  save(users);
-  return { ok: true, user: { ...users[idx], pw: undefined } };
+/** 로그인 ID 실시간 존재 확인 (로그인 폼 체크표시용). 형식 불량이면 서버 조회 없이 false. */
+export async function checkUserId(id) {
+  const v = String(id || "").trim();
+  if (!RULES.ID_RE.test(v)) return false;
+  const res = await jget(`/api/auth/exists?id=${encodeURIComponent(v)}`);
+  return !!(res.ok && res.exists);
 }
 
-/**
- * 가입 신청 반려 (status: pending → rejected).
- */
-export function rejectUser(actor, userId, reason) {
-  const guard = requireAdmin(actor);
-  if (guard) return guard;
-  const users = load();
-  const idx = users.findIndex((u) => u.id === userId);
-  if (idx < 0) return { ok: false, error: "존재하지 않는 사용자입니다." };
+// ── 관리자 ────────────────────────────────────────────────
 
-  // admin 본인을 반려 못 하게
-  if (users[idx].id === actor.id) return { ok: false, error: "본인 계정은 반려할 수 없습니다." };
-
-  users[idx] = {
-    ...users[idx],
-    status: "rejected",
-    rejectedAt: new Date().toISOString(),
-    rejectedBy: actor.id,
-    rejectedReason: (reason || "").trim() || null,
-  };
-  save(users);
-  return { ok: true, user: { ...users[idx], pw: undefined } };
+export async function listAllUsers() {
+  const res = await jget("/api/auth/users");
+  return { ok: !!res.ok, users: res.users || [], error: res.error };
 }
 
-/**
- * 반려된 사용자를 다시 승인 대기로 되돌리기 (선택).
- */
-export function reactivateUser(actor, userId) {
-  const guard = requireAdmin(actor);
-  if (guard) return guard;
-  const users = load();
-  const idx = users.findIndex((u) => u.id === userId);
-  if (idx < 0) return { ok: false, error: "존재하지 않는 사용자입니다." };
-
-  users[idx] = {
-    ...users[idx],
-    status: "pending",
-    rejectedReason: undefined,
-  };
-  save(users);
-  return { ok: true, user: { ...users[idx], pw: undefined } };
+// ── 공지사항(배너) ─────────────────────────────────────────
+/** 현재 공지 조회(관리자 폼 프리필용). @returns {{ok, announcement}} */
+export async function getAnnouncement() {
+  const res = await jget("/api/announcement");
+  return { ok: !!res.ok, announcement: res.announcement || null };
+}
+/** 공지 저장(관리자 전용). @param {{message, level, active}} */
+export async function saveAnnouncement({ message, level, active }) {
+  const res = await jpost("/api/announcement", { message, level, active });
+  return res.ok ? { ok: true } : { ok: false, error: res.error || "공지 저장에 실패했습니다." };
 }
 
-// ── 관리자 전용: 사용자 비밀번호 재설정 ───────────────────
-//
-//  운영 정책: 비밀번호 분실 시 본인 셀프 재설정 X.
-//  관리자가 운영자 관리 페이지에서 직접 새 비번 발급 → 본인에게 전달.
-//
-/**
- * @returns {{ok:true, userId, newPw}} | {ok:false, error}
- */
-export function adminResetPassword(actor, userId, newPw) {
-  const guard = requireAdmin(actor);
-  if (guard) return guard;
-  const users = load();
-  const idx = users.findIndex((u) => u.id === userId);
-  if (idx < 0)                   return { ok: false, error: "존재하지 않는 사용자입니다." };
-  if (!RULES.PW_RE.test(newPw))  return { ok: false, error: "비밀번호는 4자 이상.", field: "newPw" };
-
-  users[idx] = {
-    ...users[idx],
-    pw: newPw,
-    passwordChangedAt: new Date().toISOString(),
-    passwordChangedBy: actor.id,
-  };
-  save(users);
-  return { ok: true, userId, newPw };
+export async function adminCreateUser(_actor, { id, pw, name, role, memo }) {
+  const res = await jpost("/api/auth/users", { id, pw, name, role, memo });
+  return res.ok
+    ? { ok: true, user: res.user }
+    : { ok: false, error: res.error || "등록 실패", field: res.field };
 }
 
-// 초기화(개발 편의)
-export function _resetAll() {
-  localStorage.removeItem(USERS_KEY);
-  localStorage.removeItem(SESSION_KEY);
-  localStorage.removeItem(MIGRATION_KEY);
+export async function adminResetPassword(_actor, id, newPw) {
+  const res = await jpost(`/api/auth/users/${encodeURIComponent(id)}/reset-password`, newPw ? { newPw } : {});
+  return res.ok
+    ? { ok: true, userId: res.userId, newPw: res.newPw }
+    : { ok: false, error: res.error || "재설정 실패" };
+}
+
+export async function adminDeleteUser(_actor, id) {
+  const res = await jfetch(`/api/auth/users/${encodeURIComponent(id)}`, "DELETE");
+  return res.ok ? { ok: true, userId: res.userId } : { ok: false, error: res.error || "삭제 실패" };
+}
+
+export async function adminSetMemo(_actor, id, memo) {
+  const res = await jpatch(`/api/auth/users/${encodeURIComponent(id)}/memo`, { memo });
+  return res.ok ? { ok: true, memo: res.memo } : { ok: false, error: res.error || "메모 저장 실패" };
+}
+
+// 사용자 정보 통합 수정 (이름/역할/메모/새 비밀번호). 변경할 필드만 전달.
+export async function adminUpdateUser(_actor, id, { name, role, memo, newPw }) {
+  const body = {};
+  if (name !== undefined) body.name = name;
+  if (role !== undefined) body.role = role;
+  if (memo !== undefined) body.memo = memo;
+  if (newPw) body.newPw = newPw;
+  const res = await jpatch(`/api/auth/users/${encodeURIComponent(id)}`, body);
+  return res.ok
+    ? { ok: true, user: res.user, newPw: res.newPw }
+    : { ok: false, error: res.error || "수정 실패", field: res.field };
+}
+
+// ── 본인 계정 ─────────────────────────────────────────────
+
+export async function updateProfile(_actor, { name }) {
+  const res = await jpatch("/api/auth/profile", { name });
+  if (res.ok && res.user) {
+    cacheSession(res.user);
+    return { ok: true, user: res.user };
+  }
+  return { ok: false, error: res.error || "수정 실패", field: res.field };
+}
+
+export async function changePassword(_actor, { currentPw, newPw, newPw2 }) {
+  if (newPw2 !== undefined && newPw !== newPw2)
+    return { ok: false, error: "새 비밀번호 확인이 일치하지 않습니다.", field: "newPw2" };
+  const res = await jpost("/api/auth/change-password", { currentPw, newPw });
+  return res.ok ? { ok: true } : { ok: false, error: res.error || "변경 실패", field: res.field };
+}
+
+// ── 공개 회원가입 — 역할 guest 고정 (백엔드가 강제). 승급은 관리자. ──
+export async function signUp(form) {
+  const res = await jpost("/api/auth/signup", { id: form?.id, pw: form?.pw, name: form?.name });
+  return res.ok ? { ok: true, user: res.user } : { ok: false, error: res.error || "가입 실패", field: res.field };
 }

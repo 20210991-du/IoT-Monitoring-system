@@ -14,10 +14,16 @@
  */
 
 import express from "express";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import path from "path";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, createWriteStream } from "fs";
 import { fileURLToPath } from "url";
 import mysql from "mysql2/promise";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import { randomBytes, randomInt } from "crypto";
+import { WebSocketServer } from "ws";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -71,8 +77,12 @@ const PORT         = process.env.PORT          || 5050;
 const OLLAMA_URL   = process.env.OLLAMA_URL    || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "qwen3.5:9b";
 // UI 에서 선택 가능한 챗봇 모델 화이트리스트 (그 외 값은 기본 모델로 폴백 — 안전)
-const SELECTABLE_MODELS = ["qwen3.5:9b", "qwen3:14b", "qwen3.5:27b"];
+const SELECTABLE_MODELS = ["qwen3.5:9b", "qwen3:14b", "qwen3.5:27b", "gpt-4o-mini", "gpt-5", "gpt-5.5"];
 const pickModel = (m) => (SELECTABLE_MODELS.includes(m) ? m : OLLAMA_MODEL);
+// OpenAI(GPT) 프로바이더 — 외부 전송. 키는 secrets/local/openai.env → process.env.OPENAI_API_KEY.
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+const isOpenAI = (m) => typeof m === "string" && m.startsWith("gpt-");
 
 const SIWON_DB_HOST = process.env.SIWON_DB_HOST || "127.0.0.1";
 const SIWON_DB_PORT = parseInt(process.env.SIWON_DB_PORT || "3306", 10);
@@ -97,42 +107,42 @@ function isDemoMode(req) {
 function nowMinusH(h) { return new Date(Date.now() - h * 3600_000).toISOString().slice(0, 19).replace("T", " "); }
 
 // 가상 장비 10대 (DB 충돌 회피용 음수 TRANSMITTER_ID).
-//   위험 3 + 이상의심 4 + 통신장애 3.
+//   이상 3 + 관찰 4 + 통신장애 3.
 //   좌표·시설번호·POSITION 모두 군산 자연스러운 위치로.
 function getDemoDevices() {
   return [
-    // ── 위험 3대 (critical: 최근 알람 발생) ──
+    // ── 이상 3대 (critical: 최근 알람 발생) ──
     { deviceId: "DEMO-001", txid: -1, facility: "1-DEMO01", location: "시청 사거리 (데모)",
       lat: 35.9676, lng: 126.7369, hoursSilent: 2, recentAlarms: 3, status: "critical",
       sensors: { volt: -540, sacrificial: 0.6, ac: 312, battery: 3580, temp: 28.4, hum: 71, shock: 0, commDbm: -88 },
       lastMeasured: nowMinusH(2),
-      mse: 0.0042, threshold: 0.0011, riskLevel: "위험", aiReliability: "신뢰" },
+      mse: 0.0042, threshold: 0.0011, riskLevel: "이상", aiReliability: "신뢰" },
     { deviceId: "DEMO-002", txid: -2, facility: "2-DEMO02", location: "대야 사거리 (데모)",
       lat: 35.962, lng: 126.745, hoursSilent: 1, recentAlarms: 5, status: "critical",
       sensors: { volt: -480, sacrificial: 0.3, ac: 540, battery: 3520, temp: 30.1, hum: 68, shock: 1, commDbm: -82 },
       lastMeasured: nowMinusH(1),
-      mse: 0.0061, threshold: 0.0013, riskLevel: "위험", aiReliability: "신뢰" },
+      mse: 0.0061, threshold: 0.0013, riskLevel: "이상", aiReliability: "신뢰" },
     { deviceId: "DEMO-003", txid: -3, facility: "8-DEMO03", location: "소룡동 공단 입구 (데모)",
       lat: 35.985, lng: 126.700, hoursSilent: 1, recentAlarms: 2, status: "critical",
       sensors: { volt: -620, sacrificial: 0.8, ac: 280, battery: 3610, temp: 27.8, hum: 70, shock: 0, commDbm: -85 },
       lastMeasured: nowMinusH(1),
-      mse: 0.0038, threshold: 0.0011, riskLevel: "위험", aiReliability: "신뢰" },
-    // ── 이상의심 4대 (warn) ──
+      mse: 0.0038, threshold: 0.0011, riskLevel: "이상", aiReliability: "신뢰" },
+    // ── 관찰 4대 (warn) ──
     { deviceId: "DEMO-101", txid: -101, facility: "4-DEMO11", location: "미룡동 교차로 (데모)",
       lat: 35.937, lng: 126.696, hoursSilent: 1, recentAlarms: 0, status: "warn",
       sensors: { volt: -780, sacrificial: 0.9, ac: 195, battery: 3700, temp: 26.5, hum: 65, shock: 0, commDbm: -78 },
       lastMeasured: nowMinusH(1),
-      mse: 0.0019, threshold: 0.0011, riskLevel: "이상", aiReliability: "주의" },
+      mse: 0.0019, threshold: 0.0011, riskLevel: "관찰", aiReliability: "주의" },
     { deviceId: "DEMO-102", txid: -102, facility: "9-DEMO12", location: "해망동 박물관 앞 (데모)",
       lat: 35.990, lng: 126.704, hoursSilent: 1, recentAlarms: 0, status: "warn",
       sensors: { volt: -810, sacrificial: 1.1, ac: 175, battery: 3680, temp: 27.0, hum: 67, shock: 0, commDbm: -76 },
       lastMeasured: nowMinusH(1),
-      mse: 0.0016, threshold: 0.0011, riskLevel: "이상", aiReliability: "주의" },
+      mse: 0.0016, threshold: 0.0011, riskLevel: "관찰", aiReliability: "주의" },
     { deviceId: "DEMO-103", txid: -103, facility: "3-DEMO13", location: "소룡동 현대자동차 옆 (데모)",
       lat: 35.983, lng: 126.682, hoursSilent: 2, recentAlarms: 0, status: "warn",
       sensors: { volt: -795, sacrificial: 1.0, ac: 188, battery: 3690, temp: 27.5, hum: 66, shock: 0, commDbm: -79 },
       lastMeasured: nowMinusH(2),
-      mse: 0.0015, threshold: 0.0011, riskLevel: "이상", aiReliability: "주의" },
+      mse: 0.0015, threshold: 0.0011, riskLevel: "관찰", aiReliability: "주의" },
     { deviceId: "DEMO-104", txid: -104, facility: "8-DEMO14", location: "대야 버스터미널 옆 (데모)",
       lat: 35.946, lng: 126.810, hoursSilent: 1, recentAlarms: 0, status: "warn",
       sensors: { volt: -805, sacrificial: 1.2, ac: 180, battery: 3675, temp: 27.2, hum: 68, shock: 0, commDbm: -77 },
@@ -203,7 +213,40 @@ function findDemoDeviceByTxid(txid) {
 }
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "8mb" }));   // base64 이미지 첨부(문의·최대 5장) 대비 상향
+
+// ── 보안: trust proxy(CF 터널 1홉) · helmet 보안헤더 · rate-limit(방문자별) ──
+app.set("trust proxy", 1);
+app.use(helmet({ contentSecurityPolicy: false }));  // CSP off — 인라인 스타일 SPA·leaflet 타일 안 깨지게
+app.use(rateLimit({
+  windowMs: 60_000,
+  max: 300,                                          // 방문자당 분당 300 (대시보드 폴링 ~20-30/min 대비 넉넉)
+  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip,
+  skip: (req) => req.path.startsWith("/assets"),     // 정적 에셋 제외
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { trustProxy: false },                   // keyGenerator 가 CF-Connecting-IP 사용 → 프록시 검증 스킵
+  message: { ok: false, error: "요청이 너무 많습니다. 잠시 후 다시 시도하세요." },
+}));
+
+// ── 접속 IP 로깅 — CF-Connecting-IP(실제 방문자, 터널 통과해도 보존). 정적 에셋 제외. ──
+//   기록: ~/PJHwork/infra/logs/access.log  (탭 구분: ISO시각 · IP · METHOD · 경로)
+//   안전 가드: 스트림/쓰기 실패해도 요청 처리에 영향 없음.
+const ACCESS_LOG_PATH = path.join(process.env.HOME || __dirname, "PJHwork/infra/logs/access.log");
+let accessLogStream = null;
+try {
+  accessLogStream = createWriteStream(ACCESS_LOG_PATH, { flags: "a" });
+  accessLogStream.on("error", () => { accessLogStream = null; });
+} catch { accessLogStream = null; }
+app.use((req, _res, next) => {
+  try {
+    if (accessLogStream && !req.path.startsWith("/assets")) {
+      const ip = req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "-";
+      accessLogStream.write(`${new Date().toISOString()}\t${ip}\t${req.method}\t${req.path}\n`);
+    }
+  } catch {}
+  next();
+});
 
 // ── MySQL pool ────────────────────────────────────────
 let pool = null;
@@ -221,10 +264,333 @@ if (SIWON_DB_PASS) {
   console.log("▶ MySQL  비활성 (SIWON_DB_PASS 환경변수 없음)");
 }
 
+// 방명록 테이블 보장 (멱등) — 스키마를 코드에 둠. 서버 시작 시 1회.
+async function ensureGuestbookSchema() {
+  if (!pool) return;
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS guestbook_messages (
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NULL,
+      display_name VARCHAR(40) NOT NULL,
+      role VARCHAR(20) NULL,
+      body VARCHAR(500) NOT NULL,
+      ip VARCHAR(45) NULL,
+      ua VARCHAR(255) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      deleted_at DATETIME NULL,
+      INDEX idx_gb_created (created_at),
+      INDEX idx_gb_active (deleted_at, id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+    console.log("▶ 방명록  guestbook_messages 테이블 준비됨");
+  } catch (e) { console.error("✗ 방명록 스키마 생성 실패:", e.message); }
+}
+ensureGuestbookSchema();
+
 function dbRequired(_req, res, next) {
   if (!pool) return res.status(503).json({ ok: false, error: "DB pool 비활성 (서버 환경변수 SIWON_DB_PASS 누락)" });
   next();
 }
+
+// ══════════════════════════════════════════════════════════
+// 인증 (백엔드) — users 테이블 + bcrypt + JWT httpOnly 쿠키
+//   localStorage 목업(authMock.js) 대체. stateless JWT(쿠키 siwon_auth).
+//   프론트 user.id = users.login_id, user.name = display_name.
+// ══════════════════════════════════════════════════════════
+const AUTH_JWT_SECRET = process.env.AUTH_JWT_SECRET || randomBytes(32).toString("hex");
+if (!process.env.AUTH_JWT_SECRET) console.warn("⚠ AUTH_JWT_SECRET 미설정 — 임시 시크릿 사용(재시작 시 세션 만료).");
+const AUTH_COOKIE  = "siwon_auth";
+const AUTH_TTL_SEC = 12 * 3600;
+const CREATABLE_ROLES = ["superadmin", "admin", "operator", "guest"];   // viewer 제외
+const ROLE_SET = new Set(CREATABLE_ROLES);
+const ADMIN_TIER = (role) => role === "admin" || role === "superadmin";  // 관리자급 — 생성·삭제·역할변경은 총관리자만
+const LOGIN_ID_RE = /^[A-Za-z0-9._-]{2,20}$/;
+const PW_MIN = 4;
+
+const authLimiter = rateLimit({
+  windowMs: 60_000, max: 20,                               // 로그인 무차별 대입 완화
+  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip,
+  standardHeaders: true, legacyHeaders: false, validate: { trustProxy: false },
+  message: { ok: false, error: "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요." },
+});
+
+function parseCookies(req) {
+  const out = {}; const raw = req.headers.cookie; if (!raw) return out;
+  for (const part of raw.split(";")) { const i = part.indexOf("="); if (i < 0) continue; out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); }
+  return out;
+}
+function signAuthToken(u) { return jwt.sign({ uid: u.id, lid: u.login_id, role: u.role, name: u.display_name }, AUTH_JWT_SECRET, { expiresIn: AUTH_TTL_SEC }); }
+function setAuthCookie(req, res, token) {
+  const secure = (req.headers["x-forwarded-proto"] || "").includes("https") || !!req.secure;
+  res.cookie(AUTH_COOKIE, token, { httpOnly: true, sameSite: "lax", secure, path: "/", maxAge: AUTH_TTL_SEC * 1000 });
+}
+function authClaims(req) { const tok = parseCookies(req)[AUTH_COOKIE]; if (!tok) return null; try { return jwt.verify(tok, AUTH_JWT_SECRET); } catch { return null; } }
+function requireAuth(req, res, next)  { const c = authClaims(req); if (!c) return res.status(401).json({ ok: false, error: "로그인이 필요합니다." }); req.auth = c; next(); }
+function requireAdmin(req, res, next) { const c = authClaims(req); if (!c) return res.status(401).json({ ok: false, error: "로그인이 필요합니다." }); if (!ADMIN_TIER(c.role)) return res.status(403).json({ ok: false, error: "관리자 권한이 필요합니다." }); req.auth = c; next(); }
+function requireSuperAdmin(req, res, next) { const c = authClaims(req); if (!c) return res.status(401).json({ ok: false, error: "로그인이 필요합니다." }); if (c.role !== "superadmin") return res.status(403).json({ ok: false, error: "총관리자 권한이 필요합니다." }); req.auth = c; next(); }
+// 챗봇 계정 스코프 — 로그인 개인 계정만 계정-스코프(uid 반환), 공유 게스트(siwon)·비로그인은 null(브라우저-로컬).
+//   이 함수가 세션 소유권 + WS room 키를 동시에 결정 → 둘이 항상 일치.
+const SHARED_ACCOUNTS = new Set(["siwon"]);
+function chatOwner(req) { const c = authClaims(req); if (!c) return null; if (SHARED_ACCOUNTS.has(c.lid)) return null; return c.uid; }
+// 챗봇 실시간 동기화(WebSocket) — uid 별 room. 같은 계정의 다른 화면에 새 메시지 push.
+const chatRooms = new Map();   // ownerUid -> Set<ws>
+function broadcastToOwner(ownerUid, payload, exceptConnId = null) {
+  if (ownerUid == null) return;
+  const set = chatRooms.get(ownerUid);
+  if (!set) return;
+  const data = JSON.stringify(payload);
+  for (const ws of set) {
+    if (ws.readyState === 1 /* OPEN */ && ws._connId !== exceptConnId) {
+      try { ws.send(data); } catch {}
+    }
+  }
+}
+// ── 방명록(공개 단톡방) — 단일 전체 방. 로그인/게스트/비로그인 누구나 연결·수신. 작성은 REST(/api/guestbook)로 검증·레이트리밋 후 broadcast. ──
+const guestbookRoom = new Set();   // 모든 방명록 WS 연결
+function broadcastGuestbook(payload) {
+  const data = JSON.stringify(payload);
+  for (const ws of guestbookRoom) {
+    if (ws.readyState === 1 /* OPEN */) { try { ws.send(data); } catch {} }
+  }
+}
+function mapUser(r) { return { id: r.login_id, name: r.display_name, role: r.role, status: r.status, memo: r.memo ?? "", createdAt: r.created_at, lastLoginAt: r.last_login_at, previousLoginAt: null, approvedAt: r.approved_at }; }
+async function findUserRow(loginId) { const [rows] = await pool.query("SELECT * FROM users WHERE login_id = ? LIMIT 1", [loginId]); return rows[0] || null; }
+function genPw(n = 10) { const cs = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"; let s = ""; for (let i = 0; i < n; i++) s += cs[randomInt(cs.length)]; return s; }
+async function auditAuth(req, ok, loginId, reason, name, role) {
+  if (!pool) return;
+  try {
+    const ip = (req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").toString().split(",")[0].slice(0, 45);
+    await pool.query(
+      "INSERT INTO audit_log (action, target_type, target_id, ip, user_agent, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+      [ok ? "login" : "login_fail", "auth", String(loginId || "(unknown)").slice(0, 60), ip, String(req.headers["user-agent"] || "").slice(0, 255), JSON.stringify({ ok, name: name || "", role: role || "", reason: reason || "" })],
+    );
+  } catch { /* swallow — 감사 실패가 로그인 흐름을 막지 않음 */ }
+}
+
+// POST /api/auth/login {id, pw}
+app.post("/api/auth/login", authLimiter, dbRequired, async (req, res) => {
+  const { id, pw } = req.body || {};
+  if (!id || !pw) return res.status(400).json({ ok: false, error: "ID 와 비밀번호를 입력하세요." });
+  try {
+    const u = await findUserRow(String(id).trim());
+    if (!u) { await auditAuth(req, false, id, "존재하지 않는 ID"); return res.status(401).json({ ok: false, error: "존재하지 않는 ID 입니다." }); }
+    if (!(await bcrypt.compare(String(pw), u.password_hash))) { await auditAuth(req, false, u.login_id, "비밀번호 불일치", u.display_name, u.role); return res.status(401).json({ ok: false, error: "비밀번호가 일치하지 않습니다." }); }
+    if (u.status !== "active") {
+      await auditAuth(req, false, u.login_id, "status=" + u.status, u.display_name, u.role);
+      return res.status(403).json({ ok: false, error: u.status === "disabled" ? "비활성화된 계정입니다. 관리자에게 문의하세요." : "아직 활성화되지 않은 계정입니다.", status: u.status });
+    }
+    await pool.query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [u.id]);
+    setAuthCookie(req, res, signAuthToken(u));
+    await auditAuth(req, true, u.login_id, null, u.display_name, u.role);
+    res.json({ ok: true, user: mapUser(await findUserRow(u.login_id)) });
+  } catch (e) { console.error("[/api/auth/login]", e.message); res.status(500).json({ ok: false, error: "로그인 처리 중 오류" }); }
+});
+
+// POST /api/auth/logout
+app.post("/api/auth/logout", (req, res) => { res.clearCookie(AUTH_COOKIE, { path: "/" }); res.json({ ok: true }); });
+
+// POST /api/auth/signup — 공개 회원가입. 역할은 guest 고정 · 즉시 활성. 더 높은 권한은 관리자가 부여.
+app.post("/api/auth/signup", authLimiter, dbRequired, async (req, res) => {
+  const { id, pw, name } = req.body || {};
+  const lid = String(id || "").trim();
+  if (!LOGIN_ID_RE.test(lid))            return res.status(400).json({ ok: false, error: "ID 는 2~20자 (영문/숫자/._-).", field: "id" });
+  if (!pw || String(pw).length < PW_MIN) return res.status(400).json({ ok: false, error: `비밀번호는 ${PW_MIN}자 이상.`, field: "pw" });
+  if (!name || !String(name).trim())     return res.status(400).json({ ok: false, error: "이름을 입력하세요.", field: "name" });
+  try {
+    if (await findUserRow(lid)) return res.status(409).json({ ok: false, error: "이미 사용 중인 ID 입니다.", field: "id" });
+    const hash = await bcrypt.hash(String(pw), 10);
+    await pool.query("INSERT INTO users (login_id, password_hash, display_name, role, status) VALUES (?, ?, ?, 'guest', 'active')", [lid, hash, String(name).trim().slice(0, 60)]);
+    res.json({ ok: true, user: mapUser(await findUserRow(lid)) });
+  } catch (e) { console.error("[/api/auth/signup]", e.message); res.status(500).json({ ok: false, error: "가입 처리 중 오류" }); }
+});
+
+// GET /api/auth/me — 부팅/새로고침 시 세션 검증
+app.get("/api/auth/me", dbRequired, async (req, res) => {
+  const c = authClaims(req); if (!c) return res.json({ ok: false });
+  try {
+    const u = await findUserRow(c.lid);
+    if (!u || u.status !== "active") { res.clearCookie(AUTH_COOKIE, { path: "/" }); return res.json({ ok: false }); }
+    res.json({ ok: true, user: mapUser(u) });
+  } catch { res.status(500).json({ ok: false }); }
+});
+
+// GET /api/auth/exists?id= — 로그인 ID 실시간 존재 확인 (로그인 폼 체크표시용).
+//   ⚠️ ID enumeration 노출 — 사용자 요청으로 추가. 스크래핑 완화용 별도 rate-limit(분당 100).
+//   활성(active) 계정만 true (로그인 가능 여부와 일치). 형식 불량 ID 는 DB 조회 없이 false.
+const existsLimiter = rateLimit({
+  windowMs: 60_000, max: 100,
+  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip,
+  standardHeaders: true, legacyHeaders: false, validate: { trustProxy: false },
+  message: { ok: false, error: "요청이 너무 많습니다." },
+});
+app.get("/api/auth/exists", existsLimiter, dbRequired, async (req, res) => {
+  const lid = String(req.query.id || "").trim();
+  if (!LOGIN_ID_RE.test(lid)) return res.json({ ok: true, exists: false });
+  try {
+    const [rows] = await pool.query("SELECT 1 FROM users WHERE login_id = ? AND status = 'active' LIMIT 1", [lid]);
+    res.json({ ok: true, exists: rows.length > 0 });
+  } catch { res.json({ ok: true, exists: false }); }
+});
+
+// GET /api/auth/users (admin)
+app.get("/api/auth/users", dbRequired, requireAdmin, async (_req, res) => {
+  try { const [rows] = await pool.query("SELECT * FROM users ORDER BY created_at ASC"); res.json({ ok: true, users: rows.map(mapUser) }); }
+  catch (e) { console.error("[/api/auth/users GET]", e.message); res.status(500).json({ ok: false, error: "목록 조회 오류" }); }
+});
+
+// POST /api/auth/users (admin) {id, pw, name, role}
+app.post("/api/auth/users", dbRequired, requireAdmin, async (req, res) => {
+  const { id, pw, name, role } = req.body || {};
+  const lid = String(id || "").trim();
+  if (!LOGIN_ID_RE.test(lid))            return res.status(400).json({ ok: false, error: "ID 는 2~20자 (영문/숫자/._-).", field: "id" });
+  if (!pw || String(pw).length < PW_MIN) return res.status(400).json({ ok: false, error: `비밀번호는 ${PW_MIN}자 이상.`, field: "pw" });
+  if (!name || !String(name).trim())     return res.status(400).json({ ok: false, error: "이름을 입력하세요.", field: "name" });
+  if (!ROLE_SET.has(role))               return res.status(400).json({ ok: false, error: "역할을 선택하세요.", field: "role" });
+  if (ADMIN_TIER(role) && req.auth.role !== "superadmin") return res.status(403).json({ ok: false, error: "관리자·총관리자 계정은 총관리자만 생성할 수 있습니다.", field: "role" });
+  try {
+    if (await findUserRow(lid)) return res.status(409).json({ ok: false, error: "이미 사용 중인 ID 입니다.", field: "id" });
+    const hash = await bcrypt.hash(String(pw), 10);
+    const memo = String((req.body && req.body.memo) || "").slice(0, 500) || null;
+    await pool.query("INSERT INTO users (login_id, password_hash, display_name, role, status, approved_at, approved_by, memo) VALUES (?, ?, ?, ?, 'active', NOW(), ?, ?)", [lid, hash, String(name).trim().slice(0, 60), role, req.auth.uid, memo]);
+    res.json({ ok: true, user: mapUser(await findUserRow(lid)) });
+  } catch (e) { console.error("[/api/auth/users POST]", e.message); res.status(500).json({ ok: false, error: "등록 처리 중 오류" }); }
+});
+
+// POST /api/auth/users/:id/reset-password (admin) {newPw?}
+app.post("/api/auth/users/:id/reset-password", dbRequired, requireAdmin, async (req, res) => {
+  const lid = String(req.params.id || "").trim();
+  let newPw = (req.body && req.body.newPw) ? String(req.body.newPw) : "";
+  if (newPw && newPw.length < PW_MIN) return res.status(400).json({ ok: false, error: `비밀번호는 ${PW_MIN}자 이상.` });
+  if (!newPw) newPw = genPw(10);
+  try {
+    const u = await findUserRow(lid);
+    if (!u) return res.status(404).json({ ok: false, error: "사용자를 찾을 수 없습니다." });
+    if (ADMIN_TIER(u.role) && req.auth.role !== "superadmin") return res.status(403).json({ ok: false, error: "관리자·총관리자 비밀번호는 총관리자만 재설정할 수 있습니다." });
+    await pool.query("UPDATE users SET password_hash = ?, updated_at = NOW() WHERE id = ?", [await bcrypt.hash(newPw, 10), u.id]);
+    res.json({ ok: true, userId: lid, newPw });
+  } catch (e) { console.error("[/api/auth/reset-pw]", e.message); res.status(500).json({ ok: false, error: "재설정 처리 중 오류" }); }
+});
+
+// DELETE /api/auth/users/:id (admin) — 계정 삭제. 본인·마지막 활성 관리자 삭제 차단.
+app.delete("/api/auth/users/:id", dbRequired, requireAdmin, async (req, res) => {
+  const lid = String(req.params.id || "").trim();
+  try {
+    const u = await findUserRow(lid);
+    if (!u) return res.status(404).json({ ok: false, error: "사용자를 찾을 수 없습니다." });
+    if (u.login_id === req.auth.lid) return res.status(400).json({ ok: false, error: "본인 계정은 삭제할 수 없습니다." });
+    if (ADMIN_TIER(u.role) && req.auth.role !== "superadmin") return res.status(403).json({ ok: false, error: "관리자·총관리자 계정은 총관리자만 삭제할 수 있습니다." });
+    if (u.role === "admin") {
+      const [[{ n }]] = await pool.query("SELECT COUNT(*) n FROM users WHERE role = 'admin' AND status = 'active'");
+      if (n <= 1) return res.status(400).json({ ok: false, error: "마지막 관리자 계정은 삭제할 수 없습니다." });
+    }
+    if (u.role === "superadmin") {
+      const [[{ n }]] = await pool.query("SELECT COUNT(*) n FROM users WHERE role = 'superadmin' AND status = 'active'");
+      if (n <= 1) return res.status(400).json({ ok: false, error: "마지막 총관리자 계정은 삭제할 수 없습니다." });
+    }
+    await pool.query("DELETE FROM users WHERE id = ?", [u.id]);
+    res.json({ ok: true, userId: lid });
+  } catch (e) { console.error("[/api/auth/users DELETE]", e.message); res.status(500).json({ ok: false, error: "삭제 처리 중 오류" }); }
+});
+
+// PATCH /api/auth/users/:id/memo (admin) {memo} — 관리자 메모 저장/수정
+app.patch("/api/auth/users/:id/memo", dbRequired, requireAdmin, async (req, res) => {
+  const lid = String(req.params.id || "").trim();
+  const memo = String((req.body && req.body.memo) || "").slice(0, 500);
+  try {
+    const u = await findUserRow(lid);
+    if (!u) return res.status(404).json({ ok: false, error: "사용자를 찾을 수 없습니다." });
+    await pool.query("UPDATE users SET memo = ?, updated_at = NOW() WHERE id = ?", [memo || null, u.id]);
+    res.json({ ok: true, userId: lid, memo });
+  } catch (e) { console.error("[/api/auth/memo]", e.message); res.status(500).json({ ok: false, error: "메모 저장 중 오류" }); }
+});
+
+// PATCH /api/auth/users/:id (admin) {name?, role?, memo?, newPw?} — 사용자 정보 통합 수정.
+//   변경할 필드만 전달. newPw 가 비어있지 않으면 비밀번호도 변경(+응답에 echo).
+//   마지막 활성 관리자의 역할 강등 차단. 라우트 순서상 /:id/memo 보다 뒤에 둔다.
+app.patch("/api/auth/users/:id", dbRequired, requireAdmin, async (req, res) => {
+  const lid = String(req.params.id || "").trim();
+  const b = req.body || {};
+  try {
+    const u = await findUserRow(lid);
+    if (!u) return res.status(404).json({ ok: false, error: "사용자를 찾을 수 없습니다." });
+    const sets = [], vals = [];
+    if (b.name !== undefined) {
+      const nm = String(b.name).trim();
+      if (!nm) return res.status(400).json({ ok: false, error: "이름을 입력하세요.", field: "name" });
+      sets.push("display_name = ?"); vals.push(nm.slice(0, 60));
+    }
+    if (b.role !== undefined) {
+      if (!ROLE_SET.has(b.role)) return res.status(400).json({ ok: false, error: "역할을 선택하세요.", field: "role" });
+      if ((ADMIN_TIER(b.role) || ADMIN_TIER(u.role)) && req.auth.role !== "superadmin")
+        return res.status(403).json({ ok: false, error: "관리자·총관리자 권한 변경은 총관리자만 할 수 있습니다.", field: "role" });
+      if (u.role === "admin" && b.role !== "admin") {
+        const [[{ n }]] = await pool.query("SELECT COUNT(*) n FROM users WHERE role = 'admin' AND status = 'active'");
+        if (n <= 1) return res.status(400).json({ ok: false, error: "마지막 관리자의 역할은 변경할 수 없습니다.", field: "role" });
+      }
+      sets.push("role = ?"); vals.push(b.role);
+    }
+    if (b.memo !== undefined) { sets.push("memo = ?"); vals.push(String(b.memo).slice(0, 500) || null); }
+    let newPw = null;
+    if (b.newPw !== undefined && String(b.newPw) !== "") {
+      if (String(b.newPw).length < PW_MIN) return res.status(400).json({ ok: false, error: `비밀번호는 ${PW_MIN}자 이상.`, field: "newPw" });
+      newPw = String(b.newPw);
+      sets.push("password_hash = ?"); vals.push(await bcrypt.hash(newPw, 10));
+    }
+    if (!sets.length) return res.json({ ok: true, user: mapUser(u) });
+    sets.push("updated_at = NOW()");
+    vals.push(u.id);
+    await pool.query(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, vals);
+    res.json({ ok: true, user: mapUser(await findUserRow(lid)), newPw: newPw || undefined });
+  } catch (e) { console.error("[/api/auth/users PATCH]", e.message); res.status(500).json({ ok: false, error: "수정 처리 중 오류" }); }
+});
+
+// PATCH /api/auth/profile (auth) {name}
+app.patch("/api/auth/profile", dbRequired, requireAuth, async (req, res) => {
+  const name = String((req.body && req.body.name) || "").trim();
+  if (!name) return res.status(400).json({ ok: false, error: "이름을 입력하세요.", field: "name" });
+  try { await pool.query("UPDATE users SET display_name = ?, updated_at = NOW() WHERE id = ?", [name.slice(0, 60), req.auth.uid]); res.json({ ok: true, user: mapUser(await findUserRow(req.auth.lid)) }); }
+  catch (e) { res.status(500).json({ ok: false, error: "프로필 수정 오류" }); }
+});
+
+// POST /api/auth/change-password (auth) {currentPw, newPw}
+app.post("/api/auth/change-password", dbRequired, requireAuth, async (req, res) => {
+  const { currentPw, newPw } = req.body || {};
+  if (!newPw || String(newPw).length < PW_MIN) return res.status(400).json({ ok: false, error: `새 비밀번호는 ${PW_MIN}자 이상.`, field: "newPw" });
+  try {
+    const u = await findUserRow(req.auth.lid);
+    if (!u) return res.status(404).json({ ok: false, error: "사용자를 찾을 수 없습니다." });
+    if (!(await bcrypt.compare(String(currentPw || ""), u.password_hash))) return res.status(403).json({ ok: false, error: "현재 비밀번호가 일치하지 않습니다.", field: "currentPw" });
+    await pool.query("UPDATE users SET password_hash = ?, updated_at = NOW() WHERE id = ?", [await bcrypt.hash(String(newPw), 10), u.id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, error: "비밀번호 변경 오류" }); }
+});
+
+// ── 공지사항(배너) — 단일 행(id=1). GET 공개, 저장은 관리자 전용 ──
+//   배너 텍스트는 프론트에서 텍스트로만 렌더(React 기본 이스케이프) → 저장 XSS 차단.
+app.get("/api/announcement", dbRequired, async (_req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT message, level, active, updated_by, updated_at FROM announcements WHERE id = 1 LIMIT 1");
+    const r = rows[0];
+    res.json({ ok: true, announcement: r ? {
+      message: r.message || "", level: r.level || "info",
+      active: !!r.active, updatedBy: r.updated_by || "", updatedAt: r.updated_at,
+    } : null });
+  } catch (e) { console.error("[/api/announcement GET]", e.message); res.status(500).json({ ok: false, error: "공지 조회 오류" }); }
+});
+
+app.post("/api/announcement", dbRequired, requireAdmin, async (req, res) => {
+  try {
+    const message = String(req.body?.message ?? "").trim().slice(0, 500);
+    const level   = ["info", "warn", "critical"].includes(req.body?.level) ? req.body.level : "info";
+    const active  = message ? 1 : 0;   // 게시 개념 제거 — 내용 있으면 노출, 비우면 내림
+    const by      = String(req.auth?.name || req.auth?.lid || "관리자").slice(0, 60);
+    await pool.query(
+      `INSERT INTO announcements (id, message, level, active, updated_by) VALUES (1, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE message = VALUES(message), level = VALUES(level), active = VALUES(active), updated_by = VALUES(updated_by)`,
+      [message, level, active, by]
+    );
+    res.json({ ok: true });
+  } catch (e) { console.error("[/api/announcement POST]", e.message); res.status(500).json({ ok: false, error: "공지 저장 오류" }); }
+});
 
 // ── /api/health ──────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
@@ -309,17 +675,24 @@ async function logToolCall(name, args, ok, durationMs, _cached) {
 
 // ── 챗봇 영구 대화 저장 (chat_sessions + chat_messages) ──
 // 클라이언트가 sessionId 보내면 그것 사용, 없으면 새로 만들어 응답에 동봉.
-async function ensureChatSession(sessionId, firstUserMsg) {
+async function ensureChatSession(sessionId, firstUserMsg, ownerUid = null) {
   if (!pool) return null;
   if (sessionId) {
     try {
-      const [rows] = await pool.query(`SELECT id FROM chat_sessions WHERE id = ?`, [sessionId]);
-      if (rows.length) return Number(sessionId);
+      // 숨김(soft-deleted) 세션은 재사용하지 않음 → 새 세션을 만들어 보이게 (안 그러면 메시지가 숨겨진 세션에 쌓여 안 보임)
+      const [rows] = await pool.query(`SELECT id, user_id FROM chat_sessions WHERE id = ? AND deleted_at IS NULL`, [sessionId]);
+      if (rows.length) {
+        // 익명으로 시작한 세션을 로그인 개인 계정이 처음 이어서 쓰면 소유권 승계(익명→로그인 전이)
+        if (ownerUid && rows[0].user_id == null) {
+          try { await pool.query(`UPDATE chat_sessions SET user_id = ? WHERE id = ? AND user_id IS NULL`, [ownerUid, sessionId]); } catch {}
+        }
+        return Number(sessionId);
+      }
     } catch (_) {}
   }
   try {
     const title = String(firstUserMsg || "").slice(0, 30).trim() || "(제목 없음)";
-    const [r] = await pool.query(`INSERT INTO chat_sessions (title) VALUES (?)`, [title]);
+    const [r] = await pool.query(`INSERT INTO chat_sessions (title, user_id) VALUES (?, ?)`, [title, ownerUid]);
     return r.insertId;
   } catch (e) {
     console.warn("[ensureChatSession]", e.message);
@@ -327,17 +700,23 @@ async function ensureChatSession(sessionId, firstUserMsg) {
   }
 }
 
-async function persistMessage(sessionId, role, text, contextJson, tokens, model) {
+// 요청자 실제 IP (Cloudflare 터널 통과 시 CF-Connecting-IP). 챗봇 메시지 작성자 기록용.
+function reqIp(req) {
+  return (req && (req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || req.socket?.remoteAddress)) || null;
+}
+
+async function persistMessage(sessionId, role, text, contextJson, tokens, model, ip = null) {
   if (!pool || !sessionId || !text) return;
   try {
     await pool.query(
-      `INSERT INTO chat_messages (session_id, role, text, context_json, tokens_prompt, tokens_completion, model) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chat_messages (session_id, role, text, context_json, tokens_prompt, tokens_completion, model, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sessionId, role, text,
         contextJson ? JSON.stringify(contextJson) : null,
         tokens?.prompt ?? null,
         tokens?.completion ?? null,
         model || null,
+        ip || null,
       ],
     );
     // 세션 updated_at 자동 갱신 (ON UPDATE CURRENT_TIMESTAMP 가 INSERT 만으론 안 트리거됨)
@@ -412,7 +791,7 @@ const TOOLS = [
     type: "function",
     function: {
       name: "get_summary",
-      description: "전체 KPI 카운트 (정상/위험/이상의심/통신장애 단말 수)",
+      description: "전체 KPI 카운트 (정상/관찰/이상/통신장애 단말 수)",
       parameters: { type: "object", properties: {} }
     }
   },
@@ -452,7 +831,7 @@ const TOOLS = [
     type: "function",
     function: {
       name: "get_zone_summary",
-      description: "특정 구역(시설번호 prefix)의 통계: 단말 수, 정상/위험/통신두절 카운트, 평균 방식전위 + 평균 RSSI.",
+      description: "특정 구역(시설번호 prefix)의 통계: 단말 수, 정상/관찰/이상/통신두절 카운트, 평균 방식전위 + 평균 RSSI.",
       parameters: {
         type: "object",
         properties: {
@@ -608,8 +987,51 @@ const TOOLS = [
         required: ["tableName"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_weather_forecast",
+      description: "군산(SITE_ID=2 대상 지역) 일별 날씨 예보 — 오늘 포함 최대 7일. Open-Meteo 실시간 예보 API. '일주일 날씨', '주말 날씨', '내일 비 와?' 같은 다일·예보 질문에 사용. 현재 단일 시점 날씨는 이미 시스템 컨텍스트에 있으니 예보가 필요할 때만 호출.",
+      parameters: {
+        type: "object",
+        properties: {
+          days: { type: "integer", description: "예보 일수 (1~7, 기본 7). 오늘부터 포함." }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_weather_history",
+      description: "군산 과거 날씨 조회 — 최대 1년(아카이브는 어제까지 가능). Open-Meteo 과거기상 API(ERA5). '작년 이맘때 날씨', '지난 1년 강수량', '어느 달에 비 많았나' 같은 과거·추세 질문에 사용. 범위가 길면(>45일) 자동으로 월별 집계 + 전체 통계로 반환, 짧으면 일별.",
+      parameters: {
+        type: "object",
+        properties: {
+          start_date: { type: "string", description: "시작일 YYYY-MM-DD (생략 시 종료일로부터 1년 전)" },
+          end_date: { type: "string", description: "종료일 YYYY-MM-DD (생략 시 어제). 최대 어제까지." }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "web_search",
+      description: "웹 검색(DuckDuckGo). 시스템 DB·날씨 도구로 답할 수 없는 일반 지식·개념·외부 정보가 필요할 때만 사용. 사전/개념/엔티티 질의에 강함. 단말/센서/날씨 데이터는 전용 도구를 쓸 것.",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string", description: "검색어" } },
+        required: ["query"]
+      }
+    }
   }
 ];
+
+// 웹검색 도구(web_search)는 토글 ON 일 때만 LLM 에 노출 (기본 OFF)
+const TOOLS_BASE = TOOLS.filter((t) => t.function?.name !== "web_search");
+const toolsFor = (web) => (web ? TOOLS : TOOLS_BASE);
 
 // 단말 seq → SENSOR_ID 찾는 헬퍼
 async function findSensorId(transmitterId, seq) {
@@ -631,8 +1053,17 @@ async function getTransmitterIdByName(deviceId) {
 //   캐시 가능한 도구만 캐시 (CACHEABLE_TOOLS).
 //   audit_log 는 모든 도구 (best-effort).
 //   demoMode: 가상 장비 포함 여부. cache key 에 포함되어 demo/real 응답 분리.
+// 보안: 자유 SQL/스키마 노출 도구 비활성화 — URL 아는 누구나 DB 전체 SELECT 가능하던 노출 차단.
+//   재활성화: 환경변수 ENABLE_SELF_EXPAND_SQL=1 (기본 OFF).
+const DISABLED_TOOLS = process.env.ENABLE_SELF_EXPAND_SQL === "1" ? [] : ["execute_safe_sql", "describe_table"];
+for (const _n of DISABLED_TOOLS) {
+  const _i = TOOLS.findIndex((t) => t?.function?.name === _n);
+  if (_i >= 0) TOOLS.splice(_i, 1);
+}
+
 async function execTool(name, args, demoMode = false) {
   args = args || {};
+  if (DISABLED_TOOLS.includes(name)) return { error: "이 도구는 보안상 비활성화되어 있습니다." };
   const cacheable = CACHEABLE_TOOLS.has(name);
   const key = cacheable ? `${name}:${demoMode ? "D" : "R"}:${JSON.stringify(args)}` : null;
   if (cacheable) {
@@ -1339,6 +1770,121 @@ async function execToolInternal(name, args, demoMode = false) {
         }
       }
 
+      // 군산 일별 날씨 예보 (Open-Meteo, 최대 7일)
+      case "get_weather_forecast": {
+        const days = Math.min(7, Math.max(1, parseInt(args.days, 10) || 7));
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=35.9678&longitude=126.7369&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max&forecast_days=${days}&timezone=Asia%2FSeoul`;
+        const WMO = { 0:"맑음",1:"대체로 맑음",2:"부분 흐림",3:"흐림",45:"안개",48:"안개",51:"약한 이슬비",53:"이슬비",55:"강한 이슬비",61:"약한 비",63:"비",65:"강한 비",71:"약한 눈",73:"눈",75:"강한 눈",77:"눈알갱이",80:"소나기",81:"소나기",82:"강한 소나기",85:"눈 소나기",86:"눈 소나기",95:"뇌우",96:"뇌우(우박)",99:"강한 뇌우" };
+        try {
+          const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+          if (!res.ok) return { error: `Open-Meteo HTTP ${res.status}` };
+          const j = await res.json();
+          const d = j.daily;
+          if (!d || !Array.isArray(d.time)) return { error: "예보 데이터 없음" };
+          const forecast = d.time.map((date, i) => ({
+            date,
+            sky: WMO[d.weather_code[i]] ?? `code ${d.weather_code[i]}`,
+            tempMin: d.temperature_2m_min[i],
+            tempMax: d.temperature_2m_max[i],
+            precipMm: d.precipitation_sum[i],
+            precipProb: d.precipitation_probability_max?.[i] ?? null,
+          }));
+          return {
+            location: "군산", source: "Open-Meteo 실시간 예보 API",
+            unit: { temp: "°C", precip: "mm", precipProb: "%" },
+            days: forecast.length, forecast,
+          };
+        } catch (e) {
+          return { error: `예보 조회 실패: ${e.message}` };
+        }
+      }
+
+      // 군산 과거 날씨 (Open-Meteo 아카이브, 최대 1년 — 길면 월별 집계)
+      case "get_weather_history": {
+        const DAY = 86400000;
+        const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+        const valid = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+        const archiveMax = iso(Date.now() - DAY);              // 아카이브는 어제까지
+        let end = valid(args.end_date) ? args.end_date : archiveMax;
+        if (end > archiveMax) end = archiveMax;                // 미래·오늘 → 어제로 클램프
+        let start = valid(args.start_date) ? args.start_date : iso(new Date(end).getTime() - 364 * DAY);
+        if (start > end) start = end;
+        if ((new Date(end) - new Date(start)) / DAY > 366) start = iso(new Date(end).getTime() - 366 * DAY);  // 최대 366일
+        const WMO = { 0:"맑음",1:"대체로 맑음",2:"부분 흐림",3:"흐림",45:"안개",48:"안개",51:"약한 이슬비",53:"이슬비",55:"강한 이슬비",61:"약한 비",63:"비",65:"강한 비",71:"약한 눈",73:"눈",75:"강한 눈",77:"눈알갱이",80:"소나기",81:"소나기",82:"강한 소나기",85:"눈 소나기",86:"눈 소나기",95:"뇌우",96:"뇌우(우박)",99:"강한 뇌우" };
+        const url = `https://archive-api.open-meteo.com/v1/archive?latitude=35.9678&longitude=126.7369&start_date=${start}&end_date=${end}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=Asia%2FSeoul`;
+        try {
+          const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+          if (!res.ok) {
+            let reason = ""; try { reason = (await res.json()).reason || ""; } catch {}
+            return { error: `Open-Meteo 아카이브 HTTP ${res.status}${reason ? ` — ${reason}` : ""}` };
+          }
+          const d = (await res.json()).daily;
+          if (!d || !Array.isArray(d.time) || d.time.length === 0) return { error: "과거 데이터 없음" };
+          const n = d.time.length;
+          const nums = (a) => a.filter((v) => v != null);
+          const avg = (a) => nums(a).length ? +(nums(a).reduce((x, y) => x + y, 0) / nums(a).length).toFixed(1) : null;
+          const stats = {
+            tempMaxAvg: avg(d.temperature_2m_max),
+            tempMinAvg: avg(d.temperature_2m_min),
+            tempPeak: nums(d.temperature_2m_max).length ? Math.max(...nums(d.temperature_2m_max)) : null,
+            tempLow:  nums(d.temperature_2m_min).length ? Math.min(...nums(d.temperature_2m_min)) : null,
+            precipTotalMm: +nums(d.precipitation_sum).reduce((x, y) => x + y, 0).toFixed(1),
+            rainyDays: d.precipitation_sum.filter((v) => v != null && v > 0).length,
+          };
+          const base = { location: "군산", source: "Open-Meteo 과거기상 API(ERA5)", period: { start, end, days: n }, unit: { temp: "°C", precip: "mm" }, stats };
+          if (n > 45) {   // 월별 집계
+            const m = {};
+            d.time.forEach((t, i) => {
+              const mm = (m[t.slice(0, 7)] ||= { tMax: [], tMin: [], precip: 0, rainy: 0 });
+              if (d.temperature_2m_max[i] != null) mm.tMax.push(d.temperature_2m_max[i]);
+              if (d.temperature_2m_min[i] != null) mm.tMin.push(d.temperature_2m_min[i]);
+              if (d.precipitation_sum[i] != null) { mm.precip += d.precipitation_sum[i]; if (d.precipitation_sum[i] > 0) mm.rainy++; }
+            });
+            const monthly = Object.entries(m).map(([month, v]) => ({
+              month,
+              tempMaxAvg: v.tMax.length ? +(v.tMax.reduce((x, y) => x + y, 0) / v.tMax.length).toFixed(1) : null,
+              tempMinAvg: v.tMin.length ? +(v.tMin.reduce((x, y) => x + y, 0) / v.tMin.length).toFixed(1) : null,
+              precipTotalMm: +v.precip.toFixed(1),
+              rainyDays: v.rainy,
+            }));
+            return { ...base, granularity: "monthly", monthly };
+          }
+          const daily = d.time.map((date, i) => ({
+            date, sky: WMO[d.weather_code[i]] ?? `code ${d.weather_code[i]}`,
+            tempMin: d.temperature_2m_min[i], tempMax: d.temperature_2m_max[i], precipMm: d.precipitation_sum[i],
+          }));
+          return { ...base, granularity: "daily", daily };
+        } catch (e) {
+          return { error: `과거 날씨 조회 실패: ${e.message}` };
+        }
+      }
+
+      // 웹 검색 (DuckDuckGo Instant Answer — 무료·키X. 개념/엔티티 질의에 강함)
+      case "web_search": {
+        const q = String(args.query || "").trim();
+        if (!q) return { error: "query 필수" };
+        const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&no_redirect=1&t=siwon`;
+        try {
+          const res = await fetch(url, { headers: { "User-Agent": "siwon-IoT-monitoring/1.0 capstone" }, signal: AbortSignal.timeout(10000) });
+          if (!res.ok) return { error: `DuckDuckGo HTTP ${res.status}` };
+          const d = await res.json();
+          const results = [];
+          if (d.AbstractText) results.push({ title: d.Heading || q, snippet: d.AbstractText, url: d.AbstractURL || "" });
+          const flat = [];
+          for (const t of (d.RelatedTopics || [])) {
+            if (t?.Text) flat.push(t);
+            else if (t?.Topics) for (const s of t.Topics) if (s?.Text) flat.push(s);
+          }
+          for (const t of flat.slice(0, 6)) results.push({ title: String(t.Text).split(" - ")[0].slice(0, 80), snippet: t.Text, url: t.FirstURL || "" });
+          if (results.length === 0) {
+            return { query: q, source: "DuckDuckGo", count: 0, note: "즉답 결과 없음 — DuckDuckGo 무료 API는 사전·개념·엔티티 질의에 강하고 일반 웹 결과목록은 제공하지 않음. 가진 지식으로 답하거나 키워드를 바꿔 재시도." };
+          }
+          return { query: q, source: "DuckDuckGo Instant Answer", count: results.length, results };
+        } catch (e) {
+          return { error: `웹검색 실패: ${e.message}` };
+        }
+      }
+
       // AI 모델 메타 + 단말 threshold
       case "get_ai_model_info": {
         if (!MODEL_CONFIG && !Object.keys(DEVICE_THRESHOLDS).length) {
@@ -1539,7 +2085,46 @@ async function execToolInternal(name, args, demoMode = false) {
 //   - tool_calls 가 있으면 execTool 실행 후 messages 에 append → 다음 라운드
 //   - tool_calls 가 없으면 최종 응답 (content) 반환
 //   - toolTrace 로 어떤 도구가 호출됐는지 추적 (디버깅용)
-async function runChatWithTools(messages, signal, demoMode = false, model = OLLAMA_MODEL) {
+// OpenAI(GPT) 라운드 루프 — 비스트리밍. 도구호출 시 send('tool') + 결과 append 후 다음 라운드.
+//   tool 메시지는 OpenAI 형식(tool_call_id) 사용. TOOLS/execTool/시스템프롬프트는 Ollama 와 공유.
+async function runOpenAIRounds({ send, working, model, demoMode, signal, maxRounds, toolTrace, webSearch = false }) {
+  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY 미설정 (secrets/local/openai.env)");
+  let usage = {};
+  for (let round = 0; round < maxRounds; round++) {
+    const res = await fetch(OPENAI_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({ model, messages: working, tools: toolsFor(webSearch), tool_choice: "auto" }),  // temperature 생략 — gpt-5.x 는 기본값(1)만 허용
+      signal,
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(`OpenAI HTTP ${res.status}: ${t.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    usage = data.usage || usage;
+    const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
+    const toolCalls = msg.tool_calls || [];
+    const tokens = { prompt: usage.prompt_tokens || 0, completion: usage.completion_tokens || 0 };
+    if (!toolCalls.length) {
+      return { reply: (msg.content || "(빈 응답)").trim(), rounds: round + 1, tokens };
+    }
+    working.push({ role: "assistant", content: msg.content || "", tool_calls: toolCalls });
+    for (const tc of toolCalls) {
+      const name = tc.function && tc.function.name;
+      let args = {};
+      try { args = JSON.parse((tc.function && tc.function.arguments) || "{}"); } catch { args = {}; }
+      send("tool", { round: round + 1, name, args });
+      const result = await execTool(name, args, demoMode);
+      toolTrace.push({ round: round + 1, name, args, ok: !(result && result.error) });
+      working.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
+    }
+  }
+  return { reply: "(도구 호출 한도 초과 — 정보가 충분하지 않아 답변을 마무리하지 못했습니다.)", rounds: maxRounds,
+           tokens: { prompt: usage.prompt_tokens || 0, completion: usage.completion_tokens || 0 } };
+}
+
+async function runChatWithTools(messages, signal, demoMode = false, model = OLLAMA_MODEL, webSearch = false) {
   const MAX_ROUNDS = 5;
   const working = [...messages];
   const toolTrace = [];
@@ -1551,7 +2136,7 @@ async function runChatWithTools(messages, signal, demoMode = false, model = OLLA
       body: JSON.stringify({
         model,
         messages: working,
-        tools: TOOLS,
+        tools: toolsFor(webSearch),
         stream: false,
         think: false,
         options: { temperature: 0.3, num_predict: 1000 },
@@ -1599,7 +2184,7 @@ async function runChatWithTools(messages, signal, demoMode = false, model = OLLA
 //   - 서버가 execTool() 로 MySQL 조회 → 결과를 messages 에 append → 다시 LLM 호출
 //   - 최대 5 라운드 (runChatWithTools 내부 MAX_ROUNDS)
 app.post("/api/chat", async (req, res) => {
-  const { message, context = {}, history = [], sessionId, model } = req.body || {};
+  const { message, context = {}, history = [], sessionId, model, webSearch = false } = req.body || {};
   const useModel = pickModel(model);
   if (!message || typeof message !== "string") {
     return res.status(400).json({ ok: false, error: "message 필드가 비어있습니다." });
@@ -1619,22 +2204,24 @@ app.post("/api/chat", async (req, res) => {
     { role: "user", content: message },
   ];
 
-  // 세션 영구화 (best-effort)
-  const sid = await ensureChatSession(sessionId, message);
+  // 세션 영구화 (best-effort). 로그인 개인 계정만 user_id 귀속(게스트/익명은 null=브라우저-로컬).
+  const ownerUid = chatOwner(req);
+  const clientId = req.body?.clientId || null;
+  const sid = await ensureChatSession(sessionId, message, ownerUid);
   const demoMode = isDemoMode(req);
 
   try {
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), 120_000); // 120s (최대 5 tool 라운드 여유)
-    const result = await runChatWithTools(messages, ctrl.signal, demoMode, useModel);
+    const result = await runChatWithTools(messages, ctrl.signal, demoMode, useModel, webSearch);
     clearTimeout(timeout);
 
     const reply = (result.content || "(빈 응답)").trim();
 
     // chat_messages 영구화 (background, best-effort)
     if (sid) {
-      persistMessage(sid, "user", message, context, null, null);
-      persistMessage(sid, "ai", reply, { rounds: result.rounds, toolCalls: result.toolTrace }, result.tokens, useModel);
+      persistMessage(sid, "user", message, context, null, null, reqIp(req))
+        .then(() => persistMessage(sid, "ai", reply, { rounds: result.rounds, toolCalls: result.toolTrace }, result.tokens, useModel, reqIp(req)));
     }
 
     return res.json({
@@ -1664,7 +2251,7 @@ app.post("/api/chat", async (req, res) => {
 //   - done  : { reply, tokens, rounds, toolCalls }   최종 완성 답변
 //   - error : { message }
 app.post("/api/chat/stream", async (req, res) => {
-  const { message, context = {}, history = [], sessionId, model } = req.body || {};
+  const { message, context = {}, history = [], sessionId, model, webSearch = false } = req.body || {};
   const useModel = pickModel(model);
   if (!message || typeof message !== "string") {
     return res.status(400).json({ ok: false, error: "message 필드가 비어있습니다." });
@@ -1677,9 +2264,14 @@ app.post("/api/chat/stream", async (req, res) => {
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders && res.flushHeaders();
 
+  // 클라이언트가 끊겨도 생성은 계속 — 끊긴 뒤 SSE write 는 조용히 무시(서버는 끝까지 만들어 DB 저장)
+  let clientGone = false;
   const send = (event, data) => {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    if (clientGone) return;
+    try {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch { clientGone = true; }
   };
 
   const systemPrompt = buildSystemPrompt(context);
@@ -1694,9 +2286,13 @@ app.post("/api/chat/stream", async (req, res) => {
     { role: "user", content: message },
   ];
 
-  // 세션 영구화 (best-effort). 응답에 session 이벤트로 동봉.
-  const sid = await ensureChatSession(sessionId, message);
+  // 세션 영구화 (best-effort). 응답에 session 이벤트로 동봉. 로그인 개인 계정만 user_id 귀속.
+  const ownerUid = chatOwner(req);
+  const clientId = req.body?.clientId || null;
+  const sid = await ensureChatSession(sessionId, message, ownerUid);
   if (sid) send("session", { sessionId: sid });
+  // 다른 화면에 사용자 메시지 즉시 반영 (발신 화면 제외)
+  if (sid && ownerUid != null) broadcastToOwner(ownerUid, { type: "chat:user", sessionId: sid, text: message, ts: Date.now() }, clientId);
   const demoMode = isDemoMode(req);
 
   const MAX_ROUNDS = 5;
@@ -1705,19 +2301,39 @@ app.post("/api/chat/stream", async (req, res) => {
   let lastTokens = { prompt: 0, completion: 0 };
 
   const ctrl = new AbortController();
-  const timeout = setTimeout(() => { console.log("[chat/stream] timeout 180s"); ctrl.abort(); }, 180_000);   // 180s (라운드 여유)
+  const STREAM_TIMEOUT_MS = useModel === "qwen3.5:27b" ? 1_200_000 : isOpenAI(useModel) ? 240_000 : 180_000;   // 27b 20분 · GPT 4분 · 로컬 3분
+  const timeout = setTimeout(() => { console.log(`[chat/stream] timeout ${STREAM_TIMEOUT_MS}ms`); ctrl.abort(); }, STREAM_TIMEOUT_MS);
   // client disconnect → 진행 중인 Ollama fetch abort.
   // res.writableFinished 는 res.end() 호출 후 true 가 됨. 우리가 아직 응답 안 끝낸 상태라면
   // 'close' 는 진짜 클라이언트 단절. (express body parser 가 emit 하는 spurious close 는
   //  대부분 응답 헤더 전이라서 첫 write 이후엔 안전.)
-  let aborted = false;
   res.on("close", () => {
     if (res.writableFinished) return;   // 우리가 정상 종료한 경우
-    if (aborted) return;
-    aborted = true;
-    console.log("[chat/stream] response closed early → abort");
-    try { ctrl.abort(); } catch {}
+    // 실제 채팅처럼 — 클라이언트가 끊겨도 LLM 생성을 중단하지 않는다.
+    // 서버가 끝까지 생성해 chat_messages 에 저장 → 사용자가 다시 열면 그 답변을 보게 됨.
+    // (STREAM_TIMEOUT_MS 타임아웃이 폭주 방지 안전망)
+    if (clientGone) return;
+    clientGone = true;
+    console.log("[chat/stream] client disconnected → 생성 계속(중단 안 함), 완료 후 저장");
   });
+
+  // ── OpenAI(GPT) 분기 — 비스트리밍 라운드 루프(도구호출 + 최종 done). 외부 전송. ──
+  if (isOpenAI(useModel)) {
+    try {
+      const r = await runOpenAIRounds({ send, working, model: useModel, demoMode, signal: ctrl.signal, maxRounds: MAX_ROUNDS, toolTrace, webSearch });
+      send("done", { reply: r.reply, sessionId: sid, model: useModel, rounds: r.rounds, toolCalls: toolTrace, tokens: r.tokens });
+      if (sid) {
+        persistMessage(sid, "user", message, context, null, null, reqIp(req))
+          .then(() => persistMessage(sid, "ai", r.reply, { rounds: r.rounds, toolCalls: toolTrace }, r.tokens, useModel, reqIp(req)));
+      }
+      if (sid && ownerUid != null) broadcastToOwner(ownerUid, { type: "chat:ai", sessionId: sid, text: r.reply, model: useModel, ts: Date.now() }, clientId);
+    } catch (err) {
+      console.error("[chat/stream openai]", err.message);
+      send("error", { message: err.message });
+    }
+    clearTimeout(timeout);
+    return res.end();
+  }
 
   try {
     for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -1727,7 +2343,7 @@ app.post("/api/chat/stream", async (req, res) => {
         body: JSON.stringify({
           model: useModel,
           messages: working,
-          tools: TOOLS,
+          tools: toolsFor(webSearch),
           stream: true,
           think: false,
           options: { temperature: 0.3, num_predict: 1000 },
@@ -1795,9 +2411,10 @@ app.post("/api/chat/stream", async (req, res) => {
         });
         // chat_messages 영구화 (background)
         if (sid) {
-          persistMessage(sid, "user", message, context, null, null);
-          persistMessage(sid, "ai", finalReply, { rounds: round + 1, toolCalls: toolTrace }, lastTokens, useModel);
+          persistMessage(sid, "user", message, context, null, null, reqIp(req))
+            .then(() => persistMessage(sid, "ai", finalReply, { rounds: round + 1, toolCalls: toolTrace }, lastTokens, useModel, reqIp(req)));
         }
+        if (sid && ownerUid != null) broadcastToOwner(ownerUid, { type: "chat:ai", sessionId: sid, text: finalReply, model: useModel, ts: Date.now() }, clientId);
         clearTimeout(timeout);
         return res.end();
       }
@@ -1858,7 +2475,7 @@ function zoneFromFacility(num) {
   return m ? `제${m[1]}구역` : "-";
 }
 
-// AI '이상' 이 threshold 의 N배 이상이면 '위험'(critical) 으로 승격. 그 미만이면 '이상의심'(warn).
+// (낡음) 옛 승격 휴리스틱 잔재. 현재 status 는 mapStatus 가 이두현 risk_level 그대로 매핑 → 이 상수는 status 판정에 미사용.
 const AI_CRITICAL_RATIO = 5;
 
 // 단말별 최신 ai_predictions 1건씩 → Map<transmitter_id, {risk, mse, threshold}>
@@ -2046,20 +2663,17 @@ function classifyAiPrediction(ai) {
   };
 }
 
-// 단말 status 판정 (하이브리드 — 규칙 + AI, ADR #2b 옵션 C)
-//   - offline       : 최근 측정 24h+ 없음 (진짜 통신 두절)
-//   - critical(위험)   : 최근 7일 활성 알람  OR  AI '이상' & MSE >= threshold*AI_CRITICAL_RATIO
-//   - warn(이상의심) : AI '이상'(경계) 또는 '관찰'
-//   - normal        : 그 외
-//
-// 주의: KSCG 의 DEVICE_STATUS 컬럼은 의미가 명확하지 않음 (시범 5대=1, 확대 50대=0).
-//       데이터 자체는 둘 다 정상 흐름이라 status 판정에 사용하지 않음.
+// 단말 status 판정 — 이두현 LSTM 모델 출력(risk_level + comm_status) 그대로 매핑 (캡스톤: AI 작성자 기준 충실).
+//   - offline(통신장애) : comm_status '통신고장' (이두현 연속3회 단절 = AI 신뢰불가). + AI 데이터 자체 없음(24h) fallback
+//   - critical(화면 '이상') : risk_level '이상' (MSE ≥ threshold, 100% 초과)
+//   - warn(화면 '관찰')     : risk_level '관찰' (threshold 70~100%)
+//   - normal           : risk_level '정상' (<70%)
+//   ※ KSCG 알람·우리 500% 휴리스틱은 status 에 미반영 (알람은 별도 알림/로그로만).
 function mapStatus(_deviceStatus, hoursSilent, activeAlarmCount, ai) {
-  if (hoursSilent != null && hoursSilent >= 24) return "offline";
-  const aiSevere = ai && ai.risk === "이상" && ai.mse != null && Number(ai.threshold) > 0
-                   && Number(ai.mse) >= Number(ai.threshold) * AI_CRITICAL_RATIO;
-  if (activeAlarmCount > 0 || aiSevere) return "critical";
-  if (ai && (ai.risk === "이상" || ai.risk === "관찰")) return "warn";
+  if (ai && ai.commStatus === "통신고장") return "offline";               // 이두현 통신 판정
+  if (!ai && hoursSilent != null && hoursSilent >= 24) return "offline";  // AI 판정할 데이터 없음
+  if (ai && ai.risk === "이상") return "critical";                        // 모델 '이상' → 화면 '이상'
+  if (ai && ai.risk === "관찰") return "warn";                            // 모델 '관찰' → 화면 '관찰'
   return "normal";
 }
 
@@ -2414,7 +3028,7 @@ app.get("/api/anomalies", dbRequired, async (req, res) => {
       return {
         node: r.node,
         zone: zoneFromFacility(r.facility),
-        label: `${top ? top + " " : ""}${r.riskLevel === "이상" ? "이상" : "이상 의심"}`,
+        label: `${top ? top + " " : ""}${r.riskLevel === "이상" ? "이상" : "관찰"}`,
         mse: Number(r.mse),
         threshold: Number(r.threshold),
         riskLevel: r.riskLevel,
@@ -2426,13 +3040,10 @@ app.get("/api/anomalies", dbRequired, async (req, res) => {
         ts: r.predictedAt,
       };
     };
-    // 심각(이상 & MSE>=threshold*AI_CRITICAL_RATIO) → anomalies, 그 외 이상/관찰 → watch
-    // (대시보드 mapStatus 의 critical/warn 분기와 동일 기준)
-    const isSevere = (r) => r.riskLevel === "이상" && Number(r.threshold) > 0
-                            && Number(r.mse) >= Number(r.threshold) * AI_CRITICAL_RATIO;
-    const aiAnoms = aiRows.filter(isSevere).map(mkAi)
+    // 이두현 모델 등급 그대로: '이상'(≥100%) → anomalies, '관찰'(70~100%) → watch
+    const aiAnoms = aiRows.filter((r) => r.riskLevel === "이상").map(mkAi)
                           .sort((a, b) => (b.aiRatio || 0) - (a.aiRatio || 0));
-    const aiWatch = aiRows.filter((r) => !isSevere(r) && (r.riskLevel === "이상" || r.riskLevel === "관찰")).map(mkAi)
+    const aiWatch = aiRows.filter((r) => r.riskLevel === "관찰").map(mkAi)
                           .sort((a, b) => (b.aiRatio || 0) - (a.aiRatio || 0));
 
     // 통신 24h 두절 — 별도 배열(commOutage). AI mse/threshold 와 섞지 않음.
@@ -2497,6 +3108,33 @@ app.get("/api/insights", (_req, res) => {
   res.json({ ok: true, insights: [] });
 });
 
+// ── POST /api/audit/login — 로그인 감사 기록 (시스템 로그 표시용) ──
+// 로그인은 프론트(authMock, localStorage) 처리라 서버에 흔적이 없음 →
+// 성공/실패 시 클라이언트가 이 엔드포인트로 알려 audit_log 에 남긴다.
+// ⚠️ 비밀번호는 절대 받지도/저장하지도 않는다. id·name·role·결과만.
+app.post("/api/audit/login", async (req, res) => {
+  if (!pool) return res.json({ ok: false, error: "DB 비활성" });
+  try {
+    const b = req.body || {};
+    const ok = b.ok === true;
+    const action = ok ? "login" : "login_fail";
+    const userId = String(b.id || "").slice(0, 60);
+    const name   = String(b.name || "").slice(0, 60);
+    const role   = String(b.role || "").slice(0, 30);
+    const reason = String(b.reason || "").slice(0, 120);  // 실패 사유(비번 외)
+    const ip = (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").toString().split(",")[0].slice(0, 45);
+    const ua = String(req.headers["user-agent"] || "").slice(0, 255);
+    await pool.query(
+      `INSERT INTO audit_log (action, target_type, target_id, ip, user_agent, metadata_json) VALUES (?, ?, ?, ?, ?, ?)`,
+      [action, "auth", userId || "(unknown)", ip, ua, JSON.stringify({ name, role, ok, reason })],
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[/api/audit/login]", err.message);
+    res.json({ ok: false, error: err.message });  // 감사 실패가 로그인 흐름을 막지 않도록 200
+  }
+});
+
 // ── GET /api/log-events — 시스템 로그 (영구 + 30초 polling) ──
 // audit_log (tool_call) + kscg_alarm_log 통합. 시간 역순 LIMIT.
 // query:
@@ -2508,19 +3146,24 @@ app.get("/api/log-events", dbRequired, async (req, res) => {
     const after = req.query.after;
     const q     = (req.query.q || "").trim().toLowerCase();
     const limit = Math.min(parseInt(req.query.limit || "100", 10), 300);
-    // 검색용 풀은 limit 보다 넉넉히 — 적은 limit 으로도 검색이 의미 있도록
-    const sqlLimit = Math.max(limit, 500);
 
-    // audit_log (도구 호출, AI 동작 등) — 최근 7일
-    const [audits] = await pool.query(`
-      SELECT id, created_at, action, target_id, metadata_json
-      FROM audit_log
-      WHERE created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
-        ${after ? "AND created_at > ?" : ""}
-      ORDER BY created_at DESC LIMIT ${sqlLimit}
-    `, after ? [after] : []);
+    // ── 소스별 "보장 쿼리" ───────────────────────────────────────
+    // 문제: audit_log(매분 누적) 가 alarm(드물지만 중요) 을 시간순 정렬에서 가림.
+    // 해결: 각 소스를 자기 몫만큼 따로 뽑아 합쳐 한 종류가 다른 종류를 묻지 않게 함.
+    //   alarm  — DB 원본 알람 (위험/경고/주의). 항상 최근 N건 확보.
+    //   ai     — ai_predictions 분석 갱신 (DB 에 새로 들어온 분석 결과).
+    //   sync   — sync_state 동기화 이벤트 (옴니 → siwon 데이터 반영).
+    //   auth   — audit_log 로그인/실패 (운영 감사).
+    //   tool   — audit_log AI 도구호출. 비중 제한(가장 흔하므로).
+    const PER = {
+      alarm: Math.max(40, Math.ceil(limit * 0.5)),
+      ai:    Math.max(30, Math.ceil(limit * 0.4)),
+      sync:  20,
+      auth:  20,
+      tool:  Math.max(40, Math.ceil(limit * 0.6)),
+    };
 
-    // kscg_alarm_log (옴니 원본 알람) — 최근 30일
+    // alarm — 최근 30일 (after 증분)
     const [alarms] = await pool.query(`
       SELECT a.ALARM_ID AS id, a.GEN_DATE AS ts, a.CONTENTS, a.VALUE,
              g.GRADE_TEXT AS grade,
@@ -2531,7 +3174,64 @@ app.get("/api/log-events", dbRequired, async (req, res) => {
       LEFT JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = si.TRANSMITTER_ID
       WHERE a.GEN_DATE > DATE_SUB(NOW(), INTERVAL 30 DAY)
         ${after ? "AND a.GEN_DATE > ?" : ""}
-      ORDER BY a.GEN_DATE DESC LIMIT ${sqlLimit}
+      ORDER BY a.GEN_DATE DESC LIMIT ${PER.alarm}
+    `, after ? [after] : []);
+
+    // ai — ai_predictions 분석 갱신 (transmitter 이름 조인)
+    const [preds] = await pool.query(`
+      SELECT p.id, p.created_at AS ts, p.mse, p.threshold, p.risk_level AS risk,
+             t.NAME AS deviceId
+      FROM ai_predictions p
+      LEFT JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = p.transmitter_id
+      WHERE p.created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
+        ${after ? "AND p.created_at > ?" : ""}
+      ORDER BY p.created_at DESC LIMIT ${PER.ai}
+    `, after ? [after] : []);
+
+    // sync — 옴니→Mac Studio 미러링으로 실제 들어온 "센서 측정값" 이벤트.
+    //   sync_log 의 단순 건수 대신, 측정 시각(WRITE_DATE)별 대표 장비 1대의 6종 센서
+    //   스냅샷을 보여줘 "어느 장비에서 무슨 값이 들어왔는지" 가 드러나게 함.
+    //   각 WRITE_DATE 시각마다 transmitter 하나를 골라(그 시각 데이터가 가장 많은 단말)
+    //   센서별 값을 JSON 집계.
+    const [syncs] = await pool.query(`
+      SELECT g.ts, g.transmitter_id, t.NAME AS deviceId, g.device_cnt,
+             JSON_OBJECTAGG(COALESCE(si.NAME, 'sensor'), ROUND(g2.VALUE, 1)) AS readings
+      FROM (
+        SELECT sd.WRITE_DATE AS ts, si.TRANSMITTER_ID AS transmitter_id,
+               COUNT(*) AS device_cnt
+        FROM kscg_sensor_data sd
+        JOIN kscg_sensor_info si ON si.SENSOR_ID = sd.SENSOR_ID
+        ${after ? "WHERE sd.WRITE_DATE > ?" : ""}
+        GROUP BY sd.WRITE_DATE, si.TRANSMITTER_ID
+        ORDER BY sd.WRITE_DATE DESC
+        LIMIT ${PER.sync}
+      ) g
+      JOIN kscg_sensor_data g2 ON g2.WRITE_DATE = g.ts
+      JOIN kscg_sensor_info si ON si.SENSOR_ID = g2.SENSOR_ID AND si.TRANSMITTER_ID = g.transmitter_id
+      LEFT JOIN kscg_transmitter_info t ON t.TRANSMITTER_ID = g.transmitter_id
+      GROUP BY g.ts, g.transmitter_id, t.NAME, g.device_cnt
+      ORDER BY g.ts DESC
+      LIMIT ${PER.sync}
+    `, after ? [after] : []);
+
+    // tool — audit_log AI 도구호출 (최근 7일, after 증분). action='tool_call' 한정.
+    const [audits] = await pool.query(`
+      SELECT id, created_at, action, target_id, metadata_json
+      FROM audit_log
+      WHERE action = 'tool_call'
+        AND created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
+        ${after ? "AND created_at > ?" : ""}
+      ORDER BY created_at DESC LIMIT ${PER.tool}
+    `, after ? [after] : []);
+
+    // auth — audit_log 로그인/실패 (최근 30일, after 증분)
+    const [auths] = await pool.query(`
+      SELECT id, created_at, action, target_id, metadata_json
+      FROM audit_log
+      WHERE action IN ('login', 'login_fail')
+        AND created_at > DATE_SUB(NOW(), INTERVAL 30 DAY)
+        ${after ? "AND created_at > ?" : ""}
+      ORDER BY created_at DESC LIMIT ${PER.auth}
     `, after ? [after] : []);
 
     const fmtTime = (d) => {
@@ -2541,9 +3241,77 @@ app.get("/api/log-events", dbRequired, async (req, res) => {
       const ss = String(dt.getSeconds()).padStart(2, "0");
       return `${hh}:${mm}:${ss}`;
     };
+    // cursor 용 — DB 로컬시각(KST) 그대로의 'YYYY-MM-DD HH:MM:SS' 문자열.
+    // 프론트는 이 값을 파싱 없이 그대로 after= 로 되돌려줘 타임존 변환 오차를 차단.
+    const fmtCursor = (d) => {
+      const dt = new Date(d);
+      const p = (n) => String(n).padStart(2, "0");
+      return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())} `
+           + `${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
+    };
 
-    // audit → 이벤트 변환 (도구 호출 표시)
-    const auditEvents = audits.map((a) => {
+    // alarm → 이벤트 (위험=alert, 그 외=warn)
+    const alarmEvents = alarms.map((a) => ({
+      id:   `alm-${a.id}`,
+      ts:   a.ts,
+      cur:  fmtCursor(a.ts),
+      time: fmtTime(a.ts),
+      kind: a.grade === "위험" ? "alert" : "warn",
+      text: `${a.grade || "ALARM"}: ${a.deviceId || "(unknown)"} · ${a.CONTENTS || ""} · 값 ${a.VALUE != null ? Number(a.VALUE).toFixed(2) : "-"}`,
+      source: "alarm",
+    }));
+
+    // ai → 이벤트 (이상=alert, 관찰=warn, 그 외=ai). 임계 대비 배수 표기.
+    const aiEvents = preds.map((p) => {
+      const ratio = (p.threshold > 0 && p.mse != null) ? (p.mse / p.threshold) : null;
+      const ratioTxt = ratio != null ? ` · 임계 ×${ratio.toFixed(2)}` : "";
+      const kind = p.risk === "이상" ? "alert" : p.risk === "관찰" ? "warn" : "ai";
+      return {
+        id:   `ai-${p.id}`,
+        ts:   p.ts,
+        cur:  fmtCursor(p.ts),
+        time: fmtTime(p.ts),
+        kind,
+        text: `AI 분석: ${p.deviceId || `#${p.id}`} · ${p.risk || "정상"}${ratioTxt}`,
+        source: "ai",
+      };
+    });
+
+    // sync → 이벤트 (옴니 KSCG → Mac Studio MySQL 미러링: 실제 측정값 스냅샷)
+    //   "미러링: TB24-XXX 측정 수신 · 방식전위 -71mV · AC유입 2309mV · 온도 27.4℃ …"
+    //   센서종류별 단위 매핑(없는 종류는 mV 가정). 주요 6종만 우선 노출.
+    const SENSOR_UNIT = { 방식전위:"mV", 방식전류:"mA", AC유입:"mV", 온도:"℃", 습도:"%", 배터리:"mV", 수신감도:"dBm", 가스누출:"%LEL", 수위:"", 충격:"" };
+    const SENSOR_ORDER = ["방식전위", "AC유입", "온도", "습도", "방식전류", "배터리"];
+    const syncEvents = syncs.map((s) => {
+      let readings = {};
+      try { readings = typeof s.readings === "string" ? JSON.parse(s.readings) : (s.readings || {}); } catch {}
+      // 주요 센서 우선 정렬 후 나머지, 최대 5개
+      const allKeys = Object.keys(readings).sort((a, b) => {
+        const ia = SENSOR_ORDER.indexOf(a), ib = SENSOR_ORDER.indexOf(b);
+        return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      });
+      const keys = allKeys.slice(0, 4);   // 주요 4종 노출
+      const parts = keys.map((k) => {
+        const u = SENSOR_UNIT[k] ?? "";
+        return `${k} ${readings[k]}${u}`;
+      });
+      const dev = s.deviceId || `#${s.transmitter_id}`;
+      const more = allKeys.length > keys.length ? ` 외 ${allKeys.length - keys.length}종` : "";
+      return {
+        id:   `syn-${s.transmitter_id}-${fmtCursor(s.ts)}`,
+        ts:   s.ts,
+        cur:  fmtCursor(s.ts),
+        time: fmtTime(s.ts),
+        kind: "data",
+        text: parts.length
+          ? `미러링: ${dev} 측정 수신 · ${parts.join(" · ")}${more}`
+          : `미러링: ${dev} 측정 수신`,
+        source: "sync",
+      };
+    });
+
+    // tool → 이벤트 (도구 호출)
+    const toolEvents = audits.map((a) => {
       let meta = {};
       try { meta = a.metadata_json ? (typeof a.metadata_json === "string" ? JSON.parse(a.metadata_json) : a.metadata_json) : {}; } catch {}
       const argsTxt = meta.args ? Object.entries(meta.args).slice(0, 2).map(([k, v]) => `${k}:${String(v).slice(0, 16)}`).join(",") : "";
@@ -2552,30 +3320,79 @@ app.get("/api/log-events", dbRequired, async (req, res) => {
       return {
         id:   `aud-${a.id}`,
         ts:   a.created_at,
+        cur:  fmtCursor(a.created_at),
         time: fmtTime(a.created_at),
         kind: meta.ok === false ? "warn" : "ai",
-        text: `AI: ${a.target_id}(${argsTxt})${dur}${ok}`,
-        source: "audit",
+        text: `도구: ${a.target_id}(${argsTxt})${dur}${ok}`,
+        source: "tool",
       };
     });
 
-    // alarm → 이벤트 변환 (위험/경고/주의)
-    const alarmEvents = alarms.map((a) => ({
-      id:   `alm-${a.id}`,
-      ts:   a.ts,
-      time: fmtTime(a.ts),
-      kind: a.grade === "위험" ? "alert" : "warn",
-      text: `${a.grade || "ALARM"}: ${a.deviceId || "(unknown)"} · ${a.CONTENTS || ""} · 값 ${a.VALUE != null ? Number(a.VALUE).toFixed(2) : "-"}`,
-      source: "alarm",
-    }));
+    // auth → 이벤트 (로그인 성공/실패)
+    const authEvents = auths.map((a) => {
+      let meta = {};
+      try { meta = a.metadata_json ? (typeof a.metadata_json === "string" ? JSON.parse(a.metadata_json) : a.metadata_json) : {}; } catch {}
+      const who = meta.name ? `${meta.name}${meta.role ? `(${meta.role})` : ""}` : (a.target_id || "(unknown)");
+      const isFail = a.action === "login_fail";
+      return {
+        id:   `auth-${a.id}`,
+        ts:   a.created_at,
+        cur:  fmtCursor(a.created_at),
+        time: fmtTime(a.created_at),
+        kind: isFail ? "warn" : "auth",
+        text: isFail
+          ? `⚠ 로그인 실패: ${who}${meta.reason ? ` · ${meta.reason}` : ""}`
+          : `로그인: ${who}`,
+        source: "auth",
+      };
+    });
 
-    // 통합 + 시간순 정렬 + 검색 필터 + LIMIT
-    let merged = [...auditEvents, ...alarmEvents]
-      .sort((x, y) => new Date(y.ts).getTime() - new Date(x.ts).getTime());
-    if (q) merged = merged.filter((e) => e.text.toLowerCase().includes(q));
-    merged = merged.slice(0, limit);
+    // nextCursor — 조회된 모든 소스의 최대 cur (KST DATETIME 문자열).
+    // 반환 events 가 아닌 "조회 풀 전체"의 max 를 써야 limit 밖으로 밀린 행이
+    // 다음 폴링에서 누락되지 않음. 프론트는 이 값을 파싱 없이 그대로 after= 로 전달.
+    const allEvents = [...alarmEvents, ...aiEvents, ...syncEvents, ...authEvents, ...toolEvents];
+    const nextCursor = allEvents.reduce((mx, e) => (e.cur && (!mx || e.cur > mx) ? e.cur : mx), after || null);
 
-    res.json({ ok: true, count: merged.length, events: merged });
+    // 검색어가 있으면 단순 통합·필터 (보장 불필요 — 검색은 전체 대상)
+    const byTs = (x, y) => new Date(y.ts).getTime() - new Date(x.ts).getTime();
+    if (q) {
+      let merged = allEvents
+        .filter((e) => e.text.toLowerCase().includes(q))
+        .sort(byTs)
+        .slice(0, limit);
+      return res.json({ ok: true, count: merged.length, events: merged, nextCursor });
+    }
+
+    // 보장 병합: 단순 시간순 cut 은 자주 발생하는 tool 이 드문 alarm 을 밀어냄.
+    // → 소스별 "최소 확보분"을 먼저 떼고, 남는 자리를 나머지에서 시간순으로 채움.
+    const GUARANTEE = { alarm: 12, auth: 10, sync: 8, ai: 12, tool: 0 };  // 각 소스 최소 노출 건수
+    const pools = {
+      alarm: alarmEvents.slice().sort(byTs),
+      ai:    aiEvents.slice().sort(byTs),
+      sync:  syncEvents.slice().sort(byTs),
+      auth:  authEvents.slice().sort(byTs),
+      tool:  toolEvents.slice().sort(byTs),
+    };
+    const picked = [];
+    const usedIds = new Set();
+    // 1단계 — 소스별 최소분 확보
+    for (const [s, g] of Object.entries(GUARANTEE)) {
+      for (const e of pools[s].slice(0, g)) {
+        if (!usedIds.has(e.id)) { usedIds.add(e.id); picked.push(e); }
+      }
+    }
+    // 2단계 — 남는 자리를 전체에서 시간순으로 채움
+    const rest = allEvents
+      .filter((e) => !usedIds.has(e.id))
+      .sort(byTs);
+    for (const e of rest) {
+      if (picked.length >= limit) break;
+      usedIds.add(e.id); picked.push(e);
+    }
+    // 최종 표시 순서는 시간 역순
+    const events = picked.sort(byTs).slice(0, limit);
+
+    res.json({ ok: true, count: events.length, events, nextCursor });
   } catch (err) {
     console.error("[/api/log-events]", err);
     res.status(500).json({ ok: false, error: err.message });
@@ -2624,282 +3441,138 @@ app.get("/api/admin/tool-stats", dbRequired, async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────
-// 📅 매일 자정 빈 일일 세션 강제 (cron) — launchd 가 00:01 에 호출
-//   사용자 5/26 결정 — "새 세션이 날짜별로 새 세션이 되도록".
-//   매일 00:01 에 "📅 YYYY-MM-DD 대화" 세션 ensure (이미 있으면 skip).
-//   운영자가 그날 처음 챗봇 진입 시 자연스럽게 그 세션이 이미 만들어져 있음.
-//   드롭다운 그룹 "오늘" 에 항상 1개 이상 세션 존재.
-// ─────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────
-// 📚 어제 일반 세션 → 1개로 merge (매일 자정 cron)
-//   사용자 5/26 결정 — "다음날에 볼때는 어제 모든 세션이 합친 1개로 표시".
-//   자동분석 세션 (🤖) 은 제외, 어제 일반 세션만 대상.
-//   target = 어제 첫 일반 세션 (id 최소, 보통 빈 일일 세션 📅).
-//   메시지 모두 target 으로 UPDATE → 빈 세션 DELETE → title "📚 YYYY-MM-DD 대화 통합".
-// ─────────────────────────────────────────────────────
-app.post("/api/admin/merge-yesterday-sessions", dbRequired, async (_req, res) => {
+// USD→KRW 실시간 환율 (6시간 캐시 + 실패 시 마지막값/기본값 폴백). 외부 무료 API.
+let _fxCache = { rate: 1380, at: 0 };
+async function getUsdKrw() {
+  if (Date.now() - _fxCache.at < 6 * 3600 * 1000) return _fxCache.rate;
   try {
-    const y = new Date();
-    y.setDate(y.getDate() - 1);
-    const yKey = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, "0")}-${String(y.getDate()).padStart(2, "0")}`;
+    const r = await fetch("https://open.er-api.com/v6/latest/USD", { signal: AbortSignal.timeout(4000) });
+    const d = await r.json();
+    const krw = Number(d?.rates?.KRW);
+    if (krw > 500 && krw < 3000) { _fxCache = { rate: Math.round(krw), at: Date.now() }; }
+  } catch { /* 네트워크 실패 → 마지막값 유지 */ }
+  return _fxCache.rate;
+}
 
-    // 어제의 첫 일반 세션 찾기
-    const [tRows] = await pool.query(`
-      SELECT MIN(s.id) AS target FROM chat_sessions s
-      JOIN chat_messages m ON m.session_id = s.id
-      WHERE s.title NOT LIKE '🤖%' AND DATE(m.created_at) = ?
-    `, [yKey]);
-    const target = tRows[0]?.target;
-    if (!target) {
-      return res.json({ ok: true, dateKey: yKey, merged: 0, message: "어제 일반 세션 없음" });
-    }
-
-    // 다른 일반 세션 메시지 → target 으로 UPDATE
-    await pool.query(`
-      UPDATE chat_messages SET session_id = ?
-      WHERE DATE(created_at) = ? AND session_id != ?
-        AND session_id IN (SELECT * FROM (
-          SELECT DISTINCT s.id FROM chat_sessions s
-          JOIN chat_messages m ON m.session_id = s.id
-          WHERE s.title NOT LIKE '🤖%' AND DATE(m.created_at) = ?
-        ) x)
-    `, [target, yKey, target, yKey]);
-
-    // 빈 일반 세션 DELETE (자동분석 🤖 제외)
-    const [delResult] = await pool.query(`
-      DELETE FROM chat_sessions
-      WHERE title NOT LIKE '🤖%'
-        AND id != ?
-        AND id NOT IN (SELECT DISTINCT session_id FROM chat_messages)
-    `, [target]);
-
-    // target title 갱신 + updated_at 도 메시지 마지막 시각으로 강제
-    //   (그냥 UPDATE title 만 하면 ON UPDATE CURRENT_TIMESTAMP 가 발동되어
-    //    어제 세션 updated_at 이 자정 시각으로 갱신 → 그룹 분류 '오늘' 로 잘못 떨어짐)
-    await pool.query(
-      `UPDATE chat_sessions SET title = ?,
-         updated_at = COALESCE(
-           (SELECT MAX(m.created_at) FROM chat_messages m WHERE m.session_id = ?),
-           updated_at
-         )
-       WHERE id = ?`,
-      [`📚 ${yKey} 대화 통합`, target, target],
-    );
-
-    console.log(`[merge-yesterday] dateKey=${yKey} target=${target} deleted=${delResult.affectedRows}`);
-    res.json({ ok: true, dateKey: yKey, target, deletedSessions: delResult.affectedRows });
-  } catch (err) {
-    console.error("[merge-yesterday]", err.message);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-app.post("/api/admin/ensure-daily-session", dbRequired, async (_req, res) => {
+// ── GET /api/admin/token-usage — AI 모델별 토큰 사용량 (chat_messages 집계, admin 전용) ──
+app.get("/api/admin/token-usage", dbRequired, requireAdmin, async (_req, res) => {
   try {
-    const now = new Date();
-    const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    const title = `📅 ${dateKey} 대화`;
-    // 같은 title 이미 있으면 skip (idempotent)
-    const [existing] = await pool.query(
-      `SELECT id FROM chat_sessions WHERE title = ? ORDER BY created_at DESC LIMIT 1`,
-      [title],
-    );
-    if (existing.length) {
-      return res.json({ ok: true, sessionId: Number(existing[0].id), created: false, dateKey });
-    }
-    const [r] = await pool.query(`INSERT INTO chat_sessions (title) VALUES (?)`, [title]);
-    console.log(`[daily-session] created session ${r.insertId} : ${title}`);
-    res.json({ ok: true, sessionId: r.insertId, created: true, dateKey, title });
-  } catch (err) {
-    console.error("[ensure-daily-session]", err.message);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// ─────────────────────────────────────────────────────
-// 🤖 AI 자동 분석 (cron) — 매시 정각 launchd 가 호출
-//   1. 군산 날씨 fetch (Open-Meteo)
-//   2. 도구 5개 호출로 시스템 현황 수집
-//   3. LLM 한 번 호출 → C 톤 풍부 메시지 생성
-//   4. "AI 자동 분석 — YYYY-MM-DD" 일일 세션에 system role 로 INSERT
-// ─────────────────────────────────────────────────────
-
-// 서버측 군산 날씨 fetch (Open-Meteo)
-const WMO_KO = {
-  0:"맑음",1:"대체로 맑음",2:"부분 흐림",3:"흐림",45:"안개",48:"안개",
-  51:"약한 이슬비",53:"이슬비",55:"강한 이슬비",
-  61:"약한 비",63:"비",65:"강한 비",
-  71:"약한 눈",73:"눈",75:"강한 눈",77:"눈알갱이",
-  80:"소나기",81:"소나기",82:"강한 소나기",
-  85:"눈 소나기",86:"눈 소나기",
-  95:"뇌우",96:"뇌우(우박)",99:"강한 뇌우",
-};
-async function fetchGunsanWeather() {
-  try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=35.9678&longitude=126.7369&current=temperature_2m,weather_code,precipitation,relative_humidity_2m&timezone=Asia%2FSeoul`;
-    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!r.ok) return null;
-    const j = await r.json();
-    if (!j.current) return null;
-    const code = j.current.weather_code;
-    return {
-      temp:     Math.round(j.current.temperature_2m),
-      ko:       WMO_KO[code] || "-",
-      code,
-      precip:   j.current.precipitation,
-      humidity: j.current.relative_humidity_2m != null ? Math.round(j.current.relative_humidity_2m) : null,
-      time:     j.current.time,
+    const [rows] = await pool.query(`
+      SELECT COALESCE(NULLIF(model, ''), '(미지정)') AS model,
+             COUNT(*) AS messages,
+             COALESCE(SUM(tokens_prompt), 0)                      AS prompt_tok,
+             COALESCE(SUM(tokens_completion), 0)                  AS compl_tok,
+             COALESCE(SUM(tokens_prompt + tokens_completion), 0)  AS total_tok,
+             MAX(created_at) AS last_used
+      FROM chat_messages
+      WHERE role = 'ai'
+      GROUP BY model
+      ORDER BY total_tok DESC
+    `);
+    const provOf = (m) =>
+      /^gpt/i.test(m) ? "OpenAI"
+      : /(qwen|llama|mistral|gemma|phi|deepseek)/i.test(m) ? "Ollama(로컬)"
+      : "기타";
+    // OpenAI 요율 (USD / 1M 토큰, in=입력 out=출력). est:true = 추정 요율(공개가 미확정).
+    //   실제 단가가 다르면 이 값만 수정하면 비용에 즉시 반영됨.
+    const PRICING = {
+      "gpt-4o-mini": { in: 0.15, out: 0.60 },
+      "gpt-4o":      { in: 2.50, out: 10.00 },
+      "gpt-5":       { in: 1.25, out: 10.00, est: true },
+      "gpt-5.5":     { in: 1.50, out: 12.00, est: true },
+      "gpt-5-mini":  { in: 0.25, out: 2.00,  est: true },
+      "gpt-5-nano":  { in: 0.05, out: 0.40,  est: true },
     };
-  } catch (e) {
-    console.warn("[fetchGunsanWeather]", e.message);
-    return null;
-  }
-}
-
-// "AI 자동 분석 — YYYY-MM-DD" 세션 ensure (오늘 세션 없으면 생성)
-async function ensureAutoInsightSession(dateKey) {
-  if (!pool) return null;
-  const title = `🤖 AI 자동 분석 — ${dateKey}`;
-  try {
-    const [rows] = await pool.query(
-      `SELECT id FROM chat_sessions WHERE title = ? ORDER BY created_at DESC LIMIT 1`,
-      [title],
-    );
-    if (rows.length) return Number(rows[0].id);
-    const [r] = await pool.query(`INSERT INTO chat_sessions (title) VALUES (?)`, [title]);
-    return r.insertId;
-  } catch (e) {
-    console.warn("[ensureAutoInsightSession]", e.message);
-    return null;
-  }
-}
-
-// 자동 분석 prompt 빌더 (C 톤 풍부 형식 강제)
-//   시각 기준 = 정시 (매시 00분 floor). 운영자가 14:23 에 눌러도 메시지는 "14:00" 기준.
-//   다음 분석은 항상 다음 정시 (HH+1):00.
-function buildAutoInsightPrompt(weather, dataBundle) {
-  const { summary, offlineList, criticalList, lowVolt, recentAlarms } = dataBundle;
-  // 정시 floor (Asia/Seoul) — 분/초 = 00 으로 잘라냄
-  const nowDate = new Date();
-  const fmtHour = (d) =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:00`;
-  const hourFloor = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate(), nowDate.getHours(), 0, 0);
-  const nextHour  = new Date(hourFloor.getTime() + 60 * 60 * 1000);
-  const currentSlot = fmtHour(hourFloor);   // "2026-05-26 14:00"
-  const nextSlot    = fmtHour(nextHour);    // "2026-05-26 15:00"
-  const weatherLine = weather
-    ? `${weather.ko} · ${weather.temp}°C${weather.precip != null ? ` · 강수 ${weather.precip}mm` : ""}${weather.humidity != null ? ` · 습도 ${weather.humidity}%` : ""}`
-    : "(데이터 없음)";
-  return `당신은 매설배관 IoT 통합관제 시스템의 AI 분석 엔진입니다.
-운영자가 챗봇에 접속할 때마다 자동으로 push 되는 시간별 분석 메시지를 작성합니다.
-한국어 존댓말. 답변 외 메타·설명 X. 메시지 본문만 출력.
-
-# 분석 기준 시각 (정시 기준 — 매시 00분 floor)
-- 현재 분석 시각: ${currentSlot}
-- 다음 분석 시각: ${nextSlot}
-- 메시지 본문에 이 두 시각을 정확히 인용 (다른 분/초 표현 금지)
-
-# 현재 군산 날씨 (Open-Meteo)
-${weatherLine}
-
-# 시스템 KPI
-${JSON.stringify(summary)}
-
-# 통신 두절 단말 목록 (상위 5)
-${JSON.stringify(offlineList)}
-
-# 위험 단말 목록 (최근 7일 알람 발생, 상위 5)
-${JSON.stringify(criticalList)}
-
-# 방식전위 -800 mV 이상 단말 (부식 진행 가능)
-${JSON.stringify(lowVolt)}
-
-# 최근 24시간 알람
-${JSON.stringify(recentAlarms)}
-
-# 출력 형식 (반드시 이대로 · 시각은 위 "분석 기준 시각" 정확히 인용)
-
-🤖 자동 분석 · ${currentSlot} ── 분석 엔진 가동중
-
-🌦 군산 현재 — {날씨 한 줄}
-
-🔔 즉각 조치
-{즉시 조치가 필요한 단말 1~2건. 날씨 영향 고려. 데이터 근거 명시.
- 없으면 "현재 즉각 조치 대상 없음. 모니터링 지속."}
-
-📈 트렌드 예측
-{향후 N시간 변화 예측 + [추정] 확률. 날씨가 향후에 미칠 영향 1줄.}
-
-✓ 우선 점검 권고
-1. {단말 또는 구역} ── {긴급도 (즉시/24시간/1주)}
-2. ...
-3. ...
-
-다음 분석 ${nextSlot}
-
-# 규칙
-- 수치는 도구 데이터 그대로 인용. 추측 결론은 [추정] 라벨
-- 데이터 없는 항목은 "없음" 명시 (만들지 말 것)
-- 마크다운 **굵게** 만 사용 (헤더 ## X)
-- 5문장 이상 길게 쓰지 말 것 (각 섹션 2~4문장)
-- 시각 표기는 절대 "오후 2:01" 같은 분/초 X. 무조건 "${currentSlot}" / "${nextSlot}" 형태`;
-}
-
-app.post("/api/admin/run-auto-insight", dbRequired, async (_req, res) => {
-  const t0 = Date.now();
-  try {
-    // 1. 날씨
-    const weather = await fetchGunsanWeather();
-
-    // 2. 데이터 수집 (도구 직접 호출 — 캐시 hit 도 OK)
-    const [summary, offlineList, criticalList, lowVolt, recentAlarms] = await Promise.all([
-      execTool("get_summary", {}),
-      execTool("list_devices", { status: "offline", limit: 5 }),
-      execTool("list_devices", { status: "critical", limit: 5 }),
-      execTool("find_devices_by_value", { metric: "volt", op: "gte", threshold: -800, limit: 5 }),
-      execTool("get_alarms", { days: 1, limit: 5 }),
-    ]);
-
-    // 3. LLM 호출 (도구 X — 데이터는 이미 prompt 에 포함)
-    const systemPrompt = buildAutoInsightPrompt(weather, { summary, offlineList, criticalList, lowVolt, recentAlarms });
-    const ollamaRes = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user",   content: "지금 분석 메시지를 작성하세요." },
-        ],
-        stream: false,
-        think: false,
-        options: { temperature: 0.4, num_predict: 800 },
-      }),
-      signal: AbortSignal.timeout(60_000),
+    const byModel = rows.map((r) => {
+      const provider = provOf(r.model);
+      const prompt = Number(r.prompt_tok) || 0;
+      const completion = Number(r.compl_tok) || 0;
+      const pr = PRICING[r.model];
+      let rate = null, costUsd = null;
+      if (provider === "OpenAI" && pr) {
+        rate = { in: pr.in, out: pr.out, est: !!pr.est };
+        costUsd = (prompt / 1e6) * pr.in + (completion / 1e6) * pr.out;
+      } else if (provider !== "OpenAI") {
+        costUsd = 0; // 로컬(Ollama) = 무료
+      }
+      return {
+        model: r.model, provider,
+        messages: Number(r.messages) || 0,
+        prompt, completion,
+        total: Number(r.total_tok) || 0,
+        lastUsed: r.last_used,
+        rate, costUsd,
+      };
     });
-    if (!ollamaRes.ok) throw new Error(`Ollama HTTP ${ollamaRes.status}`);
-    const data = await ollamaRes.json();
-    const text = String(data.message?.content || "").trim();
-    if (!text) throw new Error("LLM empty response");
-
-    // 4. 자동 분석 세션 ensure + INSERT
-    const now = new Date();
-    const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    const sid = await ensureAutoInsightSession(dateKey);
-    if (!sid) throw new Error("session ensure failed");
-    await persistMessage(
-      sid, "system", text,
-      { auto: true, weather, summary, hourlyTrigger: now.toISOString() },
-      { prompt: data.prompt_eval_count, completion: data.eval_count },
-      OLLAMA_MODEL,
-    );
-
-    const elapsedMs = Date.now() - t0;
-    console.log(`[ai-insight] session=${sid} · ${elapsedMs}ms · ${text.length} chars`);
-    res.json({ ok: true, sessionId: sid, dateKey, text, weather, elapsedMs });
+    const totals = byModel.reduce((a, m) => {
+      a.tokens += m.total; a.prompt += m.prompt; a.completion += m.completion; a.messages += m.messages; return a;
+    }, { tokens: 0, prompt: 0, completion: 0, messages: 0, models: byModel.length });
+    const provMap = {};
+    for (const m of byModel) {
+      const p = provMap[m.provider] || (provMap[m.provider] = { provider: m.provider, tokens: 0, messages: 0 });
+      p.tokens += m.total; p.messages += m.messages;
+    }
+    const byProvider = Object.values(provMap).sort((a, b) => b.tokens - a.tokens);
+    // 모델 목록을 제공자별로 묶어 내림차순 정렬 (제공자=토큰합 큰 순 → 그 안에서 모델 토큰 큰 순)
+    const provRank = new Map(byProvider.map((p, i) => [p.provider, i]));
+    byModel.sort((a, b) => (provRank.get(a.provider) - provRank.get(b.provider)) || (b.total - a.total));
+    const [daily] = await pool.query(`
+      SELECT DATE_FORMAT(created_at, '%Y-%m-%d') AS day,
+             COALESCE(SUM(tokens_prompt + tokens_completion), 0) AS tokens
+      FROM chat_messages
+      WHERE role = 'ai' AND created_at > DATE_SUB(NOW(), INTERVAL 14 DAY)
+      GROUP BY day ORDER BY day ASC
+    `);
+    const USD_KRW = await getUsdKrw(); // 실시간 환율(6h 캐시·폴백 1380)
+    const openaiModels = byModel.filter((m) => m.provider === "OpenAI");
+    const costUsd = openaiModels.reduce((a, m) => a + (m.costUsd || 0), 0);
+    const cost = {
+      usd: costUsd,
+      krw: Math.round(costUsd * USD_KRW),
+      fx: USD_KRW,
+      hasUnpriced: openaiModels.some((m) => m.costUsd == null),
+      hasEstimated: openaiModels.some((m) => m.rate && m.rate.est),
+    };
+    res.json({
+      ok: true, totals, byProvider, byModel, cost,
+      daily: daily.map((d) => ({ day: d.day, tokens: Number(d.tokens) || 0 })),
+    });
   } catch (err) {
-    console.error("[run-auto-insight]", err.message);
+    console.error("[/api/admin/token-usage]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── GET /api/admin/login-log — 로그인 감사 로그 (admin 전용) ──
+//   audit_log 의 login/login_fail 이벤트 + 계정별 집계. 침입 시도 가시화용.
+app.get("/api/admin/login-log", dbRequired, requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
+    const [events] = await pool.query(
+      `SELECT created_at AS ts, action, target_id AS account, ip,
+              JSON_UNQUOTE(JSON_EXTRACT(metadata_json,'$.name'))   AS name,
+              JSON_UNQUOTE(JSON_EXTRACT(metadata_json,'$.role'))   AS role,
+              JSON_UNQUOTE(JSON_EXTRACT(metadata_json,'$.reason')) AS reason,
+              user_agent AS ua
+         FROM audit_log
+        WHERE action IN ('login','login_fail') AND target_type = 'auth'
+        ORDER BY created_at DESC
+        LIMIT ${limit}`,
+    );
+    const [summary] = await pool.query(
+      `SELECT target_id AS account,
+              CAST(SUM(action = 'login')      AS UNSIGNED) AS success,
+              CAST(SUM(action = 'login_fail') AS UNSIGNED) AS fail,
+              COUNT(DISTINCT ip) AS ips,
+              MAX(created_at)    AS lastAttempt
+         FROM audit_log
+        WHERE action IN ('login','login_fail') AND target_type = 'auth'
+        GROUP BY target_id
+        ORDER BY fail DESC, lastAttempt DESC`,
+    );
+    res.json({ ok: true, events, summary });
+  } catch (err) {
+    console.error("[/api/admin/login-log]", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -2910,17 +3583,84 @@ app.post("/api/admin/run-auto-insight", dbRequired, async (_req, res) => {
 // POST   /api/chat/sessions          — 새 세션
 // DELETE /api/chat/sessions/:id      — 세션 삭제
 
-app.get("/api/chat/sessions", dbRequired, async (_req, res) => {
+app.get("/api/chat/sessions", dbRequired, async (req, res) => {
   try {
+    const c = authClaims(req);
+    const owner = chatOwner(req);
+    const adminAll = c?.role === "admin" && req.query.scope === "all";   // 관리자 통계 = 전역
+    if (!adminAll && owner == null) return res.json({ ok: true, count: 0, sessions: [] });  // 익명/공유는 서버 목록 없음(로컬)
+    const ownerWhere = adminAll ? "" : "AND s.user_id = ?";
+    const params = adminAll ? [] : [owner];
     const [rows] = await pool.query(`
-      SELECT s.id, s.title, s.created_at, s.updated_at,
+      SELECT s.id, s.title, s.pinned, s.created_at, s.updated_at,
              (SELECT COUNT(*) FROM chat_messages WHERE session_id = s.id) AS messageCount
       FROM chat_sessions s
-      ORDER BY s.updated_at DESC LIMIT 30
-    `);
+      WHERE s.deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM chat_messages WHERE session_id = s.id)
+        ${ownerWhere}
+      ORDER BY s.pinned DESC, s.updated_at DESC LIMIT 30
+    `, params);
     res.json({ ok: true, count: rows.length, sessions: rows });
   } catch (err) {
     console.error("[/api/chat/sessions]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/chat/search?q=... — 세션 제목 + 메시지 본문 통합 검색.
+//   본문이 매칭되면 가장 최근 매칭 메시지에서 스니펫(LEFT 1000자) 동봉. titleMatch=1/0.
+app.get("/api/chat/search", dbRequired, async (req, res) => {
+  try {
+    const c = authClaims(req);
+    const owner = chatOwner(req);
+    const adminAll = c?.role === "admin" && req.query.scope === "all";
+    if (!adminAll && owner == null) return res.json({ ok: true, count: 0, sessions: [] });
+    const q = String(req.query.q || "").trim().slice(0, 100);
+    if (!q) return res.json({ ok: true, count: 0, sessions: [] });
+    const esc = q.replace(/[\\%_]/g, (ch) => "\\" + ch);   // LIKE 와일드카드 이스케이프(기본 escape '\')
+    const like = `%${esc}%`;
+    const ownerWhere = adminAll ? "" : "AND s.user_id = ?";
+    const params = adminAll ? [like, like, like, like] : [like, like, like, like, owner];
+    const [rows] = await pool.query(`
+      SELECT s.id, s.title, s.pinned, s.created_at, s.updated_at,
+             (SELECT COUNT(*) FROM chat_messages WHERE session_id = s.id) AS messageCount,
+             (s.title LIKE ?) AS titleMatch,
+             (SELECT LEFT(m.text, 1000) FROM chat_messages m
+                WHERE m.session_id = s.id AND m.text LIKE ?
+                ORDER BY m.created_at DESC, m.id DESC LIMIT 1) AS matchSnippet
+      FROM chat_sessions s
+      WHERE s.deleted_at IS NULL
+        AND (s.title LIKE ?
+         OR EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.id AND m.text LIKE ?))
+        ${ownerWhere}
+      ORDER BY s.pinned DESC, s.updated_at DESC
+      LIMIT 50
+    `, params);
+    res.json({ ok: true, count: rows.length, sessions: rows });
+  } catch (err) {
+    console.error("[/api/chat/search]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/chat/sessions/current — 로그인 개인 계정의 현재(최근) 세션 + 메시지. 계정 마운트 로드용.
+//   (반드시 /:id 보다 먼저 등록 — 안 그러면 "current"가 :id 로 파싱됨)
+app.get("/api/chat/sessions/current", dbRequired, async (req, res) => {
+  try {
+    const owner = chatOwner(req);
+    if (owner == null) return res.json({ ok: true, session: null, messages: [] });   // 익명/공유 → 프론트가 localStorage 폴백
+    const [sess] = await pool.query(
+      `SELECT * FROM chat_sessions WHERE user_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1`, [owner]);
+    if (sess.length === 0) return res.json({ ok: true, session: null, messages: [] });
+    const [msgs] = await pool.query(`
+      SELECT role, text, tokens_prompt AS tokensPrompt, tokens_completion AS tokensCompletion,
+             model, created_at AS createdAt
+      FROM chat_messages WHERE session_id = ?
+      ORDER BY created_at, (role = 'ai'), id LIMIT 200
+    `, [sess[0].id]);
+    res.json({ ok: true, session: sess[0], messages: msgs });
+  } catch (err) {
+    console.error("[/api/chat/sessions/current]", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -2929,14 +3669,19 @@ app.get("/api/chat/sessions/:id", dbRequired, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "id 숫자" });
-    const [sess] = await pool.query(`SELECT * FROM chat_sessions WHERE id = ?`, [id]);
+    const [sess] = await pool.query(`SELECT * FROM chat_sessions WHERE id = ? AND deleted_at IS NULL`, [id]);
     if (sess.length === 0) return res.status(404).json({ ok: false, error: "session not found" });
+    // 소유권 가드 — user_id 있는(개인 계정) 세션은 소유자/admin 만. 익명(NULL) 세션은 기존대로 id 로 접근 가능.
+    const cClaim = authClaims(req);
+    if (sess[0].user_id != null && sess[0].user_id !== cClaim?.uid && cClaim?.role !== "admin") {
+      return res.status(404).json({ ok: false, error: "session not found" });
+    }
     const [msgs] = await pool.query(`
       SELECT role, text, tokens_prompt AS tokensPrompt, tokens_completion AS tokensCompletion,
              model, created_at AS createdAt
       FROM chat_messages WHERE session_id = ?
-      ORDER BY created_at, id LIMIT 200
-    `, [id]);
+      ORDER BY created_at, (role = 'ai'), id LIMIT 200
+    `, [id]);   // created_at 초단위 동률이면 user 를 ai 보다 먼저 (질문→답변 순)
     res.json({ ok: true, session: sess[0], messages: msgs });
   } catch (err) {
     console.error("[/api/chat/sessions/:id]", err);
@@ -2959,11 +3704,225 @@ app.delete("/api/chat/sessions/:id", dbRequired, async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "id 숫자" });
-    await pool.query(`DELETE FROM chat_messages WHERE session_id = ?`, [id]);
-    const [r] = await pool.query(`DELETE FROM chat_sessions WHERE id = ?`, [id]);
+    // 소유권 가드 — 개인 계정 세션은 소유자/admin 만 삭제 가능
+    const cClaim = authClaims(req);
+    const [own] = await pool.query(`SELECT user_id FROM chat_sessions WHERE id = ? AND deleted_at IS NULL`, [id]);
+    if (own.length && own[0].user_id != null && own[0].user_id !== cClaim?.uid && cClaim?.role !== "admin") {
+      return res.status(404).json({ ok: false, error: "session not found" });
+    }
+    // 소프트 삭제 — 행/메시지는 보존하고 deleted_at 만 찍어 목록·검색에서 숨김 (DB 영구 보존, 복구 가능)
+    const [r] = await pool.query(`UPDATE chat_sessions SET deleted_at = NOW() WHERE id = ? AND deleted_at IS NULL`, [id]);
     res.json({ ok: true, deleted: r.affectedRows });
   } catch (err) {
     console.error("[DELETE /api/chat/sessions/:id]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// PATCH /api/chat/sessions/:id — 세션 제목 변경 (rename)
+app.patch("/api/chat/sessions/:id", dbRequired, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "id 숫자" });
+    // 소유권 가드 — 개인 계정 세션은 소유자/admin 만 변경 가능
+    const cClaim = authClaims(req);
+    const [own] = await pool.query(`SELECT user_id FROM chat_sessions WHERE id = ? AND deleted_at IS NULL`, [id]);
+    if (own.length && own[0].user_id != null && own[0].user_id !== cClaim?.uid && cClaim?.role !== "admin") {
+      return res.status(404).json({ ok: false, error: "session not found" });
+    }
+    // title / pinned 둘 중 보낸 것만 부분 업데이트
+    const sets = [];
+    const params = [];
+    if (req.body?.title != null) {
+      const title = String(req.body.title).trim().slice(0, 60);
+      if (!title) return res.status(400).json({ ok: false, error: "title 필요" });
+      sets.push("title = ?"); params.push(title);
+    }
+    if (req.body?.pinned != null) {
+      sets.push("pinned = ?"); params.push(req.body.pinned ? 1 : 0);
+    }
+    if (sets.length === 0) return res.status(400).json({ ok: false, error: "title 또는 pinned 필요" });
+    params.push(id);
+    const [r] = await pool.query(`UPDATE chat_sessions SET ${sets.join(", ")} WHERE id = ?`, params);
+    if (r.affectedRows === 0) return res.status(404).json({ ok: false, error: "세션 없음" });
+    res.json({ ok: true, id });
+  } catch (err) {
+    console.error("[PATCH /api/chat/sessions/:id]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── 문의 채널 (inquiries) — 관리자 문의 + 개발자 문의(포폴) ───────────────
+// 관리자 문의: 고객지원 봇(문의/버그). 개발자 문의: 프로젝트 지식베이스로 기능 설명 봇.
+const SUPPORT_SYSTEM = `당신은 '군산도시가스 매설배관 AI 통합관제 시스템'의 고객지원 봇입니다. 사용자가 보낸 문의 또는 버그 신고에 한국어로 친절하고 간결하게(3~5문장) 답하세요.
+- 먼저 접수되어 관리자에게 전달되었음을 알리세요.
+- 사용법·기능 질문이면 아는 선에서 도와주세요(대시보드/지도/장비목록/AI 챗봇 등).
+- 버그 신고면 어떤 화면·동작에서 생겼는지 정중히 한 번 확인 요청하고, 확인 후 조치하겠다고 안내.
+- 센서·단말 데이터 분석 요청이면 메인 AI 챗봇(일반 대화)에서 도와준다고 안내.
+- 모르면 모른다고 하고 관리자 확인이 필요하다고 안내. 추측·과장 금지.`;
+
+// 개발자 문의(포폴) — 프로젝트 지식베이스(옵시디언 노트 정리본)를 주입
+let PROJECT_KNOWLEDGE = "";
+try { PROJECT_KNOWLEDGE = readFileSync(path.join(__dirname, "project-knowledge.md"), "utf8"); }
+catch (e) { console.warn("[project-knowledge] 로드 실패:", e.message); }
+const DEV_SYSTEM = `당신은 '매설배관 AI 통합관제 시스템'(호서대 캡스톤, 시원팀) 프로젝트를 소개하는 개발자 어시스턴트입니다.
+아래 [프로젝트 지식]에 근거해, 이 프로젝트가 무엇이고 어떻게 동작하는지 한국어로 친절하고 구체적으로 설명하세요(포트폴리오 소개 톤).
+- 기능·아키텍처·기술스택·AI(이상탐지)·챗봇·도메인 용어 질문에 자세히 답하세요.
+- 지식에 없는 내용은 지어내지 말고, "그 부분은 문서에 없어 개발자(박지훈)가 직접 확인·답변할 수 있다"고 안내하세요.
+- 비밀번호·서버 접속·내부 IP·DB 자격증명 등 보안 정보는 절대 공개하지 마세요.
+
+[프로젝트 지식]
+${PROJECT_KNOWLEDGE}`;
+
+// 개발자 문의(포폴 Q&A) 답변 모델 — 품질 우선으로 GPT 사용. 키 없거나 실패 시 로컬 폴백.
+const INQUIRY_DEV_MODEL = process.env.INQUIRY_DEV_MODEL || "gpt-4o-mini";
+
+async function runInquiryReply(target, kind, message) {
+  const isDev = target === "developer";
+  const system = isDev ? DEV_SYSTEM : SUPPORT_SYSTEM;
+  const userContent = isDev ? message : `[${kind === "bug" ? "버그 신고" : "문의"}]\n${message}`;
+  const useGpt = isDev && isOpenAI(INQUIRY_DEV_MODEL) && OPENAI_API_KEY;
+  try {
+    // 1) 개발자 문의 = GPT (OpenAI) 우선
+    if (useGpt) {
+      const res = await fetch(OPENAI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: JSON.stringify({
+          model: INQUIRY_DEV_MODEL,
+          messages: [{ role: "system", content: system }, { role: "user", content: userContent }],
+        }),  // temperature·max_tokens 생략 — gpt-4o-mini/5.x 호환
+        signal: AbortSignal.timeout(40_000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const out = (data.choices?.[0]?.message?.content || "").trim();
+        if (out) return out;
+      } else {
+        console.warn("[runInquiryReply] OpenAI HTTP", res.status, "→ 로컬 폴백");
+      }
+      // 실패 시 아래 로컬로 폴백
+    }
+    // 2) 로컬 Ollama (상담원 문의 + 개발자 폴백)
+    const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        messages: [{ role: "system", content: system }, { role: "user", content: userContent }],
+        stream: false, think: false,
+        options: { temperature: isDev ? 0.5 : 0.4, num_predict: isDev ? 700 : 400 },
+      }),
+      signal: AbortSignal.timeout(30_000),   // 30초 초과 시 접수 확인 폴백
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data.message?.content || "").trim() || null;
+  } catch (e) {
+    console.warn("[runInquiryReply]", e.message);
+    return null;
+  }
+}
+
+// inquiries.image(JSON 배열 또는 레거시 단일 data URL) → 배열로 파싱
+function parseInquiryImages(v) {
+  if (!v) return [];
+  if (typeof v === "string" && v[0] === "[") { try { const a = JSON.parse(v); return Array.isArray(a) ? a : []; } catch { return []; } }
+  return [v];
+}
+
+// POST /api/inquiries (로그인) — 문의 접수 + AI 지원 답변
+app.post("/api/inquiries", requireAuth, dbRequired, async (req, res) => {
+  try {
+    const target = req.body?.target === "developer" ? "developer" : "admin";
+    const kind = req.body?.kind === "bug" ? "bug" : "question";
+    const message = String(req.body?.message || "").trim().slice(0, 4000);
+    // 첨부 이미지 배열(data URL, png/jpeg/webp만, 최대 5장). 형식 불량 제외 + 총 용량 가드.
+    let images = Array.isArray(req.body?.images) ? req.body.images : (req.body?.image ? [req.body.image] : []);
+    images = images.filter((x) => typeof x === "string" && /^data:image\/(png|jpe?g|webp);base64,/.test(x)).slice(0, 5);
+    while (images.length && images.reduce((a, x) => a + x.length, 0) > 12_000_000) images.pop();
+    const imageJson = images.length ? JSON.stringify(images) : null;
+    if (!message && !images.length) return res.status(400).json({ ok: false, error: "내용을 입력하세요." });
+    const c = req.auth;
+    const replyQuote = String(req.body?.replyQuote || "").trim().slice(0, 500) || null;
+    const [r] = await pool.query(
+      `INSERT INTO inquiries (target, user_id, login_id, display_name, kind, message, reply_quote, image, status, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+      [target, c.uid, c.lid, c.name || null, kind, message, replyQuote, imageJson, reqIp(req)],
+    );
+    const reply = await runInquiryReply(target, kind, message);
+    if (reply) await pool.query(`UPDATE inquiries SET bot_reply = ? WHERE id = ?`, [reply, r.insertId]);
+    // 같은 계정 다른 화면에 실시간 반영 (발신 화면 제외)
+    broadcastToOwner(c.uid, { type: "inquiry:new", target, kind, message, reply: reply || null, ts: Date.now() }, req.body?.clientId || null);
+    const fallback = target === "developer"
+      ? "질문이 접수되었습니다. 개발자가 직접 확인 후 답변해 드릴게요. 🙇"
+      : "문의가 접수되었습니다. 관리자가 확인 후 반영하겠습니다. 🙇";
+    res.json({ ok: true, id: r.insertId, reply: reply || fallback });
+  } catch (err) {
+    console.error("[POST /api/inquiries]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/inquiries/mine (로그인) — 본인 문의 내역 (문의방 렌더용)
+app.get("/api/inquiries/mine", requireAuth, dbRequired, async (req, res) => {
+  try {
+    const target = (req.query.target === "developer" || req.query.target === "admin") ? req.query.target : null;
+    const [rows] = await pool.query(
+      `SELECT id, target, kind, message, reply_quote AS replyQuote, image, bot_reply AS botReply, status, admin_reply AS adminReply, created_at AS createdAt
+       FROM inquiries WHERE user_id = ? ${target ? "AND target = ?" : ""} ORDER BY created_at, id LIMIT 200`,
+      target ? [req.auth.uid, target] : [req.auth.uid]);
+    res.json({ ok: true, count: rows.length, inquiries: rows.map(({ image, ...rest }) => ({ ...rest, images: parseInquiryImages(image) })) });
+  } catch (err) {
+    console.error("[GET /api/inquiries/mine]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/inquiries (admin) — 전체 문의 목록
+app.get("/api/inquiries", requireAdmin, dbRequired, async (req, res) => {
+  try {
+    const status = (req.query.status === "open" || req.query.status === "done") ? req.query.status : null;
+    const target = (req.query.target === "developer" || req.query.target === "admin") ? req.query.target : null;
+    const where = [], params = [];
+    if (status) { where.push("status = ?"); params.push(status); }
+    if (target) { where.push("target = ?"); params.push(target); }
+    const [rows] = await pool.query(
+      `SELECT id, target, user_id AS userId, login_id AS loginId, display_name AS displayName,
+              kind, message, image, bot_reply AS botReply, status, admin_reply AS adminReply,
+              created_at AS createdAt, updated_at AS updatedAt
+       FROM inquiries ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY (status='done'), created_at DESC LIMIT 500`,
+      params);
+    res.json({ ok: true, count: rows.length, inquiries: rows.map(({ image, ...rest }) => ({ ...rest, images: parseInquiryImages(image) })) });
+  } catch (err) {
+    console.error("[GET /api/inquiries]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// PATCH /api/inquiries/:id (admin) — 상태/답변
+app.patch("/api/inquiries/:id", requireAdmin, dbRequired, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "id 숫자" });
+    const sets = [], params = [];
+    if (req.body?.status === "open" || req.body?.status === "done") { sets.push("status = ?"); params.push(req.body.status); }
+    if (req.body?.adminReply != null) { sets.push("admin_reply = ?"); params.push(String(req.body.adminReply).slice(0, 4000)); }
+    if (!sets.length) return res.status(400).json({ ok: false, error: "status 또는 adminReply 필요" });
+    params.push(id);
+    const [r] = await pool.query(`UPDATE inquiries SET ${sets.join(", ")} WHERE id = ?`, params);
+    if (!r.affectedRows) return res.status(404).json({ ok: false, error: "문의 없음" });
+    // 관리자/개발자 답변을 문의 작성자 화면에 실시간 반영 (작성자 uid room 으로)
+    if (req.body?.adminReply != null) {
+      try {
+        const [own] = await pool.query(`SELECT user_id, target FROM inquiries WHERE id = ?`, [id]);
+        if (own.length && own[0].user_id != null) {
+          broadcastToOwner(own[0].user_id, { type: "inquiry:reply", id, target: own[0].target, ts: Date.now() });
+        }
+      } catch {}
+    }
+    res.json({ ok: true, id });
+  } catch (err) {
+    console.error("[PATCH /api/inquiries/:id]", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -3037,16 +3996,120 @@ app.use(express.static(path.join(__dirname, "dist"), {
   },
 }));
 
+// ── 방명록(공개 단톡방) API — 전체공개. 작성은 레이트리밋+길이제한+XSS안전(순수텍스트). 역할뱃지는 JWT로만(사칭 방지). ──
+const guestbookPostLimiter = rateLimit({
+  windowMs: 60_000, max: 20,                         // IP당 분당 20건 — 도배 방지
+  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip,
+  standardHeaders: true, legacyHeaders: false, validate: { trustProxy: false },
+  message: { ok: false, error: "메시지를 너무 빠르게 보내고 있어요. 잠시 후 다시 시도해 주세요." },
+});
+const GUESTBOOK_MAX_BODY = 500, GUESTBOOK_MAX_NAME = 40;
+function gbClean(s, max) { return String(s == null ? "" : s).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim().slice(0, max); }
+function gbRow(r) { return { id: Number(r.id), userId: r.user_id, name: r.display_name, role: r.role, body: r.body, createdAt: r.created_at }; }
+
+// 최근 메시지 (오름차순). 공개.
+app.get("/api/guestbook", dbRequired, async (req, res) => {
+  const limit = Math.min(Math.max(parseInt(req.query.limit || "60", 10) || 60, 1), 100);
+  const before = parseInt(req.query.before || "0", 10) || 0;
+  try {
+    const where = before > 0 ? "deleted_at IS NULL AND id < ?" : "deleted_at IS NULL";
+    const args = before > 0 ? [before, limit] : [limit];
+    const [rows] = await pool.query(`SELECT id, user_id, display_name, role, body, created_at FROM guestbook_messages WHERE ${where} ORDER BY id DESC LIMIT ?`, args);
+    res.json({ ok: true, messages: rows.reverse().map(gbRow) });
+  } catch (e) { res.status(500).json({ ok: false, error: "방명록을 불러오지 못했습니다." }); }
+});
+
+// 메시지 작성 — 공개(로그인 선택). 로그인 시 계정 이름·역할, 게스트는 닉네임 입력.
+app.post("/api/guestbook", guestbookPostLimiter, dbRequired, async (req, res) => {
+  const body = gbClean(req.body?.body, GUESTBOOK_MAX_BODY);
+  if (!body) return res.status(400).json({ ok: false, error: "내용을 입력해 주세요." });
+  const c = authClaims(req);                          // 선택적 인증
+  let userId = null, role = null, name;
+  if (c) { userId = c.uid; role = c.role; name = gbClean(c.name, GUESTBOOK_MAX_NAME) || "사용자"; }
+  else   { name = gbClean(req.body?.name, GUESTBOOK_MAX_NAME) || "게스트"; }   // 게스트는 역할 없음(사칭 방지)
+  const ip = (reqIp(req) || "").toString().split(",")[0].slice(0, 45);
+  const ua = String(req.headers["user-agent"] || "").slice(0, 255);
+  try {
+    const [r] = await pool.query("INSERT INTO guestbook_messages (user_id, display_name, role, body, ip, ua) VALUES (?, ?, ?, ?, ?, ?)", [userId, name, role, body, ip, ua]);
+    const message = { id: Number(r.insertId), userId, name, role, body, createdAt: new Date().toISOString() };
+    broadcastGuestbook({ type: "gb:msg", message });
+    res.json({ ok: true, message });
+  } catch (e) { res.status(500).json({ ok: false, error: "메시지 저장에 실패했습니다." }); }
+});
+
+// 삭제(모더레이션) — 관리자급만. 소프트 삭제.
+app.delete("/api/guestbook/:id", dbRequired, requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10) || 0;
+  if (!id) return res.status(400).json({ ok: false, error: "잘못된 요청입니다." });
+  try {
+    await pool.query("UPDATE guestbook_messages SET deleted_at = NOW() WHERE id = ? AND deleted_at IS NULL", [id]);
+    broadcastGuestbook({ type: "gb:del", id });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, error: "삭제에 실패했습니다." }); }
+});
+
 // SPA fallback (모르는 경로 → index.html)
 app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "dist", "index.html"));
 });
 
-app.listen(PORT, () => {
+const httpServer = app.listen(PORT, () => {
   console.log(`▶ Server  http://localhost:${PORT}`);
   console.log(`▶ Ollama  ${OLLAMA_URL}`);
   console.log(`▶ Model   ${OLLAMA_MODEL}`);
 });
+
+// ── 챗봇 WebSocket (/ws/chat) — 로그인 개인 계정만. 쿠키 인증 후 uid room 등록. (게스트/익명은 업그레이드 401) ──
+const wss = new WebSocketServer({ noServer: true });
+const wssGuest = new WebSocketServer({ noServer: true });   // 방명록(공개) — 인증 없이 누구나 연결
+httpServer.on("upgrade", (req, socket, head) => {
+  const url = req.url || "";
+  if (url.startsWith("/ws/guestbook")) {               // 방명록 — 공개(인증 불필요)
+    wssGuest.handleUpgrade(req, socket, head, (ws) => { ws.isAlive = true; wssGuest.emit("connection", ws, req); });
+    return;
+  }
+  if (!url.startsWith("/ws/chat")) { socket.destroy(); return; }
+  const owner = chatOwner(req);   // req.headers.cookie 만 읽으므로 raw upgrade req 에서도 동작
+  if (owner == null) { socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n"); socket.destroy(); return; }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    ws._ownerUid = owner;
+    ws._connId = randomBytes(8).toString("hex");
+    ws.isAlive = true;
+    wss.emit("connection", ws, req);
+  });
+});
+wss.on("connection", (ws) => {
+  let set = chatRooms.get(ws._ownerUid);
+  if (!set) { set = new Set(); chatRooms.set(ws._ownerUid, set); }
+  set.add(ws);
+  try { ws.send(JSON.stringify({ type: "hello", connId: ws._connId })); } catch {}
+  ws.on("pong", () => { ws.isAlive = true; });
+  ws.on("message", () => {});   // 클라→서버 메시지 무시 — room 은 쿠키 uid 로만 바인딩(IDOR 방지)
+  ws.on("close", () => {
+    const s = chatRooms.get(ws._ownerUid);
+    if (s) { s.delete(ws); if (s.size === 0) chatRooms.delete(ws._ownerUid); }
+  });
+  ws.on("error", () => {});
+});
+// 방명록 WS — 단일 전체 방. 연결 시 room 등록 + 접속자 수 broadcast. 클라→서버 메시지 무시(작성은 REST).
+wssGuest.on("connection", (ws) => {
+  guestbookRoom.add(ws);
+  try { ws.send(JSON.stringify({ type: "gb:hello", online: guestbookRoom.size })); } catch {}
+  broadcastGuestbook({ type: "gb:presence", online: guestbookRoom.size });
+  ws.on("pong", () => { ws.isAlive = true; });
+  ws.on("message", () => {});
+  ws.on("close", () => { guestbookRoom.delete(ws); broadcastGuestbook({ type: "gb:presence", online: guestbookRoom.size }); });
+  ws.on("error", () => {});
+});
+// 하트비트 — 죽은 소켓 정리 (CF 터널 idle reaping 대비)
+const wsHeartbeat = setInterval(() => {
+  for (const ws of [...wss.clients, ...wssGuest.clients]) {
+    if (ws.isAlive === false) { try { ws.terminate(); } catch {} continue; }
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  }
+}, 30000);
+wss.on("close", () => clearInterval(wsHeartbeat));
 
 // ─────────────────────────────────────────────────────
 // 시스템 프롬프트 (도메인 지식 + 실시간 시스템 상태 주입)
@@ -3064,7 +4127,7 @@ function buildSystemPrompt(ctx) {
   // 클라이언트가 context.counts 를 보냈는지 판정 (API 직접 호출 시 비어있음)
   const hasContext = counts.all != null && Number(counts.all) > 0;
   const summaryLine = hasContext
-    ? `전체 ${counts.all}대 / 정상 ${counts.normal ?? 0} · 위험 ${counts.critical ?? 0} · 이상 의심 ${counts.warn ?? 0} · 통신 장애 ${counts.offline ?? 0}`
+    ? `전체 ${counts.all}대 / 정상 ${counts.normal ?? 0} · 이상 ${counts.critical ?? 0} · 관찰 ${counts.warn ?? 0} · 통신 장애 ${counts.offline ?? 0}`
     : `(컨텍스트 미전달 — 정확한 KPI 는 get_summary 도구로 조회 필수. "0대" 라고 답변하지 말 것)`;
 
   // 통신 두절 상세 (마지막 측정 시각 + 끊긴 시간)
@@ -3078,11 +4141,11 @@ function buildSystemPrompt(ctx) {
 
   // 날씨 라인 (있을 때만) — 군산 (SITE_ID=2 대상 지역)
   const weatherLine = weather
-    ? `${weather.ko} · ${weather.temp}°C${weather.precip != null ? ` · 강수 ${weather.precip}mm` : ""}${weather.humidity != null ? ` · 습도 ${weather.humidity}%` : ""} (군산, ${weather.time})`
-    : "(데이터 없음)";
+    ? `${weather.ko} · ${weather.temp}°C${weather.precip != null ? ` · 강수 ${weather.precip}mm` : ""}${weather.humidity != null ? ` · 습도 ${weather.humidity}%` : ""} (군산, ${weather.time})\n(이 값은 Open-Meteo 실시간 기상 API를 군산 좌표로 조회해 시스템이 컨텍스트에 주입한 실측 데이터다. 출처를 물으면 "Open-Meteo 실시간 날씨 API(군산 좌표 기준)"라고 답하고, 예시·가상 데이터라고 하지 마라. 여러 날·주간 예보가 필요하면 get_weather_forecast 도구(최대 7일)를, 과거 날씨(최대 1년·어제까지)는 get_weather_history 도구를 호출하라.)`
+    : "(데이터 없음 — 컨텍스트에 날씨 미전달)";
 
-  // 12시간 추이 텍스트 표 (위험·이상 의심만)
-  //   ⚠️ 추이 데이터 없음(시계열 미수집) ≠ 위험 단말 없음. 두 경우를 반드시 구분해서 안내.
+  // 12시간 추이 텍스트 표 (이상·관찰만)
+  //   ⚠️ 추이 데이터 없음(시계열 미수집) ≠ 이상 단말 없음. 두 경우를 반드시 구분해서 안내.
   const hasTrends = trends.length > 0;
   const riskCount = (Number(counts.critical) || 0) + (Number(counts.warn) || 0);
   const trendBlock = hasTrends
@@ -3095,16 +4158,16 @@ function buildSystemPrompt(ctx) {
           ? (h[h.length - 1] > h[0] ? "상승↑" : h[h.length - 1] < h[0] ? "하락↓" : "평탄→")
           : "—";
         const series = h.map((v) => v == null ? "-" : v.toFixed(2)).join(",");
-        return `- ${t.deviceId} (${t.status === "critical" ? "위험" : "이상의심"}, ${t.zone}, ${t.label || "-"}): 12h MSE [${series}] · 시작 ${start} → 현재 ${last} · 피크 ${peak} · 방향 ${dir}`;
+        return `- ${t.deviceId} (${t.status === "critical" ? "이상" : "관찰"}, ${t.zone}, ${t.label || "-"}): 12h MSE [${series}] · 시작 ${start} → 현재 ${last} · 피크 ${peak} · 방향 ${dir}`;
       }).join("\n")
     : (!hasContext
-        ? `- 12시간 MSE 시계열 추이 데이터가 없습니다(추이 미수집). 위험/이상 의심 단말 수는 get_summary 도구로 확인하세요. **추이 데이터 없음·최근 알람 없음을 "위험 단말 없음" 으로 답하지 마세요.**`
+        ? `- 12시간 MSE 시계열 추이 데이터가 없습니다(추이 미수집). 이상/관찰 단말 수는 get_summary 도구로 확인하세요. **추이 데이터 없음·최근 알람 없음을 "이상 단말 없음" 으로 답하지 마세요.**`
         : riskCount === 0
-          ? "- 현재 위험·이상 의심 단말이 없습니다."
-          : `- 12시간 MSE 시계열 추이 데이터가 이 컨텍스트에 없습니다(추이 미수집). **추이 데이터 없음 ≠ 위험 단말 없음** — 현재 위험 ${counts.critical ?? 0}대 · 이상 의심 ${counts.warn ?? 0}대 는 위 "현재 시스템 상태" 를 참조하세요. 추세가 필요하면 get_device_history / get_recent_changes 도구를 호출하고, 절대로 "위험 단말 없음" 으로 답하지 마세요.`);
+          ? "- 현재 이상·관찰 단말이 없습니다."
+          : `- 12시간 MSE 시계열 추이 데이터가 이 컨텍스트에 없습니다(추이 미수집). **추이 데이터 없음 ≠ 이상 단말 없음** — 현재 이상 ${counts.critical ?? 0}대 · 관찰 ${counts.warn ?? 0}대 는 위 "현재 시스템 상태" 를 참조하세요. 추세가 필요하면 get_device_history / get_recent_changes 도구를 호출하고, 절대로 "이상 단말 없음" 으로 답하지 마세요.`);
 
   return `당신은 매설배관 IoT 통합관제 시스템의 AI 분석 어시스턴트입니다.
-운영자(관제사)와 한국어 존댓말로 대화하며, 노드 ID·위험 단계·도메인 용어 질문에 답합니다.
+운영자(관제사)와 한국어 존댓말로 대화하며, 노드 ID·상태 단계(정상/관찰/이상)·도메인 용어 질문에 답합니다.
 
 # 데이터 흐름 (옴니솔루션 답변 — 2026-05-18)
 - 옴니 단말은 **1시간에 1회 계측** → **12시간 burst 로 KSCG 송신**
@@ -3140,13 +4203,17 @@ function buildSystemPrompt(ctx) {
 - "정상 패턴의 N% 상승" 같은 표현 금지. 정확히는 "AI 임계값(threshold)의 N% 수준/도달"입니다.
 - **중요 구분**: 측정 센서 8 종(방식전위/희생전류/AC유입/배터리/온도/습도/충격/통신) ≠ AI 학습 입력 피처. AI 학습 입력 피처·시퀀스 길이·epoch 등 모델 세부 명세는 절대 추측 금지, 반드시 **get_ai_model_info** 도구 호출해서 확인하세요. (예: 학습 base_features 는 4개, 파생 포함 12개 컬럼 — 도구 응답으로 확정)
 
-# 위험 단계 (5단계)
-- 정상 / 위험(즉각 현장 점검) / 이상 의심 / 통신 장애
+# 상태 단계 (4단계) — 화면 라벨 = 이두현 AI 모델 등급(정상/관찰/이상) 그대로 (KSCG 알람은 상태와 무관)
+- **정상** — AI '정상' (현재 MSE < threshold × 0.70)
+- **관찰** — AI '관찰' (threshold × 0.70 ≤ MSE ≤ threshold × 1.00) · 모니터링 강화
+- **이상** — AI '이상' (MSE > threshold × 1.00) · 즉각 현장 점검 (가장 심각, 빨강)
+- **통신 장애** — comm_status = '통신고장' (연속 두절 + 신호품질 기준, 이두현 통신 판정)
+- 화면 라벨은 이두현 코드(RISK_LABELS: 정상/관찰/이상)와 동일. KSCG 알람은 상태 판정에 사용하지 않음(별도 알림/로그). 사용자가 "위험" 이라 물으면 AI '이상' 등급을 가리킵니다.
 
 # 현재 시각
 ${nowText}
 
-# 현재 날씨 (군산 — SITE_ID=2 대상 지역)
+# 현재 날씨 (실시간 · Open-Meteo 기상 API · 군산 좌표 기준 · SITE_ID=2 대상 지역)
 ${weatherLine}
 
 날씨가 매설배관에 미치는 영향 (참고):
@@ -3156,15 +4223,15 @@ ${weatherLine}
 
 # 현재 시스템 상태 ${hasContext ? "(실시간)" : "(컨텍스트 미전달 — 도구 조회 필요)"}
 - ${summaryLine}
-${hasContext ? (criticalNodes.length ? `- 위험 노드: ${criticalNodes.join(", ")}` : "- 위험 노드: 없음") : ""}
-${hasContext && warnNodes.length    ? `- 이상 의심 노드(상위 ${Math.min(warnNodes.length, 8)}): ${warnNodes.slice(0, 8).join(", ")}` : ""}
+${hasContext ? (criticalNodes.length ? `- 이상 노드: ${criticalNodes.join(", ")}` : "- 이상 노드: 없음") : ""}
+${hasContext && warnNodes.length    ? `- 관찰 노드(상위 ${Math.min(warnNodes.length, 8)}): ${warnNodes.slice(0, 8).join(", ")}` : ""}
 ${hasContext && offlineNodes.length ? `- 통신 장애 노드: ${offlineNodes.join(", ")}` : ""}
 
 ${offlineBlock ? `# 통신 장애 노드 상세 (마지막 측정 시각 + 두절 기간)\n${offlineBlock}\n` : ""}
 # 최근 12시간 MSE 추이 (1시간 간격, 가장 오래된 → 현재)
 ${trendBlock}
 
-# 도구(Tools) 사용 가이드 — 18 개 도구 (자가확장 모드 ON)
+# 도구(Tools) 사용 가이드 — 16 개 도구
 위 "현재 시스템 상태" 와 "12h MSE 추이" 에 이미 있는 정보면 그대로 답변. 없는 정보(특정 단말 상세, 시리얼/설치일/위경도, 시계열 추이, 알람 이력 등)는 아래 도구를 직접 호출해서 조회:
 
 **기본 조회 (6)**
@@ -3191,16 +4258,6 @@ ${trendBlock}
 **AI 모델 (1)**
 - **get_ai_model_info** — LSTM AutoEncoder 학습 정보. deviceId 주면 그 단말 threshold + 분류 기준, 없으면 전체 모델 메타(학습 피처, time_steps, 평가 통계 등). "AI 어떻게 학습됐어?", "TB24-XXX 정상 한계는?" 류.
 
-**자가확장 (2) — 위 17개로 답 안 되는 모든 분석 질문**
-- **describe_table** — siwon DB 임의 테이블 스키마 (컬럼·타입·인덱스·row 추정). 자유 SQL 작성 전 자가 탐색용. 예: 'kscg_sensor_data', 'audit_log', 'chat_messages'.
-- **execute_safe_sql** — 자유 MySQL SELECT/WITH. siwon DB 모든 테이블 접근. 5초 timeout / 1000 row cap / DML/DDL 차단 / 다중 statement 차단. **위 17개 도구로 안 되는 어떤 분석이든 SQL 로 직접 해결**:
-  - "월별 평균 방식전위" → GROUP BY DATE_FORMAT(WRITE_DATE, '%Y-%m')
-  - "TB24-250425 의 최근 1주일 일별 통계" → SELECT DATE, AVG, MIN, MAX
-  - "audit_log 에서 가장 자주 호출된 도구 TOP 5" → 자기성찰 메타 질의
-  - "센서값이 가장 많이 변동한 단말" → STDDEV 정렬
-  - "특정 시간대 (예: 새벽 2~4시) 측정 빈도" → HOUR() 필터
-  - 등등 모든 자유 분석. 모르는 컬럼/테이블은 describe_table 먼저.
-
 위치 질문 흐름 (중요):
 1. "OO 단말" / "OO 앞 단말" → search_devices_by_location 1회로 충분한 경우 多
 2. "OO 근처 단말" / "OO 주변 단말 N km" → DB 에 OO 없으면 geocode_location → find_devices_near 2단계
@@ -3217,7 +4274,7 @@ ${trendBlock}
 
 # 질문 유형별 응답 형식
 - **단말 상세** ("TB24-250xxx 상태/센서") → 상태 + 핵심 센서/AI 수치 1~2개 + 조치 1줄. 2~4문장.
-- **현황 요약** ("전체 요약", "지금 상태") → 카운트 한 줄 + 위험/이상 의심 노드 ID. 2~3문장.
+- **현황 요약** ("전체 요약", "지금 상태") → 카운트 한 줄 + 이상/관찰 노드 ID. 2~3문장.
 - **TOP N · 점검표 · 우선순위** → 번호·불릿 항목형 허용. 각 항목: 단말 ID · 근거 수치(AI 기준 대비 또는 센서값) · 조치.
 - **원인 분석** ("왜 위험해?") → AI 기준 대비 x배수 또는 MSE/threshold 근거 + 주요 원인 피처(사람이 읽는 라벨) + [추정] 라벨 + 조치.
 - **현장 점검** ("뭐부터 봐?") → 우선순위 + 짧은 점검 체크리스트(불릿).
@@ -3229,25 +4286,25 @@ ${trendBlock}
 2. **노드 ID 인용** — 위 상태/추이 표에 있는 노드 ID(예: TB24-250429)를 그대로 답변에 포함.
 3. ${hasTrends
   ? `**추이 표는 시간 데이터** — 위 "최근 12시간 MSE 추이" 표가 곧 과거 데이터입니다. "과거 시점 정보가 없다" 는 답변 절대 금지. 12개 값이 1시간 간격이므로 "약 N시간 전" 표현 가능.`
-  : `**추세 질문** — 12h MSE 추이 표가 비어 있으면(추이 데이터 없음) 현재값만으로 추세를 단정하지 말고 get_device_history / get_recent_changes 도구로 시계열을 조회해 답하세요. 추이 데이터가 없다고 해서 "위험 단말 없음" 으로 답하지 마세요.`}
+  : `**추세 질문** — 12h MSE 추이 표가 비어 있으면(추이 데이터 없음) 현재값만으로 추세를 단정하지 말고 get_device_history / get_recent_changes 도구로 시계열을 조회해 답하세요. 추이 데이터가 없다고 해서 "이상 단말 없음" 으로 답하지 마세요.`}
 4. **통신 장애 시점** — "통신 장애 노드 상세" 섹션에 마지막 측정 시각과 두절 기간이 명시되어 있습니다. "언제 끊겼는지 모름" 답변 절대 금지. 마지막 측정 시각 = 통신 두절 시작 시점으로 보고 답변하세요.
 5. **환각 금지** — 위 표·섹션에 없는 데이터만 "확인되지 않음".
 6. **운영 친화** — 가능하면 "현장 점검 권장" 등 짧은 액션 한 줄.
 7. **포맷** — 마크다운 헤더(##) X. **굵게**(**TB24-250429**) 정도만.
 8. **원인 피처 라벨** — 도구가 주는 원인 피처는 이미 사람이 읽는 라벨입니다(예: "습도 편차", "방식전위 변화"). "습도_dev24", "방식전위_diff1" 같은 원시 컬럼명을 답변에 그대로 쓰지 마세요.
 9. **AI 위험도 표현** — MSE/threshold 같은 작은 절대값보다 "AI 기준 대비 x{배수}" 로 설명(예: AI 기준 대비 x484). "threshold 의 N% 수준" 도 가능.
-10. **위험 = 알람 OR AI 이상** — 위험 단말은 "최근 7일 알람" 또는 "AI 이상(MSE 초과)" 중 하나라도 해당되면 위험입니다. "최근 알람 없음" 을 "위험 단말 없음" 으로 답하지 마세요. 위험 단말 수는 위 "현재 시스템 상태" 의 위험 카운트(컨텍스트 없으면 get_summary)를 기준으로 답하세요.
+10. **상태 = AI 등급 그대로 (알람 분리)** — 화면 '이상' 단말 = AI risk_level '이상'(MSE > threshold)인 단말입니다. KSCG 알람은 상태 판정과 무관(별도 알림/로그). "최근 알람 없음" 을 "이상 단말 없음" 으로 답하지 마세요. 이상/관찰 단말 수는 위 "현재 시스템 상태" 의 카운트(컨텍스트 없으면 get_summary)를 기준으로 답하세요. 사용자가 "위험" 이라 하면 AI '이상' 등급을 뜻합니다.
 
 # 응답 예시 (형식 참고 — 실제 수치는 도구로 확인)
 
 질문: "TB24-250448 상태 알려줘"  (단말 상세 — 짧게)
-> **TB24-250448** 은 이상 의심 상태입니다. AC 유입이 971mV 로 500mV 즉각 점검 기준을 471mV 초과했고, AI 위험도는 임계값의 73% 수준(AI 기준 대비 x0.73, 관찰)입니다. AC 차폐·배수장치 점검을 권장합니다.
+> **TB24-250448** 은 관찰 상태입니다. AC 유입이 971mV 로 500mV 즉각 점검 기준을 471mV 초과했고, AI 위험도는 임계값의 73% 수준(AI 기준 대비 x0.73, 관찰)입니다. AC 차폐·배수장치 점검을 권장합니다.
 
 질문: "위험 단말 근거"  (원인 분석)
-> **TB24-250429** 는 위험 단말입니다. AI 위험도가 임계값을 크게 초과해 **AI 기준 대비 x484** 수준이며, 주요 원인 피처는 습도 편차입니다. 즉시 현장 점검이 필요합니다.
+> **TB24-250429** 는 이상(위험) 단말입니다. AI 위험도가 임계값을 크게 초과해 **AI 기준 대비 x484** 수준이며, 주요 원인 피처는 습도 편차입니다. 즉시 현장 점검이 필요합니다.
 
-질문: "위험 추세"  (추이 데이터 없을 때 — 위험 단말 없음과 혼동 금지)
-> 현재 위험·이상 의심 단말은 있으나 12시간 MSE 추이 데이터는 이 화면 컨텍스트에 없습니다. 추세가 필요하면 get_device_history 로 시계열을 조회하겠습니다.
+질문: "위험 추세"  (추이 데이터 없을 때 — 이상 단말 없음과 혼동 금지)
+> 현재 이상·관찰 단말은 있으나 12시간 MSE 추이 데이터는 이 화면 컨텍스트에 없습니다. 추세가 필요하면 get_device_history 로 시계열을 조회하겠습니다.
 
 질문: "통신 장애는 언제부터?"  (통신 장애 시점)
 > **TB24-250437** 의 마지막 측정이 2026-05-27 19:00 입니다. 이후 약 58시간(약 2일) 통신 두절 상태로, 그 시점에 단절된 것으로 보입니다. 전원·안테나·맨홀 침수 확인이 즉시 필요합니다.

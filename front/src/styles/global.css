@@ -7,6 +7,7 @@
   --bg-elev: #ffffff;
   --bg-sunk: #f8fafc;
   --bg-code: #f8fafc;
+  --chat-group-bg: #ececec;   /* 챗 세션 그룹 헤더(고정됨/최근) — 행보다 진한 중립 회색 밴드 */
   --line: #e2e8f0;
   --line-soft: #eef1f6;
   --ink: #0f172a;
@@ -20,36 +21,55 @@
   --warn: #f59e0b;
   --err: #ef4444;
   --accent: #f97316;
+  --chat-ai-bg: #e8eaed;
+  --chat-ai-fg: #222222;
+  --chat-user-bg: linear-gradient(135deg, #6D5DF6 0%, #4F46E5 100%);
   --shadow-card: 0 2px 4px -2px rgba(0, 0, 0, 0.05),
                  0 4px 6px -1px rgba(0, 0, 0, 0.05);
   --shadow-lg: 0 10px 40px -10px rgba(25, 28, 29, 0.14);
   --shadow-glow: 0 0 0 1px rgba(79, 70, 229, 0.12),
                  0 20px 60px -20px rgba(79, 70, 229, 0.35);
+  --dash-pad: 24px;
+  --dash-gap: 16px;
+  --dash-chat-col: 460px;
+  --dash-kpi-row: 112px;
+  --dash-map-min: 300px;
+  --dash-bottom-min: 240px;
+  --dash-kpi-gap: 12px;
+  --dash-kpi-pad: 18px 20px;
+  --dash-table-col: minmax(440px, 1fr);
+  --dash-ai-col: minmax(280px, 0.6fr);
 }
 
 html[data-theme="dark"] {
-  --bg: #0b1220;
-  --bg-elev: #111a2e;
-  --bg-sunk: #0d1527;
-  --bg-code: #0a1020;
-  --line: #1e2a44;
-  --line-soft: #162036;
-  --ink: #e9eef9;
-  --ink-2: #c4cde0;
-  --ink-3: #8896b5;
-  --ink-4: #55648a;
-  --brand: #7c74ff;
-  --brand-2: #a79dff;
-  --brand-wash: rgba(124, 116, 255, 0.16);
+  /* 소프트 다크 — 기존 #0b1220(거의 검정 네이비)이 너무 진해서, 한 단계 밝은 중성 차콜로.
+     카드 elevation·테두리·그림자도 부드럽게. (Medusa 풍 소프트 다크) */
+  --bg: #1e1f22;
+  --bg-elev: #27282c;
+  --bg-sunk: #18191c;
+  --bg-code: #18191c;
+  --chat-group-bg: #161617;   /* 챗 세션 그룹 헤더 — 행보다 진한 중립 회색 밴드(다크) */
+  --line: #33353a;
+  --line-soft: #2a2b30;
+  --ink: #eaeaed;
+  --ink-2: #c0c1c6;
+  --ink-3: #8b8d94;
+  --ink-4: #5e6068;
+  --brand: #8b83ff;
+  --brand-2: #ada4ff;
+  --brand-wash: rgba(139, 131, 255, 0.16);
   --ok: #34d399;
   --warn: #fbbf24;
   --err: #f87171;
   --accent: #fb923c;
-  --shadow-card: 0 2px 6px -2px rgba(0, 0, 0, 0.5),
-                 0 10px 25px -10px rgba(0, 0, 0, 0.6);
-  --shadow-lg: 0 20px 60px -20px rgba(0, 0, 0, 0.8);
-  --shadow-glow: 0 0 0 1px rgba(124, 116, 255, 0.25),
-                 0 20px 60px -20px rgba(124, 116, 255, 0.5);
+  --chat-ai-bg: #2c2f37;
+  --chat-ai-fg: #e9ebf1;
+  --chat-user-bg: linear-gradient(135deg, #5a51c4 0%, #453ba8 100%);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3),
+                 0 6px 16px -6px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 16px 48px -16px rgba(0, 0, 0, 0.55);
+  --shadow-glow: 0 0 0 1px rgba(139, 131, 255, 0.22),
+                 0 18px 50px -18px rgba(139, 131, 255, 0.42);
 }
 
 * {
@@ -69,7 +89,7 @@ body {
 }
 
 /* Fluid viewport canvas.
- * 데스크톱 기준 최소 1280×720 을 보장하고 그 미만 뷰포트에서는 스크롤 허용.
+ * 데스크톱 관제 화면은 1024×720 을 하한으로 두고, 대시보드는 구간별 CSS 변수로 압축합니다.
  * position: relative 로 유지해 내부 position:absolute 자식들의 참조점을 제공합니다.
  */
 #stage {
@@ -83,11 +103,57 @@ body {
   position: relative;
   width: 100%;
   height: 100vh;
-  min-width: 1200px;
+  min-width: 1024px;
   min-height: 720px;
   background: var(--bg);
   overflow: hidden;
   transition: background 220ms ease;
+}
+
+@media (min-width: 1800px) {
+  :root {
+    --dash-chat-col: clamp(460px, 27vw, 540px);
+    --dash-bottom-min: 260px;
+  }
+}
+
+@media (max-width: 1440px) {
+  :root {
+    --dash-pad: 18px;
+    --dash-gap: 12px;
+    --dash-chat-col: clamp(390px, 30vw, 430px);
+    --dash-kpi-row: 104px;
+    --dash-kpi-gap: 10px;
+    --dash-kpi-pad: 14px 16px;
+    --dash-table-col: minmax(360px, 1fr);
+    --dash-ai-col: minmax(250px, 0.58fr);
+  }
+}
+
+@media (max-width: 1280px) {
+  :root {
+    --dash-pad: 12px;
+    --dash-gap: 10px;
+    --dash-chat-col: 340px;
+    --dash-kpi-row: 98px;
+    --dash-map-min: 260px;
+    --dash-bottom-min: 220px;
+    --dash-kpi-gap: 8px;
+    --dash-kpi-pad: 10px 14px;
+    --dash-table-col: minmax(0, 1fr);
+    --dash-ai-col: minmax(230px, 0.54fr);
+  }
+}
+
+@media (max-height: 820px) {
+  :root {
+    --dash-pad: 12px;
+    --dash-gap: 10px;
+    --dash-kpi-row: 98px;
+    --dash-map-min: 240px;
+    --dash-bottom-min: 200px;
+    --dash-kpi-pad: 10px 14px;
+  }
 }
 
 /* Typography defaults */
@@ -120,6 +186,18 @@ body {
   0%, 70%   { opacity: 1; }
   71%, 100% { opacity: 0.25; }
 }
+@keyframes blink-fade {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
+}
+/* 답장 → 원본 말풍선 통통 바운스 (카카오톡식) */
+@keyframes reply-bounce {
+  0%, 100% { transform: translateY(0); }
+  22%      { transform: translateY(-7px); }
+  46%      { transform: translateY(0); }
+  68%      { transform: translateY(-3px); }
+  86%      { transform: translateY(0); }
+}
 @keyframes slide-in-up {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -149,6 +227,97 @@ body {
   0%, 100% { opacity: 1;     box-shadow: 0 0 0 0   rgba(220,38,38,0); }
   50%      { opacity: 0.78;  box-shadow: 0 0 12px 2px rgba(220,38,38,0.55); }
 }
+/* 게이지 현재 포인터(▲) 강조 — danger-pulse 풍 글로우. 세기(--glow)는 %에 비례, 색은 화살표 currentColor */
+@keyframes arrow-pulse {
+  0%, 100% { filter: drop-shadow(0 0 1px currentColor); }
+  50%      { filter: drop-shadow(0 0 var(--glow, 4px) currentColor); }
+}
+/* 알림 배너 — 첫 화면에서 문구가 바로 보이도록 고정 표시 */
+@keyframes banner-marquee {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+.banner-marquee {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* iOS 풍 글래스(프로스티드 글래스) — 채팅 입력칸. 반투명 + backdrop-blur + 유리 가장자리 하이라이트 */
+.glass-input {
+  background: rgba(255, 255, 255, 0.45);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow: 0 8px 28px -10px rgba(15, 23, 42, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+html[data-theme="dark"] .glass-input {
+  background: rgba(44, 46, 52, 0.50);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 28px -10px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* 은은한 글래스 — 지도 범례 등 (입력칸보다 더 불투명, '살짝만') */
+.glass-soft {
+  background: rgba(255, 255, 255, 0.80);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+  backdrop-filter: blur(10px) saturate(150%);
+}
+html[data-theme="dark"] .glass-soft {
+  background: rgba(39, 40, 44, 0.74);
+}
+
+/* 사람(관리자·상담원) 직접 답변 아바타 — 초록 네온 글로우 (AI 자동답변과 구분) */
+@keyframes neon-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px #10b981, 0 0 6px 1px rgba(16,185,129,0.55); }
+  50%      { box-shadow: 0 0 0 2px #10b981, 0 0 13px 3px rgba(16,185,129,0.95); }
+}
+.neon-green { animation: neon-pulse 1.8s ease-in-out infinite; }
+
+/* 글래스 패널 — 장비 상세 드로어 (콘텐츠 많아 glass-soft 보다 더 불투명) */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.90);
+  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  backdrop-filter: blur(12px) saturate(150%);
+}
+html[data-theme="dark"] .glass-panel {
+  background: rgba(39, 40, 44, 0.85);
+}
+
+/* 클릭 유도 — 주기적 바운스 (상세 분석 말풍선 버튼). 호버 시 정지 */
+@keyframes attn-bounce {
+  0%, 50%, 100% { transform: translateY(0); }
+  60% { transform: translateY(-6px); }
+  72% { transform: translateY(0); }
+  82% { transform: translateY(-3px); }
+  92% { transform: translateY(0); }
+}
+.attn-bounce { animation: attn-bounce 2.2s ease-in-out infinite; will-change: transform; }
+.attn-bounce:hover { animation-play-state: paused; }
+
+/* 클릭 유도(세련) — 주기적 광택 스윕. 바운스보다 은은·고급. 호버 시 정지 */
+@keyframes attn-shine {
+  0%   { left: -60%; }
+  20%  { left: 130%; }
+  100% { left: 130%; }
+}
+.attn-shine { position: relative; overflow: hidden; }
+.attn-shine::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: -60%; width: 45%;
+  background: linear-gradient(100deg, transparent, rgba(255,255,255,0.5), transparent);
+  transform: skewX(-18deg); pointer-events: none;
+  animation: attn-shine 3s ease-in-out infinite;
+}
+
+/* 토글 슬라이딩 알약 — 칸 전환 시 빨려들어갔다(납작) 튀어나오는(늘어남) 탄성 */
+@keyframes pill-jelly {
+  0%   { transform: scaleX(1);    }
+  32%  { transform: scaleX(0.58); }
+  68%  { transform: scaleX(1.14); }
+  100% { transform: scaleX(1);    }
+}
+.pill-jelly { animation: pill-jelly 460ms cubic-bezier(0.34, 1.4, 0.5, 1); transform-origin: center; }
+.attn-shine:hover::before { animation-play-state: paused; }
 
 /* Selection colors */
 ::selection {

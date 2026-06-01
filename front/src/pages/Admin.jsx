@@ -1,19 +1,23 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { Icons } from "../components/Icons.jsx";
 import {
   listAllUsers,
-  approveUser,
-  rejectUser,
-  reactivateUser,
   adminResetPassword,
+  adminCreateUser,
+  adminDeleteUser,
+  adminSetMemo,
+  adminUpdateUser,
+  getAnnouncement,
+  saveAnnouncement,
   ROLE_LABEL,
+  ROLE_AVATAR,
   STATUS_LABEL,
 } from "../lib/authMock.js";
 
 /* ── 관리자 페이지 (admin 전용 통합 대시보드) ─────────────────
  *  sub-tabs:
- *    1) 개요         — 사용자 KPI · pending 큐 · 시스템 상태
- *    2) 운영자       — 가입 신청 승인/반려, 활성/반려 이력
+ *    1) 개요         — 사용자 KPI · 시스템 상태
+ *    2) 운영자       — 사용자 등록 · 비밀번호 재설정
  *    3) 시스템 설정  — 폴링 주기·임계·색약·데이터 (placeholder)
  *
  *  2026-05-04 신규 — UserManagement.jsx 의 후속.
@@ -26,6 +30,7 @@ const STATUS_TONE = {
 };
 
 const ROLE_TONE = {
+  superadmin: { fg: "#e11d48", bg: "rgba(225,29,72,0.10)", bd: "rgba(225,29,72,0.28)" },
   admin:    { fg: "#7c3aed", bg: "rgba(124,58,237,0.10)", bd: "rgba(124,58,237,0.28)" },
   operator: { fg: "#0369a1", bg: "rgba(14,165,233,0.10)", bd: "rgba(14,165,233,0.28)" },
   viewer:   { fg: "#475569", bg: "rgba(100,116,139,0.10)", bd: "rgba(100,116,139,0.28)" },
@@ -38,14 +43,51 @@ function fmtDate(iso) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+// 관리자 sub-tab 정의 (드래그로 순서 변경 — 순서는 localStorage 저장)
+const TAB_DEFS = [
+  { k: "operators", label: "사용자 관리" },
+  { k: "notice",    label: "공지사항" },
+  { k: "chatbot",   label: "챗봇 통계" },
+  { k: "inq_admin", label: "상담원 문의함" },
+  { k: "inq_dev",   label: "개발자 문의함" },
+  { k: "tokens",    label: "토큰 사용량" },
+  { k: "loginlog",  label: "로그인 로그" },
+  { k: "settings",  label: "시스템 설정" },
+];
+const TAB_ORDER_KEY = "siwon.admin.tabOrder";
+
 // ── 메인 ─────────────────────────────────────────────────
 export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiStatus }) {
-  const [section, setSection] = useState("overview");
+  const [section, setSection] = useState("operators");
+  // 탭 순서 (드래그 변경 + localStorage 유지). 저장에 없는 새 탭은 뒤에 붙이고, 사라진 탭은 제거.
+  const [tabOrder, setTabOrder] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(TAB_ORDER_KEY) || "[]");
+      const valid = (Array.isArray(saved) ? saved : []).filter((k) => TAB_DEFS.some((t) => t.k === k));
+      const missing = TAB_DEFS.filter((t) => !valid.includes(t.k)).map((t) => t.k);
+      return [...valid, ...missing];
+    } catch { return TAB_DEFS.map((t) => t.k); }
+  });
+  const dragKey = useRef(null);
+  const [draggingKey, setDraggingKey] = useState(null);   // 드래그 중인 탭 (반투명)
+  const [dragOverKey, setDragOverKey] = useState(null);   // 드롭 대상 탭 (앞에 표시선)
+  const reorderTabs = (fromKey, toKey) => {
+    if (!fromKey || fromKey === toKey) return;
+    setTabOrder((order) => {
+      const arr = order.slice();
+      const from = arr.indexOf(fromKey), to = arr.indexOf(toKey);
+      if (from < 0 || to < 0) return order;
+      arr.splice(from, 1);
+      arr.splice(to, 0, fromKey);
+      try { localStorage.setItem(TAB_ORDER_KEY, JSON.stringify(arr)); } catch {}
+      return arr;
+    });
+  };
   const [users, setUsers] = useState([]);
   const [toast, setToast] = useState(null);
 
-  const reload = useCallback(() => {
-    const res = listAllUsers(user);
+  const reload = useCallback(async () => {
+    const res = await listAllUsers(user);
     if (res.ok) setUsers(res.users);
   }, [user]);
 
@@ -70,7 +112,7 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
     return () => clearTimeout(id);
   }, [toast]);
 
-  if (!user || user.role !== "admin") {
+  if (!user || (user.role !== "admin" && user.role !== "superadmin")) {
     return (
       <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "var(--ink-3)" }}>
         관리자 권한이 필요합니다.
@@ -95,38 +137,57 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
               관리자 페이지
             </div>
             <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 4 }}>
-              운영자 승인 · 시스템 운영 설정 · 사용 통계
+              사용자 관리 · AI 사용량 통계 · 시스템 설정
             </div>
           </div>
           <AdminBadge user={user} />
         </div>
 
         <div style={{ display: "flex", gap: 4, borderBottom: "1px solid var(--line)" }}>
-          <SubTabBtn k="overview"  cur={section} set={setSection} label="요약" />
-          <SubTabBtn k="operators" cur={section} set={setSection} label="운영자 관리" badge={counts.pending} />
-          <SubTabBtn k="chatbot"   cur={section} set={setSection} label="챗봇 통계" />
-          <SubTabBtn k="settings"  cur={section} set={setSection} label="시스템 설정" />
+          {tabOrder.map((k) => {
+            const def = TAB_DEFS.find((t) => t.k === k);
+            if (!def) return null;
+            return (
+              <SubTabBtn
+                key={k} k={k} cur={section} set={setSection} label={def.label}
+                draggable
+                dragging={draggingKey === k}
+                dropTarget={dragOverKey === k && !!draggingKey && draggingKey !== k}
+                onDragStart={(e) => { dragKey.current = k; setDraggingKey(k); e.dataTransfer.effectAllowed = "move"; try { e.dataTransfer.setData("text/plain", k); } catch {} }}
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; if (dragOverKey !== k) setDragOverKey(k); }}
+                onDrop={(e) => { e.preventDefault(); reorderTabs(dragKey.current, k); dragKey.current = null; setDraggingKey(null); setDragOverKey(null); }}
+                onDragEnd={() => { dragKey.current = null; setDraggingKey(null); setDragOverKey(null); }}
+              />
+            );
+          })}
         </div>
       </div>
 
       {/* ── 섹션 컨텐츠 ── */}
       <div style={{ flex: 1, overflow: "auto", padding: "20px 32px 32px" }}>
-        {section === "overview" && (
-          <OverviewSection
-            users={users} counts={counts}
-            equipment={equipment} anomalies={anomalies} watch={watch} commOutage={commOutage}
-            apiStatus={apiStatus}
-            onJump={(s) => setSection(s)}
-          />
-        )}
         {section === "operators" && (
           <OperatorsSection
             user={user} users={users} counts={counts}
             reload={reload} setToast={setToast}
           />
         )}
+        {section === "notice" && (
+          <NoticeSection setToast={setToast} />
+        )}
         {section === "chatbot" && (
           <ChatbotStatsSection setToast={setToast} />
+        )}
+        {section === "inq_admin" && (
+          <InquiriesSection channel="admin" setToast={setToast} />
+        )}
+        {section === "inq_dev" && (
+          <InquiriesSection channel="developer" setToast={setToast} />
+        )}
+        {section === "tokens" && (
+          <TokenUsageSection />
+        )}
+        {section === "loginlog" && (
+          <LoginLogSection />
         )}
         {section === "settings" && (
           <SettingsSection apiStatus={apiStatus} setToast={setToast} />
@@ -139,19 +200,193 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
 }
 
 // ── sub-tabs UI ────────────────────────────────────────
-function SubTabBtn({ k, cur, set, label, badge }) {
+// ── 문의함 (사용자 문의/버그 신고 — admin) ──
+function InquiriesSection({ setToast, channel = "admin" }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState("needs");   // needs(미답변) | open(미처리) | done | all
+  const [query, setQuery] = useState("");          // 검색어 (내용·사용자)
+  const [drafts, setDrafts] = useState({});        // id -> 답변 초안
+  const load = useCallback(async () => {
+    try { const r = await fetch("/api/inquiries").then((x) => x.json()); if (r.ok) setItems(r.inquiries || []); } catch { /* ignore */ }
+    setLoading(false);
+  }, []);
+  useEffect(() => { load(); const id = setInterval(load, 8000); return () => clearInterval(id); }, [load]);
+  const patch = async (id, body, okMsg) => {
+    try {
+      await fetch(`/api/inquiries/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      setItems((arr) => arr.map((q) => (q.id === id ? { ...q, ...body } : q)));
+      setToast && setToast({ kind: "ok", text: okMsg });
+    } catch { setToast && setToast({ kind: "err", text: "변경 실패" }); }
+  };
+  // 답변 저장 (alsoDone=true 면 완료 처리까지 한 번에)
+  const saveReply = (id, alsoDone) => {
+    const text = (drafts[id] || "").trim();
+    if (!text) return;
+    patch(id, alsoDone ? { adminReply: text, status: "done" } : { adminReply: text }, alsoDone ? "답변 후 완료 처리" : "답변 저장됨");
+    setDrafts((d) => { const n = { ...d }; delete n[id]; return n; });
+  };
+  // 처리 상태 — needs(미답변) / answered(답변했으나 미완료) / done(완료)
+  const statusOf = (q) => (q.status === "done" ? "done" : (q.adminReply ? "answered" : "needs"));
+  const chanItems = items.filter((q) => (q.target || "admin") === channel);   // 이 탭의 채널만
+  const counts = {
+    needs: chanItems.filter((q) => statusOf(q) === "needs").length,
+    open:  chanItems.filter((q) => q.status === "open").length,
+    done:  chanItems.filter((q) => q.status === "done").length,
+    all:   chanItems.length,
+  };
+  const ql = query.trim().toLowerCase();
+  const view = chanItems
+    .filter((q) => (filter === "all" ? true : filter === "done" ? q.status === "done" : filter === "open" ? q.status === "open" : statusOf(q) === "needs"))
+    .filter((q) => !ql || `${q.message} ${q.displayName || ""} ${q.loginId || ""} ${q.adminReply || ""}`.toLowerCase().includes(ql));
+  const fmt = (d) => { try { return new Date(d).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch { return ""; } };
+  const STAT = {
+    needs:    { label: "미답변", fg: "#ef4444", bg: "rgba(239,68,68,0.12)" },
+    answered: { label: "답변함", fg: "#b45309", bg: "rgba(245,158,11,0.16)" },
+    done:     { label: "완료",   fg: "#047857", bg: "rgba(16,185,129,0.12)" },
+  };
+  const hasDraft = (id) => !!(drafts[id] || "").trim();
+  const pill = (kbl, cur, set) => kbl.map(([k, label]) => (
+    <button key={k} onClick={() => set(k)} style={{
+      padding: "5px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer",
+      border: "1px solid " + (cur === k ? "var(--brand)" : "var(--line)"),
+      background: cur === k ? "var(--brand)" : "var(--bg-elev)",
+      color: cur === k ? "#fff" : "var(--ink-3)",
+    }}>{label}</button>
+  ));
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* 요약 KPI */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        {[
+          { label: "미답변", value: counts.needs, fg: "#ef4444" },
+          { label: "미처리", value: counts.open,  fg: "var(--brand)" },
+          { label: "완료",   value: counts.done,  fg: "var(--ok)" },
+          { label: "전체",   value: counts.all,   fg: "var(--ink-3)" },
+        ].map((k) => (
+          <div key={k.label} style={{ flex: 1, minWidth: 88, padding: "9px 14px", borderRadius: 12, background: "var(--bg-elev)", border: "1px solid var(--line)" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-3)" }}>{k.label}</div>
+            <div style={{ fontSize: 23, fontWeight: 800, color: k.fg, lineHeight: 1.15 }}>{k.value}</div>
+          </div>
+        ))}
+      </div>
+      {/* 필터 + 검색 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {pill([["needs", `미답변 ${counts.needs}`], ["open", `미처리 ${counts.open}`], ["done", `완료 ${counts.done}`]], filter, setFilter)}
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="검색 (내용·사용자)"
+          style={{ marginLeft: "auto", minWidth: 150, padding: "6px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg-sunk)", color: "var(--ink)", fontSize: 12.5, outline: "none" }} />
+      </div>
+      {loading && <div style={{ color: "var(--ink-3)", fontSize: 13 }}>불러오는 중…</div>}
+      {!loading && view.length === 0 && <div style={{ color: "var(--ink-4)", fontSize: 13, padding: "24px 0", textAlign: "center" }}>해당 문의가 없습니다.</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {view.map((q) => {
+          const isDev = (q.target || "admin") === "developer";
+          const st = statusOf(q); const s = STAT[st];
+          return (
+          <div key={q.id} style={{
+            border: "1px solid var(--line)", borderLeft: `3px solid ${s.fg}`, borderRadius: 10, padding: "12px 14px",
+            background: "var(--bg-elev)", opacity: st === "done" ? 0.68 : 1,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7, flexWrap: "wrap" }}>
+              <span style={{
+                fontSize: 11, fontWeight: 800, padding: "2px 8px", borderRadius: 999,
+                background: isDev ? "rgba(249,115,22,0.12)" : "rgba(100,116,139,0.12)",
+                color: isDev ? "var(--accent)" : "var(--ink-3)",
+                display: "inline-flex", alignItems: "center", gap: 5,
+              }}>
+                <img src={isDev ? "/avatars/developer.png" : "/avatars/agent.png"} alt="" style={{ width: 16, height: 16, borderRadius: "50%", objectFit: "cover" }} />
+                {isDev ? "개발자" : "상담원"}
+              </span>
+              {!isDev && q.kind === "bug" && (
+                <span style={{ fontSize: 11, fontWeight: 800, padding: "2px 8px", borderRadius: 999, background: "rgba(239,68,68,0.12)", color: "var(--err)" }}>버그</span>
+              )}
+              <span style={{ fontSize: 11, fontWeight: 800, padding: "2px 8px", borderRadius: 999, background: s.bg, color: s.fg }}>{s.label}</span>
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink)" }}>{q.displayName || q.loginId || "사용자"}</span>
+              {q.loginId && <span style={{ fontSize: 11, color: "var(--ink-4)" }}>@{q.loginId}</span>}
+              <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--ink-4)" }}>{fmt(q.createdAt)}</span>
+              <button onClick={() => patch(q.id, { status: q.status === "done" ? "open" : "done" }, q.status === "done" ? "미처리로 되돌림" : "완료 처리")} style={{
+                padding: "3px 10px", borderRadius: 7, fontSize: 11, fontWeight: 700, cursor: "pointer",
+                border: "1px solid " + (q.status === "done" ? "var(--line)" : "var(--ok)"),
+                background: q.status === "done" ? "var(--bg-sunk)" : "var(--ok)",
+                color: q.status === "done" ? "var(--ink-3)" : "#fff",
+              }}>{q.status === "done" ? "↩ 되돌리기" : "✓ 완료"}</button>
+            </div>
+            <div style={{ fontSize: 13, color: "var(--ink)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{q.message}</div>
+            {Array.isArray(q.images) && q.images.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+                {q.images.map((src, i) => (
+                  <a key={i} href={src} target="_blank" rel="noreferrer" style={{ display: "inline-block" }}>
+                    <img src={src} alt="첨부 이미지" style={{ maxWidth: 200, maxHeight: 180, borderRadius: 8, border: "1px solid var(--line)", display: "block" }} />
+                  </a>
+                ))}
+              </div>
+            )}
+            {q.botReply && (
+              <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, background: "var(--bg-sunk)", borderLeft: "3px solid var(--brand)", fontSize: 12, color: "var(--ink-3)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+                <span style={{ fontWeight: 700, color: "var(--brand)" }}>{isDev ? "AI 설명 · " : "봇 답변 · "}</span>{q.botReply}
+              </div>
+            )}
+            {q.adminReply && (
+              <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, background: "rgba(16,185,129,0.08)", borderLeft: "3px solid var(--ok)", fontSize: 12, color: "var(--ink)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+                <span style={{ fontWeight: 700, color: "#047857" }}>{isDev ? "개발자 답변 · " : "관리자 답변 · "}</span>{q.adminReply}
+              </div>
+            )}
+            {/* 직접 답변 작성 — 답변+완료(원클릭) / 저장(미완료 유지) */}
+            <div style={{ marginTop: 8, display: "flex", gap: 6, alignItems: "stretch" }}>
+              <textarea
+                value={drafts[q.id] ?? ""}
+                onChange={(e) => setDrafts((d) => ({ ...d, [q.id]: e.target.value }))}
+                placeholder={q.adminReply ? "답변 수정…" : (isDev ? "개발자 답변 작성…" : "답변 작성…")}
+                rows={2}
+                style={{
+                  flex: 1, resize: "vertical", padding: "7px 9px", borderRadius: 8,
+                  border: "1px solid var(--line)", background: "var(--bg-sunk)", color: "var(--ink)",
+                  fontSize: 12.5, fontFamily: "inherit", outline: "none", lineHeight: 1.5,
+                }}
+              />
+              <div style={{ display: "flex", flexDirection: "column", gap: 5, justifyContent: "center" }}>
+                <button onClick={() => saveReply(q.id, true)} disabled={!hasDraft(q.id)} style={{
+                  padding: "0 12px", height: 30, borderRadius: 8, fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap",
+                  cursor: hasDraft(q.id) ? "pointer" : "not-allowed", border: "none",
+                  background: hasDraft(q.id) ? "var(--ok)" : "var(--bg-sunk)", color: hasDraft(q.id) ? "#fff" : "var(--ink-4)",
+                }}>답변+완료</button>
+                <button onClick={() => saveReply(q.id, false)} disabled={!hasDraft(q.id)} style={{
+                  padding: "0 12px", height: 30, borderRadius: 8, fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap",
+                  cursor: hasDraft(q.id) ? "pointer" : "not-allowed", border: "1px solid var(--line)",
+                  background: "var(--bg-elev)", color: hasDraft(q.id) ? "var(--ink-2)" : "var(--ink-4)",
+                }}>{q.adminReply ? "수정 저장" : "저장"}</button>
+              </div>
+            </div>
+          </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SubTabBtn({ k, cur, set, label, badge, draggable, dragging, dropTarget, onDragStart, onDragOver, onDrop, onDragEnd }) {
   const active = cur === k;
   return (
     <button
       onClick={() => set(k)}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+      title={draggable ? "드래그해서 순서 변경" : undefined}
       style={{
         position: "relative", padding: "10px 16px",
         background: "transparent", border: "none",
         color: active ? "var(--brand)" : "var(--ink-3)",
         fontSize: 13, fontWeight: 700, cursor: "pointer",
         display: "flex", alignItems: "center", gap: 6,
+        opacity: dragging ? 0.4 : 1, transition: "opacity 120ms",
       }}
     >
+      {dropTarget && <span style={{ position: "absolute", left: -2, top: 6, bottom: 6, width: 3, background: "var(--brand)", borderRadius: 2 }} />}
       {label}
       {!!badge && badge > 0 && (
         <span style={{
@@ -190,14 +425,9 @@ function AdminBadge({ user }) {
 // 1) 개요 섹션
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function OverviewSection({ users, counts, equipment, anomalies, watch, commOutage = [], apiStatus, onJump }) {
-  const recentPending = users
-    .filter((u) => u.status === "pending")
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-    .slice(0, 5);
-
   const lastActiveJoin = users
-    .filter((u) => u.status === "active" && u.approvedAt)
-    .sort((a, b) => new Date(b.approvedAt) - new Date(a.approvedAt))[0];
+    .filter((u) => u.status === "active")
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
 
   const apiText = ({
     mock:    "목업 데이터로 동작 중",
@@ -211,67 +441,14 @@ function OverviewSection({ users, counts, equipment, anomalies, watch, commOutag
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      {/* KPI 카드 4개 */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+      {/* KPI 카드 */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
         <KpiCard label="전체 사용자"     value={counts.all}      hint="등록된 모든 운영자" tone="brand" />
-        <KpiCard label="승인 대기"       value={counts.pending}  hint="처리 필요" tone="warn"
-                 onClick={counts.pending > 0 ? () => onJump("operators") : undefined} />
         <KpiCard label="활성 계정"       value={counts.active}   hint="현재 로그인 가능" tone="ok" />
-        <KpiCard label="반려 이력"       value={counts.rejected} hint="가입 거부 누적" tone="muted" />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 380px", gap: 16 }}>
-        {/* 좌: 최근 가입 신청 */}
-        <Panel title="최근 가입 신청" right={
-          counts.pending > 0 && (
-            <button
-              onClick={() => onJump("operators")}
-              style={{
-                fontSize: 11, fontWeight: 700, color: "var(--brand)",
-                background: "transparent", border: "none", cursor: "pointer",
-              }}
-            >
-              전체 보기 →
-            </button>
-          )
-        }>
-          {recentPending.length === 0 ? (
-            <Empty text="처리 대기 중인 가입 신청이 없습니다." />
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column" }}>
-              {recentPending.map((u, i) => (
-                <div key={u.id} style={{
-                  display: "flex", alignItems: "center", gap: 12,
-                  padding: "10px 4px",
-                  borderTop: i === 0 ? "none" : "1px solid var(--line)",
-                }}>
-                  <div style={{
-                    width: 32, height: 32, borderRadius: "50%",
-                    background: ROLE_TONE[u.role]?.bg || "var(--bg-sunk)",
-                    color: ROLE_TONE[u.role]?.fg || "var(--ink-2)",
-                    display: "grid", placeItems: "center",
-                    fontSize: 12, fontWeight: 800,
-                  }}>
-                    {u.name?.[0]?.toUpperCase() || "U"}
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>
-                      {u.name} <span style={{ fontWeight: 500, color: "var(--ink-3)" }}>· {u.id}</span>
-                    </div>
-                    <div style={{ fontSize: 11, color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {ROLE_LABEL[u.role]}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 11, color: "var(--ink-3)", whiteSpace: "nowrap" }}>
-                    {fmtDate(u.createdAt)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Panel>
-
-        {/* 우: 시스템 상태 */}
+      <div style={{ display: "grid", gap: 16 }}>
+        {/* 시스템 상태 */}
         <Panel title="시스템 상태">
           <div style={{ display: "grid", gap: 12 }}>
             <StatRow
@@ -300,8 +477,8 @@ function OverviewSection({ users, counts, equipment, anomalies, watch, commOutag
             />
             {lastActiveJoin && (
               <StatRow
-                label="최근 승인"
-                value={`${lastActiveJoin.name} · ${fmtDate(lastActiveJoin.approvedAt)}`}
+                label="최근 등록"
+                value={`${lastActiveJoin.name} · ${fmtDate(lastActiveJoin.createdAt)}`}
               />
             )}
           </div>
@@ -379,21 +556,37 @@ function Empty({ text }) {
 // 2) 운영자 관리 섹션 (구 UserManagement)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const FILTERS = [
-  { k: "pending",  ko: "승인 대기" },
-  { k: "active",   ko: "활성" },
-  { k: "rejected", ko: "반려" },
   { k: "all",      ko: "전체" },
 ];
 
 function OperatorsSection({ user, users, counts, reload, setToast }) {
-  const [filter, setFilter] = useState("pending");
+  const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
-  const [rejectTarget, setRejectTarget] = useState(null);
-  const [rejectReason, setRejectReason] = useState("");
   const [resetTarget, setResetTarget] = useState(null);
   const [resetPw, setResetPw]         = useState("");
   const [resetError, setResetError]   = useState("");
   const [resetDone, setResetDone]     = useState(null); // {userId, newPw} 또는 null
+  const [deleteTarget, setDeleteTarget] = useState(null);  // 삭제 대상 사용자
+  const [deleteErr, setDeleteErr]       = useState("");
+  const [memoTarget, setMemoTarget]   = useState(null);    // 메모 편집 대상
+  const [memoText, setMemoText]       = useState("");
+  const [memoErr, setMemoErr]         = useState("");
+  const [editTarget, setEditTarget]   = useState(null);    // 수정 대상 사용자
+  const [eName, setEName] = useState("");
+  const [eRole, setERole] = useState("operator");
+  const [eMemo, setEMemo] = useState("");
+  const [ePw, setEPw]     = useState("");
+  const [eErr, setEErr]   = useState("");
+  const [eDone, setEDone] = useState(null);                // 저장 후 새 비밀번호 표시용
+  // 사용자 등록 폼 (관리자 직접 생성 — 공개 회원가입 대체)
+  const [showCreate, setShowCreate] = useState(false);
+  const [cId, setCId]     = useState("");
+  const [cName, setCName] = useState("");
+  const [cRole, setCRole] = useState("operator");
+  const [cPw, setCPw]     = useState("");
+  const [cMemo, setCMemo] = useState("");
+  const [cErr, setCErr]   = useState("");
+  const [createdCred, setCreatedCred] = useState(null); // {id, pw, name} — 등록 직후 1회 표시
 
   const filtered = useMemo(() => {
     let list = filter === "all" ? users : users.filter((u) => u.status === filter);
@@ -411,28 +604,6 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
     });
   }, [users, filter, search]);
 
-  const handleApprove = (target) => {
-    const res = approveUser(user, target.id);
-    if (res.ok) { setToast({ kind: "ok", text: `${target.name} 님의 가입을 승인했습니다.` }); reload(); }
-    else        { setToast({ kind: "err", text: res.error }); }
-  };
-  const openReject = (t) => { setRejectTarget(t); setRejectReason(""); };
-  const confirmReject = () => {
-    if (!rejectTarget) return;
-    const res = rejectUser(user, rejectTarget.id, rejectReason);
-    if (res.ok) {
-      setToast({ kind: "ok", text: `${rejectTarget.name} 님의 가입을 반려했습니다.` });
-      setRejectTarget(null); setRejectReason("");
-      reload();
-    } else {
-      setToast({ kind: "err", text: res.error });
-    }
-  };
-  const handleReactivate = (t) => {
-    const res = reactivateUser(user, t.id);
-    if (res.ok) { setToast({ kind: "ok", text: `${t.name} 님을 승인 대기로 되돌렸습니다.` }); reload(); }
-    else        { setToast({ kind: "err", text: res.error }); }
-  };
   const openReset = (t) => {
     setResetTarget(t);
     setResetPw("");
@@ -440,13 +611,48 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
     setResetDone(null);
   };
   const closeReset = () => { setResetTarget(null); setResetPw(""); setResetError(""); setResetDone(null); };
-  const confirmReset = () => {
+  const confirmReset = async () => {
     if (!resetTarget) return;
-    const res = adminResetPassword(user, resetTarget.id, resetPw);
+    const res = await adminResetPassword(user, resetTarget.id, resetPw);
     if (!res.ok) { setResetError(res.error); return; }
     setResetDone({ userId: res.userId, newPw: res.newPw });
     setToast({ kind: "ok", text: `${resetTarget.name} 님의 비밀번호를 재설정했습니다.` });
     reload();
+  };
+  const closeDelete = () => { setDeleteTarget(null); setDeleteErr(""); };
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    const res = await adminDeleteUser(user, deleteTarget.id);
+    if (!res.ok) { setDeleteErr(res.error); return; }
+    setToast({ kind: "ok", text: `${deleteTarget.name} (${deleteTarget.id}) 계정을 삭제했습니다.` });
+    setDeleteTarget(null); setDeleteErr("");
+    reload();
+  };
+  const openMemo = (u) => { setMemoTarget(u); setMemoText(u.memo || ""); setMemoErr(""); };
+  const closeMemo = () => { setMemoTarget(null); setMemoText(""); setMemoErr(""); };
+  const confirmMemo = async () => {
+    if (!memoTarget) return;
+    const res = await adminSetMemo(user, memoTarget.id, memoText);
+    if (!res.ok) { setMemoErr(res.error); return; }
+    setToast({ kind: "ok", text: `${memoTarget.name} 님의 메모를 저장했습니다.` });
+    setMemoTarget(null); setMemoText(""); setMemoErr("");
+    reload();
+  };
+  const openEdit = (u) => { setEditTarget(u); setEName(u.name || ""); setERole(u.role || "operator"); setEMemo(u.memo || ""); setEPw(""); setEErr(""); setEDone(null); };
+  const closeEdit = () => { setEditTarget(null); setEName(""); setEMemo(""); setEPw(""); setEErr(""); setEDone(null); };
+  const genEditPw = () => {
+    const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let s = ""; for (let i = 0; i < 10; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    setEPw(s); setEErr("");
+  };
+  const confirmEdit = async () => {
+    if (!editTarget) return;
+    const res = await adminUpdateUser(user, editTarget.id, { name: eName, role: eRole, memo: eMemo, newPw: ePw });
+    if (!res.ok) { setEErr(res.error); return; }
+    setToast({ kind: "ok", text: `${eName} (${editTarget.id}) 정보를 수정했습니다.` });
+    reload();
+    if (res.newPw) setEDone(res.newPw);   // 새 비번 설정 시 모달 유지하며 표시
+    else closeEdit();
   };
   const genRandomPw = () => {
     // 데모용 랜덤 8자 (영숫자)
@@ -456,9 +662,95 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
     setResetPw(s);
     setResetError("");
   };
+  const genCreatePw = () => {
+    const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let s = ""; for (let i = 0; i < 8; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    setCPw(s); setCErr("");
+  };
+  const handleCreate = async () => {
+    const res = await adminCreateUser(user, { id: cId.trim(), pw: cPw, name: cName.trim(), role: cRole, memo: cMemo.trim() });
+    if (!res.ok) { setCErr(res.error); return; }
+    setCreatedCred({ id: cId.trim(), pw: cPw, name: cName.trim() });
+    setToast({ kind: "ok", text: `${cName.trim()} (${cId.trim()}) 계정을 등록했습니다.` });
+    setCId(""); setCName(""); setCPw(""); setCMemo(""); setCErr("");
+    reload();
+  };
 
   return (
     <>
+      {/* 사용자 요약 — 전체·활성·대기 + 역할별 (예전 개요 스타일) */}
+      {(() => {
+        const byRole = users.reduce((a, u) => { a[u.role] = (a[u.role] || 0) + 1; return a; }, {});
+        const cards = [
+          { label: "전체", value: counts.all, fg: "var(--brand)" },
+          { label: "활성", value: counts.active, fg: "var(--ok)" },
+          { label: "대기", value: counts.pending, fg: "var(--warn)" },
+          { label: "관리자", value: byRole.admin || 0, fg: "var(--ink-2)" },
+          { label: "관제사", value: byRole.operator || 0, fg: "var(--ink-2)" },
+          { label: "게스트", value: byRole.guest || 0, fg: "var(--ink-2)" },
+        ];
+        return (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+            {cards.map((k) => (
+              <div key={k.label} style={{ flex: 1, minWidth: 78, padding: "8px 12px", borderRadius: 10, background: "var(--bg-elev)", border: "1px solid var(--line)" }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-3)" }}>{k.label}</div>
+                <div style={{ fontSize: 20, fontWeight: 800, color: k.fg, lineHeight: 1.15 }}>{k.value}</div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+      {/* 사용자 등록 — 관리자 직접 생성 (즉시 활성) */}
+      <div style={{ marginBottom: 14, padding: 14, borderRadius: 12, background: "var(--bg-elev)", border: "1px solid var(--line)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: showCreate ? 12 : 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>
+            사용자 등록 <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-3)" }}>— 관리자가 직접 계정 생성 · 즉시 활성 (공개 가입 없음)</span>
+          </div>
+          <button type="button" onClick={() => { setShowCreate((v) => !v); setCErr(""); setCreatedCred(null); }}
+            style={{ padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700,
+              background: showCreate ? "var(--bg-sunk)" : "var(--brand)", color: showCreate ? "var(--ink-2)" : "#fff",
+              border: `1px solid ${showCreate ? "var(--line)" : "var(--brand)"}`, cursor: "pointer" }}>
+            {showCreate ? "닫기" : "+ 새 사용자"}
+          </button>
+        </div>
+        {showCreate && (
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+            {[["ID", cId, setCId, "영문/숫자 2~20"], ["이름", cName, setCName, "표시 이름"], ["비밀번호", cPw, setCPw, "4자 이상"], ["메모", cMemo, setCMemo, "선택 · 관리자 메모"]].map(([lab, val, set, ph]) => (
+              <label key={lab} style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "var(--ink-3)", fontWeight: 600 }}>
+                {lab}
+                <input value={val} onChange={(e) => { set(e.target.value); setCErr(""); }} placeholder={ph}
+                  style={{ height: 34, width: 150, padding: "0 10px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--ink)", fontSize: 13 }} />
+              </label>
+            ))}
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: "var(--ink-3)", fontWeight: 600 }}>
+              역할
+              <select value={cRole} onChange={(e) => setCRole(e.target.value)}
+                style={{ height: 34, width: 120, padding: "0 8px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--ink)", fontSize: 13 }}>
+                {Object.entries(ROLE_LABEL).filter(([k]) => k !== "viewer").map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </label>
+            <button type="button" onClick={genCreatePw}
+              style={{ height: 34, padding: "0 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, background: "var(--bg-sunk)", color: "var(--ink-2)", border: "1px solid var(--line)", cursor: "pointer" }}>
+              랜덤 비번
+            </button>
+            <button type="button" onClick={handleCreate}
+              style={{ height: 34, padding: "0 18px", borderRadius: 8, fontSize: 13, fontWeight: 700, background: "var(--brand)", color: "#fff", border: "1px solid var(--brand)", cursor: "pointer" }}>
+              등록
+            </button>
+          </div>
+        )}
+        {cErr && <div style={{ marginTop: 8, fontSize: 12, color: "var(--err, #dc2626)", fontWeight: 600 }}>{cErr}</div>}
+        {createdCred && (
+          <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 8, background: "rgba(16,185,129,0.10)", border: "1px solid rgba(16,185,129,0.32)", fontSize: 12.5, color: "var(--ink)", lineHeight: 1.6 }}>
+            ✅ <strong>{createdCred.name}</strong> 계정 등록 완료 — 아래 정보를 사용자에게 전달하세요.
+            <span style={{ color: "var(--ink-3)" }}> (이 화면을 벗어나면 비밀번호는 다시 확인할 수 없습니다.)</span>
+            <div style={{ marginTop: 6, fontFamily: "ui-monospace, monospace", fontSize: 13 }}>
+              ID <strong>{createdCred.id}</strong>　·　비밀번호 <strong>{createdCred.pw}</strong>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* 필터 + 검색 */}
       <div style={{ display: "flex", gap: 10, marginBottom: 14, alignItems: "center" }}>
         <div style={{ display: "flex", gap: 6 }}>
@@ -491,20 +783,6 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
           })}
         </div>
         <div style={{ flex: 1 }} />
-        <button
-          onClick={() => { reload(); setToast({ kind: "ok", text: "최신 정보로 갱신했습니다." }); }}
-          title="새로고침"
-          style={{
-            display: "flex", alignItems: "center", gap: 6,
-            padding: "0 12px", height: 36, borderRadius: 10,
-            background: "var(--bg-elev)",
-            border: "1px solid var(--line)",
-            color: "var(--ink-2)", fontSize: 12, fontWeight: 600,
-            cursor: "pointer",
-          }}
-        >
-          <Icons.refresh size={13} />새로고침
-        </button>
         <div style={{
           display: "flex", alignItems: "center", gap: 8,
           padding: "0 12px", height: 36, width: 280,
@@ -529,16 +807,16 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
       }}>
         <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
           <colgroup>
-            <col style={{ width: "22%" }} />
+            <col style={{ width: "16%" }} />
             <col style={{ width: "18%" }} />
-            <col style={{ width: "11%" }} />
             <col style={{ width: "12%" }} />
-            <col style={{ width: "15%" }} />
-            <col style={{ width: "22%" }} />
+            <col style={{ width: "18%" }} />
+            <col style={{ width: "16%" }} />
+            <col style={{ width: "20%" }} />
           </colgroup>
           <thead>
             <tr style={{ background: "var(--bg)", borderBottom: "1px solid var(--line)" }}>
-              {["ID", "이름", "역할", "상태", "신청일", "처리"].map((h) => (
+              {["ID", "이름", "역할", "메모", "등록일", "처리"].map((h) => (
                 <th key={h} style={{
                   padding: "11px 14px", textAlign: "left",
                   fontSize: 11, fontWeight: 700, letterSpacing: "0.04em",
@@ -554,8 +832,6 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
               </td></tr>
             )}
             {filtered.map((u, i) => {
-              const st = STATUS_TONE[u.status] || STATUS_TONE.pending;
-              const rt = ROLE_TONE[u.role] || ROLE_TONE.operator;
               return (
                 <tr key={u.id} style={{
                   borderBottom: i === filtered.length - 1 ? "none" : "1px solid var(--line)",
@@ -563,59 +839,30 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
                   height: 56, verticalAlign: "middle",
                 }}>
                   <td style={{ padding: "10px 14px", fontSize: 13, color: "var(--ink)", fontWeight: 600 }}>
-                    {u.id}
-                    {u.id === user.id && <span style={{ fontSize: 10, fontWeight: 700, color: "var(--brand)", marginLeft: 6 }}>(나)</span>}
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                      <img src={ROLE_AVATAR[u.role] || "/avatars/guest.png"} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", flexShrink: 0, border: "1px solid var(--line)" }} />
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {u.id}
+                        {u.id === user.id && <span style={{ fontSize: 10, fontWeight: 700, color: "var(--brand)", marginLeft: 6 }}>(나)</span>}
+                      </span>
+                    </span>
                   </td>
                   <td style={{ padding: "10px 14px", fontSize: 13, color: "var(--ink-2)" }}>{u.name}</td>
-                  <td style={{ padding: "10px 14px" }}>
-                    <span style={{
-                      display: "inline-flex", alignItems: "center",
-                      padding: "3px 9px", borderRadius: 999,
-                      fontSize: 11, fontWeight: 700,
-                      color: rt.fg, background: rt.bg, border: `1px solid ${rt.bd}`,
-                    }}>{ROLE_LABEL[u.role] || u.role}</span>
+                  <td style={{ padding: "10px 14px", fontSize: 13, color: "var(--ink-2)" }}>
+                    {ROLE_LABEL[u.role] || u.role}
                   </td>
-                  <td style={{ padding: "10px 14px" }}>
-                    <span style={{
-                      display: "inline-flex", alignItems: "center", gap: 5,
-                      padding: "3px 9px", borderRadius: 999,
-                      fontSize: 11, fontWeight: 700,
-                      color: st.fg, background: st.bg, border: `1px solid ${st.bd}`,
-                    }}>
-                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: st.dot }} />
-                      {STATUS_LABEL[u.status] || u.status}
+                  <td style={{ padding: "10px 14px", fontSize: 12 }}>
+                    <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: u.memo ? "var(--ink-2)" : "var(--ink-3)" }} title={u.memo || ""}>
+                      {u.memo || "—"}
                     </span>
-                    {u.status === "rejected" && u.rejectedReason && (
-                      <div style={{
-                        fontSize: 10, color: "var(--ink-3)", marginTop: 4, fontStyle: "italic",
-                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                      }} title={u.rejectedReason}>
-                        “{u.rejectedReason}”
-                      </div>
-                    )}
                   </td>
                   <td style={{ padding: "10px 14px", fontSize: 12, color: "var(--ink-3)" }}>
                     {fmtDate(u.createdAt)}
                   </td>
                   <td style={{ padding: "10px 14px" }}>
-                    {u.status === "pending" && (
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <ActionButton tone="ok"  icon={<Icons.check size={13} />} label="승인" onClick={() => handleApprove(u)} />
-                        <ActionButton tone="err" icon={<Icons.close size={13} />} label="반려" onClick={() => openReject(u)} />
-                      </div>
-                    )}
-                    {u.status === "active" && u.id !== user.id && (
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <ActionButton tone="brand" icon={<Icons.lock size={13} />} label="비번 재설정" onClick={() => openReset(u)} />
-                        <ActionButton tone="muted" icon={<Icons.close size={13} />} label="반려" onClick={() => openReject(u)} />
-                      </div>
-                    )}
-                    {u.status === "active" && u.id === user.id && (
-                      <span style={{ fontSize: 11, color: "var(--ink-3)" }}>—</span>
-                    )}
-                    {u.status === "rejected" && (
-                      <ActionButton tone="brand" icon={<Icons.refresh size={13} />} label="재심사" onClick={() => handleReactivate(u)} />
-                    )}
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <ActionButton tone="brand" icon={<Icons.pencil size={13} />} label="수정" onClick={() => openEdit(u)} />
+                    </div>
                   </td>
                 </tr>
               );
@@ -623,17 +870,6 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
           </tbody>
         </table>
       </div>
-
-      {/* 반려 모달 */}
-      {rejectTarget && (
-        <RejectModal
-          target={rejectTarget}
-          reason={rejectReason}
-          setReason={setRejectReason}
-          onConfirm={confirmReject}
-          onCancel={() => setRejectTarget(null)}
-        />
-      )}
 
       {/* 비밀번호 재설정 모달 */}
       {resetTarget && (
@@ -646,6 +882,45 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
           onGenerate={genRandomPw}
           onConfirm={confirmReset}
           onCancel={closeReset}
+        />
+      )}
+
+      {/* 계정 삭제 확인 모달 */}
+      {deleteTarget && (
+        <DeleteUserModal
+          target={deleteTarget}
+          error={deleteErr}
+          onConfirm={handleDelete}
+          onCancel={closeDelete}
+        />
+      )}
+
+      {/* 사용자 메모 모달 */}
+      {memoTarget && (
+        <MemoModal
+          target={memoTarget}
+          value={memoText}
+          setValue={(v) => { setMemoText(v); setMemoErr(""); }}
+          error={memoErr}
+          onConfirm={confirmMemo}
+          onCancel={closeMemo}
+        />
+      )}
+
+      {/* 사용자 수정 모달 */}
+      {editTarget && (
+        <EditUserModal
+          target={editTarget}
+          name={eName} setName={(v) => { setEName(v); setEErr(""); }}
+          role={eRole} setRole={(v) => { setERole(v); setEErr(""); }}
+          memo={eMemo} setMemo={setEMemo}
+          pw={ePw} setPw={(v) => { setEPw(v); setEErr(""); }}
+          error={eErr} done={eDone}
+          onGenPw={genEditPw}
+          onConfirm={confirmEdit}
+          onCancel={closeEdit}
+          canDelete={editTarget.id !== user.id}
+          onDelete={() => { const t = editTarget; closeEdit(); setDeleteTarget(t); setDeleteErr(""); }}
         />
       )}
     </>
@@ -724,18 +999,6 @@ function SettingsSection({ apiStatus, setToast }) {
         </div>
         <div style={{ marginTop: 10, fontSize: 11, color: "var(--ink-3)" }}>
           임계값 조정은 모델 재학습 또는 백엔드 설정 파일 수정 필요. 5/11 1차 자문 보고서 후 이 화면에서 직접 조정 가능하도록 확장 예정.
-        </div>
-      </SettingPanel>
-
-      {/* 데이터 내보내기 (placeholder) */}
-      <SettingPanel title="데이터 내보내기" desc="감사 로그 · 운영자 활동 · 이상 이력">
-        <div style={{ display: "flex", gap: 8 }}>
-          <DisabledBtn label="운영자 목록 (CSV)" />
-          <DisabledBtn label="이상 이력 (CSV)"   />
-          <DisabledBtn label="감사 로그 (JSON)"  />
-        </div>
-        <div style={{ marginTop: 10, fontSize: 11, color: "var(--ink-3)" }}>
-          백엔드 감사 로그 도입 후 활성화. 현재 mock 환경.
         </div>
       </SettingPanel>
 
@@ -839,7 +1102,84 @@ function ActionButton({ tone, icon, label, onClick }) {
   );
 }
 
-function RejectModal({ target, reason, setReason, onConfirm, onCancel }) {
+function EditUserModal({ target, name, setName, role, setRole, memo, setMemo, pw, setPw, error, done, onGenPw, onConfirm, onCancel, onDelete, canDelete }) {
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 95,
+        background: "rgba(10,15,30,0.45)", backdropFilter: "blur(4px)",
+        display: "grid", placeItems: "center",
+        animation: "slide-in-up 160ms ease both",
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div style={{
+        width: 480, padding: 28, borderRadius: 16,
+        background: "var(--bg-elev)", border: "1px solid var(--line)",
+        boxShadow: "0 30px 80px -20px rgba(0,0,0,0.4)",
+      }}>
+        <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6, color: "var(--ink)" }}>
+          사용자 수정
+        </div>
+        <div style={{ fontSize: 13, color: "var(--ink-3)", marginBottom: 16, lineHeight: 1.6 }}>
+          <strong style={{ color: "var(--ink-2)" }}>{target.id}</strong> 계정 정보를 수정합니다.
+        </div>
+        {done ? (
+          <div style={{ padding: "14px 16px", borderRadius: 10, background: "rgba(16,185,129,0.10)", border: "1px solid rgba(16,185,129,0.32)", fontSize: 13, color: "var(--ink)", lineHeight: 1.7 }}>
+            저장되었습니다. <strong>새 비밀번호</strong>를 사용자에게 전달하세요:
+            <div style={{ marginTop: 6, fontFamily: "ui-monospace, monospace", fontSize: 15, fontWeight: 700 }}>{done}</div>
+            <div style={{ marginTop: 4, fontSize: 11, color: "var(--ink-3)" }}>이 화면을 닫으면 다시 확인할 수 없습니다.</div>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+              <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, background: "var(--brand)", color: "#fff", border: "none", cursor: "pointer" }}>닫기</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "grid", gap: 12 }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, fontWeight: 600, color: "var(--ink-3)" }}>
+                이름
+                <input value={name} onChange={(e) => setName(e.target.value)}
+                  style={{ height: 36, padding: "0 10px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--ink)", fontSize: 13 }} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, fontWeight: 600, color: "var(--ink-3)" }}>
+                역할
+                <select value={role} onChange={(e) => setRole(e.target.value)}
+                  style={{ height: 36, padding: "0 8px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--ink)", fontSize: 13 }}>
+                  {Object.entries(ROLE_LABEL).filter(([k]) => k !== "viewer").map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                </select>
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, fontWeight: 600, color: "var(--ink-3)" }}>
+                메모
+                <textarea value={memo} onChange={(e) => setMemo(e.target.value)} maxLength={500} rows={3}
+                  placeholder="선택 · 관리자 메모"
+                  style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--ink)", fontSize: 13, resize: "vertical", fontFamily: "inherit", boxSizing: "border-box" }} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, fontWeight: 600, color: "var(--ink-3)" }}>
+                새 비밀번호 <span style={{ fontWeight: 500 }}>(비우면 변경 안 함)</span>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <input value={pw} onChange={(e) => setPw(e.target.value)} placeholder="4자 이상"
+                    style={{ flex: 1, height: 36, padding: "0 10px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--ink)", fontSize: 13 }} />
+                  <button type="button" onClick={onGenPw}
+                    style={{ height: 36, padding: "0 12px", borderRadius: 8, fontSize: 12, fontWeight: 600, background: "var(--bg-sunk)", color: "var(--ink-2)", border: "1px solid var(--line)", cursor: "pointer", whiteSpace: "nowrap" }}>랜덤</button>
+                </div>
+              </label>
+            </div>
+            {error && <div style={{ marginTop: 12, fontSize: 12, color: "var(--err, #dc2626)", fontWeight: 600 }}>{error}</div>}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center", marginTop: 18 }}>
+              {canDelete && (
+                <button onClick={onDelete} style={{ marginRight: "auto", padding: "9px 14px", borderRadius: 9, fontSize: 13, fontWeight: 700, background: "transparent", color: "var(--err)", border: "1px solid var(--err)", cursor: "pointer" }}>계정 삭제</button>
+              )}
+              <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 9, fontSize: 13, fontWeight: 600, background: "transparent", color: "var(--ink-2)", border: "1px solid var(--line)", cursor: "pointer" }}>취소</button>
+              <button onClick={onConfirm} style={{ padding: "9px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, background: "var(--brand)", color: "#fff", border: "none", cursor: "pointer" }}>저장</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MemoModal({ target, value, setValue, error, onConfirm, onCancel }) {
   return (
     <div
       style={{
@@ -856,25 +1196,70 @@ function RejectModal({ target, reason, setReason, onConfirm, onCancel }) {
         boxShadow: "0 30px 80px -20px rgba(0,0,0,0.4)",
       }}>
         <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6, color: "var(--ink)" }}>
-          가입 신청 반려
+          사용자 메모
         </div>
-        <div style={{ fontSize: 13, color: "var(--ink-3)", marginBottom: 16, lineHeight: 1.6 }}>
-          <strong style={{ color: "var(--ink-2)" }}>{target.name}</strong> ({target.id}) 님의
-          가입을 반려합니다. 반려 사유는 본인에게 표시됩니다 (선택).
+        <div style={{ fontSize: 13, color: "var(--ink-3)", marginBottom: 14, lineHeight: 1.6 }}>
+          <strong style={{ color: "var(--ink-2)" }}>{target.name}</strong> ({target.id}) 님에 대한 관리자 메모입니다.
         </div>
         <textarea
-          value={reason} onChange={(e) => setReason(e.target.value)}
-          placeholder="예: 등록되지 않은 외부 인원입니다."
-          rows={3} maxLength={200}
+          value={value} onChange={(e) => setValue(e.target.value)}
+          maxLength={500} rows={4} autoFocus
+          placeholder="예: 현장 담당자 · 외부 협력사 · 임시 계정 등"
           style={{
-            width: "100%", padding: "10px 12px",
-            fontSize: 13, color: "var(--ink)",
-            background: "var(--bg)", border: "1px solid var(--line)",
-            borderRadius: 10, outline: "none", resize: "vertical",
-            fontFamily: "inherit", marginBottom: 16, boxSizing: "border-box",
+            width: "100%", padding: "10px 12px", fontSize: 13, color: "var(--ink)",
+            background: "var(--bg)", border: "1px solid var(--line)", borderRadius: 10,
+            outline: "none", resize: "vertical", fontFamily: "inherit",
+            marginBottom: 6, boxSizing: "border-box",
           }}
-          autoFocus
         />
+        <div style={{ fontSize: 11, color: "var(--ink-3)", textAlign: "right", marginBottom: 14 }}>{value.length}/500</div>
+        {error && <div style={{ marginBottom: 12, fontSize: 12, color: "var(--err, #dc2626)", fontWeight: 600 }}>{error}</div>}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            onClick={onCancel}
+            style={{
+              padding: "9px 16px", borderRadius: 9, fontSize: 13, fontWeight: 600,
+              background: "transparent", color: "var(--ink-2)",
+              border: "1px solid var(--line)", cursor: "pointer",
+            }}
+          >취소</button>
+          <button
+            onClick={onConfirm}
+            style={{
+              padding: "9px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700,
+              background: "var(--brand)", color: "#fff", border: "none", cursor: "pointer",
+            }}
+          >저장</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteUserModal({ target, error, onConfirm, onCancel }) {
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 95,
+        background: "rgba(10,15,30,0.45)", backdropFilter: "blur(4px)",
+        display: "grid", placeItems: "center",
+        animation: "slide-in-up 160ms ease both",
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div style={{
+        width: 440, padding: 28, borderRadius: 16,
+        background: "var(--bg-elev)", border: "1px solid var(--line)",
+        boxShadow: "0 30px 80px -20px rgba(0,0,0,0.4)",
+      }}>
+        <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6, color: "var(--ink)" }}>
+          계정 삭제
+        </div>
+        <div style={{ fontSize: 13, color: "var(--ink-3)", marginBottom: 16, lineHeight: 1.6 }}>
+          <strong style={{ color: "var(--ink-2)" }}>{target.name}</strong> ({target.id}) 님의 계정을 삭제합니다.
+          이 작업은 <strong style={{ color: "var(--err, #dc2626)" }}>되돌릴 수 없습니다.</strong>
+        </div>
+        {error && <div style={{ marginBottom: 12, fontSize: 12, color: "var(--err, #dc2626)", fontWeight: 600 }}>{error}</div>}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <button
             onClick={onCancel}
@@ -892,7 +1277,7 @@ function RejectModal({ target, reason, setReason, onConfirm, onCancel }) {
               color: "#fff", border: "none", cursor: "pointer",
               boxShadow: "0 8px 18px -6px rgba(239,68,68,0.5)",
             }}
-          >반려 확정</button>
+          >삭제</button>
         </div>
       </div>
     </div>
@@ -1033,6 +1418,243 @@ function ResetPasswordModal({ target, pw, setPw, error, done, onGenerate, onConf
 // ─────────────────────────────────────────────────────
 // 4) 챗봇 통계 — /api/admin/tool-stats + /api/chat/sessions 시각화
 // ─────────────────────────────────────────────────────
+function TokenUsageSection() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true); setErr(null);
+    fetch("/api/admin/token-usage", { credentials: "same-origin" })
+      .then((r) => r.json())
+      .then((d) => { if (!alive) return; if (d.ok) setData(d); else setErr(d.error || "조회 실패"); })
+      .catch((e) => { if (alive) setErr(e.message); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, []);
+
+  const fmt = (n) => Number(n || 0).toLocaleString("en-US");
+
+  if (loading) return <Empty text="토큰 사용량 불러오는 중..." />;
+  if (err)     return <Empty text={`오류: ${err}`} />;
+  if (!data)   return <Empty text="데이터 없음" />;
+
+  const maxDay = Math.max(1, ...(data.daily || []).map((d) => d.tokens));
+  const PROV_COLOR = { "OpenAI": "#10b981", "Ollama(로컬)": "var(--brand)", "기타": "var(--ink-3)" };
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      {/* KPI */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+        <KpiCard label="총 토큰" value={fmt(data.totals.tokens)} hint={`프롬프트 ${fmt(data.totals.prompt)} · 응답 ${fmt(data.totals.completion)}`} tone="brand" />
+        <KpiCard label="AI 응답" value={fmt(data.totals.messages)} hint="누적 생성 횟수" tone="ok" />
+        <KpiCard label="사용 모델" value={data.totals.models} hint="고유 모델 수" tone="muted" />
+        <KpiCard label="OpenAI 예상 비용"
+          value={`$${data.cost.usd < 1 ? data.cost.usd.toFixed(4) : data.cost.usd.toFixed(2)} / ${fmt(data.cost.krw)}원`}
+          hint={`실시간 환율 ₩${fmt(data.cost.fx)}/$${data.cost.hasEstimated ? " · 일부 추정" : ""}${data.cost.hasUnpriced ? " · 일부 미설정" : ""}`}
+          tone="warn" />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
+        {/* 제공자별 */}
+        <Panel title="제공자별">
+          {data.byProvider.length === 0 ? <Empty text="사용 기록 없음" /> : (
+            <div style={{ display: "grid", gap: 12 }}>
+              {data.byProvider.map((p) => (
+                <StatRow key={p.provider} label={p.provider} color={PROV_COLOR[p.provider]}
+                  value={`${fmt(p.tokens)} · ${fmt(p.messages)}건`} />
+              ))}
+            </div>
+          )}
+        </Panel>
+
+        {/* 모델별 표 */}
+        <Panel title="모델별 토큰 사용량">
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ color: "var(--ink-3)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", borderBottom: "1px solid var(--line)" }}>
+                {[["모델", "left"], ["제공자", "left"], ["응답", "right"], ["프롬프트", "right"], ["응답토큰", "right"], ["총 토큰", "right"], ["예상 비용", "right"], ["마지막", "right"]].map(([h, al]) => (
+                  <th key={h} style={{ textAlign: al, padding: "8px 10px" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {data.byModel.length === 0 && (
+                <tr><td colSpan={8} style={{ padding: 24, textAlign: "center", color: "var(--ink-3)" }}>사용 기록 없음</td></tr>
+              )}
+              {data.byModel.map((m) => (
+                <tr key={m.model} style={{ borderBottom: "1px solid var(--line)" }}>
+                  <td style={{ padding: "8px 10px", fontWeight: 700, color: "var(--ink)" }}>{m.model}</td>
+                  <td style={{ padding: "8px 10px", color: PROV_COLOR[m.provider] || "var(--ink-3)", fontWeight: 600 }}>{m.provider}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "right" }}>{fmt(m.messages)}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "right", color: "var(--ink-3)" }}>{fmt(m.prompt)}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "right", color: "var(--ink-3)" }}>{fmt(m.completion)}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "right", fontWeight: 800, color: "var(--ink)" }}>{fmt(m.total)}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "right", fontWeight: 700, whiteSpace: "nowrap",
+                    color: m.costUsd == null ? "#f59e0b" : (m.provider === "OpenAI" ? "var(--ink)" : "var(--ink-3)") }}>
+                    {m.provider !== "OpenAI" ? "로컬·무료" : (m.costUsd == null ? "요율 미설정" : `${m.rate && m.rate.est ? "~" : ""}$${m.costUsd.toFixed(4)}`)}
+                  </td>
+                  <td style={{ padding: "8px 10px", textAlign: "right", color: "var(--ink-3)", fontSize: 11, whiteSpace: "nowrap" }}>{fmtDate(m.lastUsed)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ marginTop: 10, fontSize: 11, color: "var(--ink-3)", lineHeight: 1.6 }}>
+            예상 비용 = 입력·출력 토큰 × 요율. <strong>gpt-4o-mini · gpt-4o</strong>는 공개 요율, <strong>gpt-5 계열은 추정 요율</strong>(<code>~</code> 표시). 로컬(Ollama)은 무료.
+            실제 단가는 <code>server.js</code>의 <code>PRICING</code>에서 조정하면 즉시 반영됩니다.
+          </div>
+        </Panel>
+      </div>
+
+      {/* 최근 14일 추이 */}
+      <Panel title="최근 14일 일별 토큰">
+        {(!data.daily || data.daily.length === 0) ? <Empty text="최근 14일 사용 없음" /> : (
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 130, paddingTop: 10 }}>
+            {data.daily.map((d) => (
+              <div key={d.day} title={`${d.day} · ${fmt(d.tokens)} 토큰`}
+                style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", gap: 5 }}>
+                <div style={{ width: "100%", maxWidth: 30, height: `${Math.max(2, (d.tokens / maxDay) * 100)}%`, background: "var(--brand)", opacity: 0.85, borderRadius: "4px 4px 0 0" }} />
+                <div style={{ fontSize: 9, color: "var(--ink-3)", whiteSpace: "nowrap" }}>{String(d.day).slice(5)}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+// ── 로그인 로그 섹션 — audit_log 의 로그인 성공/실패 + 침입 시도 가시화 ──
+function LoginLogSection() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true); setErr(null);
+    fetch("/api/admin/login-log?limit=200", { credentials: "same-origin" })
+      .then((r) => r.json())
+      .then((d) => { if (!alive) return; if (d.ok) setData(d); else setErr(d.error || "조회 실패"); })
+      .catch((e) => { if (alive) setErr(e.message); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [tick]);
+
+  if (loading) return <Empty text="로그인 로그 불러오는 중..." />;
+  if (err)     return <Empty text={`오류: ${err}`} />;
+  if (!data)   return <Empty text="데이터 없음" />;
+
+  const events  = data.events  || [];
+  const summary = data.summary || [];
+  const totSuccess = summary.reduce((a, s) => a + Number(s.success || 0), 0);
+  const totFail    = summary.reduce((a, s) => a + Number(s.fail || 0), 0);
+  // 성공 0 · 실패만 있는 ID = 미등록 ID 추정(무차별 대입/probe 가능성)
+  const probes = summary.filter((s) => Number(s.success || 0) === 0 && Number(s.fail || 0) > 0);
+
+  const refreshBtn = (
+    <button onClick={() => setTick((t) => t + 1)}
+      style={{ fontSize: 12, padding: "4px 10px", border: "1px solid var(--line)", borderRadius: 6, background: "var(--bg)", color: "var(--ink-2)", cursor: "pointer" }}>
+      새로고침
+    </button>
+  );
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      {/* KPI */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+        <KpiCard label="로그인 성공" value={totSuccess} hint="누적 성공 횟수" tone="ok" />
+        <KpiCard label="로그인 실패" value={totFail} hint="비번 불일치·미등록 등" tone={totFail > 0 ? "warn" : "muted"} />
+        <KpiCard label="시도된 ID" value={summary.length} hint="로그인 시도된 ID 종류" tone="brand" />
+        <KpiCard label="의심 ID" value={probes.length} hint="성공 0 · 실패만 (미등록 추정)" tone={probes.length > 0 ? "warn" : "muted"} />
+      </div>
+
+      {/* 의심 시도 강조 */}
+      {probes.length > 0 && (
+        <Panel title="⚠ 의심 시도 (성공 0회 · 실패만)">
+          <div style={{ display: "grid", gap: 8 }}>
+            {probes.map((s) => (
+              <StatRow key={s.account} label={s.account} color="#ef4444"
+                value={`실패 ${s.fail}회 · IP ${s.ips}개 · ${fmtDate(s.lastAttempt)}`} />
+            ))}
+          </div>
+          <div style={{ marginTop: 10, fontSize: 11, color: "var(--ink-3)", lineHeight: 1.6 }}>
+            등록되지 않은 ID 로 로그인을 시도한 흔적입니다(무차별 대입 가능성). 인증(bcrypt + 시도 제한)이 막고 있으나, <strong>admin 비밀번호는 강하게</strong> 유지하세요.
+          </div>
+        </Panel>
+      )}
+
+      {/* 계정별 집계 */}
+      <Panel title="계정별 로그인 집계">
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ color: "var(--ink-3)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", borderBottom: "1px solid var(--line)" }}>
+              {[["계정", "left"], ["성공", "right"], ["실패", "right"], ["IP 수", "right"], ["마지막 시도", "right"]].map(([h, al]) => (
+                <th key={h} style={{ textAlign: al, padding: "8px 10px" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {summary.length === 0 && (
+              <tr><td colSpan={5} style={{ padding: 24, textAlign: "center", color: "var(--ink-3)" }}>기록 없음</td></tr>
+            )}
+            {summary.map((s) => {
+              const isProbe = Number(s.success || 0) === 0 && Number(s.fail || 0) > 0;
+              return (
+                <tr key={s.account} style={{ borderBottom: "1px solid var(--line)" }}>
+                  <td style={{ padding: "8px 10px", fontWeight: 700, color: isProbe ? "#ef4444" : "var(--ink)" }}>{s.account}{isProbe ? " ⚠" : ""}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "right", color: "#10b981", fontWeight: 700 }}>{s.success}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "right", color: Number(s.fail) > 0 ? "#ef4444" : "var(--ink-3)", fontWeight: 700 }}>{s.fail}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "right", color: "var(--ink-3)" }}>{s.ips}</td>
+                  <td style={{ padding: "8px 10px", textAlign: "right", color: "var(--ink-3)", fontSize: 11, whiteSpace: "nowrap" }}>{fmtDate(s.lastAttempt)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </Panel>
+
+      {/* 최근 이벤트 */}
+      <Panel title={`최근 로그인 이벤트 (${events.length})`} right={refreshBtn}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ color: "var(--ink-3)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", borderBottom: "1px solid var(--line)" }}>
+              {[["시각", "left"], ["결과", "left"], ["계정", "left"], ["IP", "left"], ["사유", "left"]].map(([h, al]) => (
+                <th key={h} style={{ textAlign: al, padding: "8px 10px" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {events.length === 0 && (
+              <tr><td colSpan={5} style={{ padding: 24, textAlign: "center", color: "var(--ink-3)" }}>기록 없음</td></tr>
+            )}
+            {events.map((e, i) => {
+              const ok = e.action === "login";
+              return (
+                <tr key={i} style={{ borderBottom: "1px solid var(--line)" }}>
+                  <td style={{ padding: "8px 10px", color: "var(--ink-3)", fontSize: 11, whiteSpace: "nowrap" }}>{fmtDate(e.ts)}</td>
+                  <td style={{ padding: "8px 10px" }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 99, background: ok ? "rgba(16,185,129,0.12)" : "rgba(239,68,68,0.12)", color: ok ? "#10b981" : "#ef4444" }}>
+                      {ok ? "성공" : "실패"}
+                    </span>
+                  </td>
+                  <td style={{ padding: "8px 10px", fontWeight: 600, color: "var(--ink)" }}>
+                    {e.account}{e.name ? <span style={{ color: "var(--ink-3)", fontWeight: 400 }}> · {e.name}</span> : null}
+                  </td>
+                  <td style={{ padding: "8px 10px", color: "var(--ink-2)", fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12 }}>{e.ip || "-"}</td>
+                  <td style={{ padding: "8px 10px", color: "var(--ink-3)", fontSize: 12 }}>{e.reason || (ok ? "-" : "")}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </Panel>
+    </div>
+  );
+}
+
 function ChatbotStatsSection({ setToast }) {
   const [stats, setStats] = useState(null);
   const [sessions, setSessions] = useState([]);
@@ -1044,7 +1666,7 @@ function ChatbotStatsSection({ setToast }) {
     try {
       const [a, b] = await Promise.all([
         fetch(`/api/admin/tool-stats?days=${d}`).then((r) => r.json()),
-        fetch(`/api/chat/sessions`).then((r) => r.json()),
+        fetch(`/api/chat/sessions?scope=all`).then((r) => r.json()),   // 관리자 통계 = 전역(계정 스코프 우회)
       ]);
       if (a.ok) setStats(a);
       if (b.ok) setSessions(b.sessions || []);
@@ -1190,6 +1812,97 @@ function ChatbotStatsSection({ setToast }) {
             </tbody>
           </table>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── 공지사항(대시보드 배너) 편집 ──────────────────────────
+function NoticeSection({ setToast }) {
+  const [message, setMessage] = useState("");
+  const [saving,  setSaving]  = useState(false);
+  const [meta,    setMeta]    = useState(null);   // {updatedBy, updatedAt}
+
+  const load = useCallback(async () => {
+    const res = await getAnnouncement();
+    if (res.ok && res.announcement) {
+      const a = res.announcement;
+      setMessage(a.message || "");
+      setMeta({ updatedBy: a.updatedBy, updatedAt: a.updatedAt });
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const handleSave = async () => {
+    const text = message.trim();
+    setSaving(true);
+    const res = await saveAnnouncement({ message: text, level: "critical" });
+    setSaving(false);
+    if (res.ok) {
+      setToast && setToast({ kind: "ok", text: text ? "공지를 게시했습니다." : "공지를 내렸습니다." });
+      load();
+    } else {
+      setToast && setToast({ kind: "error", text: res.error || "공지 저장에 실패했습니다." });
+    }
+  };
+
+  const live = !!message.trim();
+  const STRIPES = "repeating-linear-gradient(45deg, transparent, transparent 20px, rgba(255,255,255,0.06) 20px, rgba(255,255,255,0.06) 40px)";
+
+  return (
+    <div style={{ display: "grid", gap: 16, maxWidth: 720 }}>
+      <Panel title="대시보드 공지 배너" right={meta?.updatedAt ? <span style={{ fontSize: 11, color: "var(--ink-3)" }}>최근: {meta.updatedBy || "관리자"} · {fmtDate(meta.updatedAt)}</span> : null}>
+        <div style={{ fontSize: 12, color: "var(--ink-3)", marginBottom: 12, lineHeight: 1.5 }}>
+          대시보드 상단에 표시할 공지입니다. 내용을 쓰고 <b>저장</b>하면 전 사용자에게 <b>빨강 긴급 배너</b>로 노출되고, <b>내용을 비우고 저장</b>하면 "운영 중 · 등록된 공지 없음" 중립 바로 내려갑니다.
+        </div>
+        <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: "var(--ink-3)", marginBottom: 4 }}>
+          공지 내용 <span style={{ color: "var(--ink-4)" }}>({message.length}/500)</span>
+        </label>
+        <textarea
+          value={message} onChange={(e) => setMessage(e.target.value)} maxLength={500} rows={2}
+          placeholder="예) 6/1 정기 점검 09:00~10:00 · 일시 접속 지연 가능"
+          style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--ink)", fontSize: 13, resize: "vertical", fontFamily: "inherit" }}
+        />
+      </Panel>
+
+      <Panel title="미리보기">
+        <div style={{
+          position: "relative", height: 40, borderRadius: 8, padding: "0 16px", overflow: "hidden",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          background: live ? "linear-gradient(90deg, #dc2626 0%, #991b1b 100%)" : "var(--bg-sunk)",
+          border: live ? "none" : "1px solid var(--line)",
+          boxShadow: live ? "0 4px 14px -4px rgba(220,38,38,0.55)" : "none",
+        }}>
+          {live ? (
+            <>
+              <div style={{ position: "absolute", inset: 0, background: STRIPES, pointerEvents: "none" }} />
+              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, zIndex: 1 }}>
+                <div style={{ width: 18, height: 18, flexShrink: 0, color: "#fff" }}><Icons.alert size={18} /></div>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{message}</span>
+              </div>
+              <span className="mono" style={{ flexShrink: 0, fontSize: 11, color: "rgba(255,255,255,0.9)", zIndex: 1 }}>관리자 · 지금</span>
+            </>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--ok)" }} />
+                <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-2)" }}>운영 중</span>
+                <span style={{ fontSize: 12, color: "var(--ink-3)" }}>· 등록된 공지 없음</span>
+              </div>
+              <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>지금 기준</span>
+            </>
+          )}
+        </div>
+        <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 8 }}>
+          {live ? "저장 시 대시보드 상단에 위와 같이(빨강 긴급) 노출됩니다." : "내용이 비어 있어 중립 바로 표시됩니다. (게시된 공지 없음)"}
+        </div>
+      </Panel>
+
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <button type="button" disabled={saving} onClick={handleSave}
+          style={{ height: 36, padding: "0 24px", borderRadius: 8, fontSize: 13, fontWeight: 700, background: "var(--brand)", color: "#fff", border: "1px solid var(--brand)", cursor: saving ? "default" : "pointer", opacity: saving ? 0.6 : 1 }}>
+          {saving ? "저장 중…" : (live ? "저장 (게시)" : "저장 (공지 내림)")}
+        </button>
       </div>
     </div>
   );

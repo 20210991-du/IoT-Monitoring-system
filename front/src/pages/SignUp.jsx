@@ -126,8 +126,8 @@ export function SignUp({ onSuccess, onBackToLogin }) {
     setGlobalError("");
 
     // 약간의 지연으로 인증중 느낌 (mock)
-    setTimeout(() => {
-      const res = signUp(form);
+    setTimeout(async () => {
+      const res = await signUp(form);
       if (!res.ok) {
         setLoading(false);
         if (res.field) setErrors({ [res.field]: res.error });
@@ -258,21 +258,21 @@ export function SignUp({ onSuccess, onBackToLogin }) {
                   width: 56,
                   height: 56,
                   borderRadius: "50%",
-                  background: "linear-gradient(135deg, #f59e0b, #f97316)",
+                  background: "linear-gradient(135deg, #10b981, #059669)",
                   margin: "0 auto 16px",
                   display: "grid",
                   placeItems: "center",
-                  boxShadow: "0 12px 30px -8px rgba(245,158,11,0.55)",
+                  boxShadow: "0 12px 30px -8px rgba(16,185,129,0.55)",
                 }}
               >
-                <Icons.clock size={28} color="#fff" />
+                <Icons.check size={28} color="#fff" />
               </div>
               <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>
-                가입 신청이 접수되었습니다
+                가입이 완료되었습니다
               </div>
               <div style={{ fontSize: 13, color: COLORS.inkSoft, lineHeight: 1.6, marginBottom: 18 }}>
-                관리자 승인 후 로그인하실 수 있습니다.<br />
-                승인 완료 여부는 관리자에게 문의해 주세요.
+                게스트 권한으로 바로 로그인하실 수 있습니다.<br />
+                더 높은 권한이 필요하면 관리자에게 문의해 주세요.
               </div>
               <div
                 style={{
@@ -281,17 +281,17 @@ export function SignUp({ onSuccess, onBackToLogin }) {
                   gap: 6,
                   padding: "6px 12px",
                   borderRadius: 999,
-                  background: "rgba(245,158,11,0.12)",
-                  border: "1px solid rgba(245,158,11,0.32)",
-                  color: "#fbbf24",
+                  background: "rgba(16,185,129,0.12)",
+                  border: "1px solid rgba(16,185,129,0.32)",
+                  color: "#10b981",
                   fontSize: 11,
                   fontWeight: 700,
                   letterSpacing: "0.02em",
                   marginBottom: 22,
                 }}
               >
-                <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#fbbf24" }} />
-                승인 대기 중
+                <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#10b981" }} />
+                게스트로 가입 완료
               </div>
               <div style={{ fontSize: 12, color: COLORS.inkMuted }}>
                 로그인 화면으로 이동합니다…
@@ -334,29 +334,7 @@ export function SignUp({ onSuccess, onBackToLogin }) {
                 />
               </Field>
 
-              <Field
-                icon={<Icons.briefcase size={16} />}
-                label="역할"
-                error={errors.role}
-                focused={focus === "role"}
-              >
-                <select
-                  value={form.role}
-                  onChange={update("role")}
-                  onFocus={() => setFocus("role")}
-                  onBlur={() => setFocus(null)}
-                  style={selectStyle}
-                >
-                  {Object.entries(ROLE_LABEL).map(([v, label]) => (
-                    <option key={v} value={v} style={{ background: COLORS.bg1, color: COLORS.ink }}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-                <span style={{ color: COLORS.inkMuted, marginLeft: 4 }}>
-                  <Icons.chevron_right size={14} style={{ transform: "rotate(90deg)" }} />
-                </span>
-              </Field>
+              {/* 역할 선택 제거 — 공개 가입은 게스트 고정(승급은 관리자). */}
 
               <Field
                 icon={<Icons.lock size={16} />}

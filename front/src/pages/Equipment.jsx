@@ -4,9 +4,9 @@ import { Icons } from "../components/Icons.jsx";
 const statusChip = (status) => {
   const map = {
     normal:   { ko: "정상",     fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
-    critical: { ko: "위험",     fg: "#fff",     bg: "#dc2626",                bd: "#991b1b" },
+    critical: { ko: "이상",     fg: "#fff",     bg: "#dc2626",                bd: "#991b1b" },
     anomaly:  { ko: "이상",     fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    warn:     { ko: "이상",     fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
+    warn:     { ko: "관찰",     fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
     offline:  { ko: "통신장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
   };
   return map[status] || map.normal;
@@ -106,13 +106,13 @@ export function Equipment({ onOpen, equipment = [] }) {
     { k: "deviceId",   label: "장비명", align: "left", w: 130 },
     { k: "location",   label: "설치위치", align: "left", w: 320 },
     { k: "zone",       label: "구역", align: "left", w: 110 },
-    { k: "status",     label: "상태", align: "center", w: 100 },
-    { k: "volt",        label: "방식전위(mV)", align: "right", w: 130 },
-    { k: "ac",          label: "AC유입(mV)", align: "right", w: 120 },
-    { k: "sacrificial", label: "희생전류(mA)", align: "right", w: 120 },
-    { k: "temp",        label: "온도(°C)", align: "right", w: 90 },
-    { k: "hum",         label: "습도(%)", align: "right", w: 90 },
-    { k: "commDbm",     label: "통신품질(dBm)", align: "right", w: 120 },
+    { k: "status",     label: "상태", align: "left", w: 100 },
+    { k: "volt",        label: "방식전위(mV)", align: "left", w: 130 },
+    { k: "ac",          label: "AC유입(mV)", align: "left", w: 120 },
+    { k: "sacrificial", label: "희생전류(mA)", align: "left", w: 120 },
+    { k: "temp",        label: "온도(°C)", align: "left", w: 90 },
+    { k: "hum",         label: "습도(%)", align: "left", w: 90 },
+    { k: "commDbm",     label: "통신품질(dBm)", align: "left", w: 120 },
     { k: "updatedAt",  label: "최근 갱신", align: "left", w: 140 },
   ];
 
@@ -135,11 +135,11 @@ export function Equipment({ onOpen, equipment = [] }) {
         <FilterPill active={filter === "normal"} onClick={() => { setFilter("normal"); setPage(1); }} color="var(--ok)" count={counts.normal}>
           <Icons.check size={12} /> 정상
         </FilterPill>
-        <FilterPill active={filter === "critical"} onClick={() => { setFilter("critical"); setPage(1); }} color="#dc2626" count={counts.critical}>
-          <Icons.alert size={12} /> 위험
-        </FilterPill>
         <FilterPill active={filter === "warn"} onClick={() => { setFilter("warn"); setPage(1); }} color="var(--warn)" count={counts.warn}>
-          <Icons.eye size={12} /> 이상 의심
+          <Icons.eye size={12} /> 관찰
+        </FilterPill>
+        <FilterPill active={filter === "critical"} onClick={() => { setFilter("critical"); setPage(1); }} color="#dc2626" count={counts.critical}>
+          <Icons.alert size={12} /> 이상
         </FilterPill>
         <FilterPill active={filter === "offline"} onClick={() => { setFilter("offline"); setPage(1); }} color="var(--ink-3)" count={counts.offline}>
           <Icons.wifi_off size={12} /> 통신장애
@@ -233,7 +233,7 @@ export function Equipment({ onOpen, equipment = [] }) {
               </tr>
             </thead>
             <tbody>
-              {pageData.map((r, idx) => {
+              {filtered.map((r, idx) => {
                 const c = statusChip(r.status);
                 const zebraBg = idx % 2 === 1 ? "var(--bg-sunk)" : "transparent";
                 return (
@@ -253,22 +253,20 @@ export function Equipment({ onOpen, equipment = [] }) {
                     <td className="mono" style={{ padding: "14px 14px", color: "var(--ink-2)", fontWeight: 500, verticalAlign: "middle" }}>{r.deviceId}</td>
                     <td style={{ padding: "14px 14px", color: "var(--ink-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "middle" }}>{r.location}</td>
                     <td style={{ padding: "14px 14px", color: "var(--ink-3)", fontSize: 12, verticalAlign: "middle" }}>{r.zone}</td>
-                    <td style={{ padding: "14px 14px", textAlign: "center", verticalAlign: "middle" }}>
+                    <td style={{ padding: "14px 14px", textAlign: "left", verticalAlign: "middle" }}>
                       <span style={{
-                        display: "inline-block", padding: "4px 12px", borderRadius: 999,
-                        fontSize: 12, fontWeight: 700,
-                        background: c.bg, color: c.fg, border: `1px solid ${c.bd}`,
-                        minWidth: 48,
+                        fontSize: 13, fontWeight: 700,
+                        color: ({ "정상": "var(--ok)", "관찰": "var(--warn)", "이상": "#dc2626" })[c.ko] || (c.fg === "#fff" ? c.bg : c.fg),
                       }}>
                         {c.ko}
                       </span>
                     </td>
-                    <td className="mono" style={{ padding: "14px 14px", textAlign: "right", verticalAlign: "middle", color: r.status === "anomaly" ? "var(--err)" : "var(--ink)", fontWeight: r.status === "anomaly" ? 700 : 500 }}>{r.volt}</td>
-                    <td className="mono" style={{ padding: "14px 14px", textAlign: "right", verticalAlign: "middle", color: r.status === "anomaly" && r.label === "AC 유입 과다" ? "var(--err)" : "var(--ink-2)" }}>{r.ac.toLocaleString()}</td>
-                    <td className="mono" style={{ padding: "14px 14px", textAlign: "right", verticalAlign: "middle", color: r.sacrificial !== 0 && r.sacrificial < 1 ? "var(--warn)" : "var(--ink-2)" }}>{r.sacrificial}</td>
-                    <td className="mono" style={{ padding: "14px 14px", textAlign: "right", verticalAlign: "middle", color: "var(--ink-2)" }}>{r.temp}</td>
-                    <td className="mono" style={{ padding: "14px 14px", textAlign: "right", verticalAlign: "middle", color: "var(--ink-2)" }}>{r.hum}</td>
-                    <td className="mono" style={{ padding: "14px 14px", textAlign: "right", verticalAlign: "middle", color: !r.commOk ? "var(--err)" : r.commDbm < -75 ? "var(--warn)" : "var(--ink-2)", fontWeight: !r.commOk ? 700 : 500 }}>{r.commOk ? r.commDbm : "—"}</td>
+                    <td className="mono" style={{ padding: "14px 14px", textAlign: "left", verticalAlign: "middle", color: r.status === "anomaly" ? "var(--err)" : "var(--ink)", fontWeight: r.status === "anomaly" ? 700 : 500 }}>{r.volt}</td>
+                    <td className="mono" style={{ padding: "14px 14px", textAlign: "left", verticalAlign: "middle", color: r.status === "anomaly" && r.label === "AC 유입 과다" ? "var(--err)" : "var(--ink-2)" }}>{r.ac.toLocaleString()}</td>
+                    <td className="mono" style={{ padding: "14px 14px", textAlign: "left", verticalAlign: "middle", color: r.sacrificial !== 0 && r.sacrificial < 1 ? "var(--warn)" : "var(--ink-2)" }}>{r.sacrificial}</td>
+                    <td className="mono" style={{ padding: "14px 14px", textAlign: "left", verticalAlign: "middle", color: "var(--ink-2)" }}>{r.temp}</td>
+                    <td className="mono" style={{ padding: "14px 14px", textAlign: "left", verticalAlign: "middle", color: "var(--ink-2)" }}>{r.hum}</td>
+                    <td className="mono" style={{ padding: "14px 14px", textAlign: "left", verticalAlign: "middle", color: !r.commOk ? "var(--err)" : r.commDbm < -75 ? "var(--warn)" : "var(--ink-2)", fontWeight: !r.commOk ? 700 : 500 }}>{r.commOk ? r.commDbm : "—"}</td>
                     <td className="mono" style={{ padding: "14px 14px", color: "var(--ink-3)", whiteSpace: "nowrap", fontSize: 12, verticalAlign: "middle" }}>{r.updatedAt}</td>
                   </tr>
                 );
@@ -277,45 +275,14 @@ export function Equipment({ onOpen, equipment = [] }) {
           </table>
         </div>
 
-        {/* Pagination */}
+        {/* 총 건수 (페이지네이션 제거 — 통 스크롤) */}
         <div style={{
           padding: "12px 20px",
           borderTop: "1px solid var(--line-soft)",
-          display: "flex", justifyContent: "space-between", alignItems: "center",
           background: "var(--bg-sunk)",
+          fontSize: 12, color: "var(--ink-3)",
         }}>
-          <div style={{ fontSize: 12, color: "var(--ink-3)" }}>
-            총 <span style={{ color: "var(--ink)", fontWeight: 700 }}>{filtered.length}</span>건 중{" "}
-            <span style={{ fontWeight: 700, color: "var(--ink)" }}>
-              {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, filtered.length)}
-            </span>{" "}
-            표시
-          </div>
-          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-            <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1} style={pageBtn(page === 1)}>이전</button>
-            {Array.from({ length: Math.min(7, totalPages) }, (_, i) => {
-              let p;
-              if (totalPages <= 7) p = i + 1;
-              else if (page <= 4) p = i + 1;
-              else if (page >= totalPages - 3) p = totalPages - 6 + i;
-              else p = page - 3 + i;
-              return (
-                <button
-                  key={p}
-                  onClick={() => setPage(p)}
-                  style={{
-                    ...pageBtn(false),
-                    background: page === p ? "var(--brand)" : "transparent",
-                    color: page === p ? "#fff" : "var(--ink-2)",
-                    fontWeight: page === p ? 700 : 500,
-                  }}
-                >
-                  {p}
-                </button>
-              );
-            })}
-            <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages} style={pageBtn(page === totalPages)}>다음</button>
-          </div>
+          총 <span style={{ color: "var(--ink)", fontWeight: 700 }}>{filtered.length}</span>건
         </div>
       </div>
     </div>

@@ -94,6 +94,7 @@ export const Icons = {
     <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
   </>),
   plus: ic(<><path d="M12 5v14M5 12h14" /></>),
+  pencil: ic(<><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" /></>),
   minus: ic(<><path d="M5 12h14" /></>),
   pin: ic(<>
     <path d="M12 2a7 7 0 0 1 7 7c0 5-7 13-7 13S5 14 5 9a7 7 0 0 1 7-7z" />
