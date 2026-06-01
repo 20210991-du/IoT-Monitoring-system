@@ -152,8 +152,8 @@ function ProfileTab({ user, fullRecord, onClose, onUpdate }) {
     setErrors({}); setGlobalError("");
     if (!dirty) { onClose(); return; }
     setSaving(true);
-    setTimeout(() => {
-      const res = updateProfile(user, { name });
+    setTimeout(async () => {
+      const res = await updateProfile(user, { name });
       setSaving(false);
       if (!res.ok) {
         if (res.field) setErrors({ [res.field]: res.error });
@@ -232,8 +232,8 @@ function PasswordTab({ user, onClose }) {
     e && e.preventDefault();
     setErrors({}); setGlobalError("");
     setSaving(true);
-    setTimeout(() => {
-      const res = changePassword(user, { currentPw, newPw, newPw2 });
+    setTimeout(async () => {
+      const res = await changePassword(user, { currentPw, newPw, newPw2 });
       setSaving(false);
       if (!res.ok) {
         if (res.field) setErrors({ [res.field]: res.error });

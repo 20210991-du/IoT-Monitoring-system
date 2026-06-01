@@ -11,7 +11,7 @@ import { SignUp } from "./pages/SignUp.jsx";
 import { Dashboard } from "./pages/Dashboard.jsx";
 import { Equipment } from "./pages/Equipment.jsx";
 import { Admin } from "./pages/Admin.jsx";
-import { currentSession, signOut, listPending } from "./lib/authMock.js";
+import { currentSession, signOut, validateSession } from "./lib/authMock.js";
 import {
   EQUIPMENT  as MOCK_EQUIPMENT,
   MAP_MARKERS as MOCK_MARKERS,
@@ -19,7 +19,7 @@ import {
   AI_WATCH    as MOCK_WATCH,
   AI_INSIGHTS as MOCK_INSIGHTS,
 } from "./data/mockData.js";
-import { fetchDevices, fetchAnomalies, fetchInsights, devicesToMarkers, setApiDemoMode } from "./api/client.js";
+import { fetchDevices, fetchAnomalies, fetchInsights, fetchAnnouncement, devicesToMarkers, setApiDemoMode } from "./api/client.js";
 
 const TWEAK_DEFAULTS = { theme: "light", mapStyle: "light", autoPlay: true };
 const POLL_MS = 60_000;
@@ -282,9 +282,9 @@ function EquipmentDrawer({ item, onClose }) {
   if (!item) return null;
   const statusMap = {
     normal:  { ko: "정상", fg: "#047857", bg: "rgba(16,185,129,0.14)", bd: "rgba(16,185,129,0.3)" },
-    critical:{ ko: "위험", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    anomaly: { ko: "위험", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
-    warn:    { ko: "이상 의심", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
+    critical:{ ko: "이상", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
+    anomaly: { ko: "이상", fg: "#b91c1c", bg: "rgba(239,68,68,0.12)",   bd: "rgba(239,68,68,0.3)" },
+    warn:    { ko: "관찰", fg: "#b45309", bg: "rgba(245,158,11,0.14)",  bd: "rgba(245,158,11,0.3)" },
     offline: { ko: "통신 장애", fg: "#475569", bg: "rgba(100,116,139,0.14)", bd: "rgba(100,116,139,0.3)" },
   };
   const c = statusMap[item.status] || statusMap.normal;
@@ -334,7 +334,7 @@ function EquipmentDrawer({ item, onClose }) {
               { l: "AC 유입", v: `${(item.ac ?? 0).toLocaleString()}mV`, a: Number(item.ac) >= 500 ? "var(--err)" : Number(item.ac) >= 200 ? "var(--warn)" : null },
               { l: "희생전류",  v: `${item.sacrificial}mA`, a: item.status === "anomaly" && item.label === "희생전류 저하" ? "var(--err)" : null },
               { l: "온도",     v: `${item.temp}°C` },
-              { l: "습도(단말 원본)", v: `${item.hum}%` },
+              { l: "습도", v: `${item.hum}%` },
               { l: "통신품질", v: item.commOk ? `${item.commDbm}dBm` : "단절", a: !item.commOk || (item.commOk && item.commDbm < -75) ? "var(--err)" : null },
             ].map((s) => (
               <div
@@ -375,13 +375,24 @@ function EquipmentDrawer({ item, onClose }) {
 
 export function App() {
   const [screen, setScreen] = useState(() => {
-    // 세션이 살아있으면 바로 app, 아니면 login
-    const saved = localStorage.getItem("screen");
-    if (saved === "signup") return saved;
+    // 세션이 살아있으면 바로 app, 아니면 login (공개 회원가입 제거 — signup 화면 없음)
     return currentSession() ? "app" : "login";
   });
   const [user, setUser]     = useState(() => currentSession());
   const [pendingId, setPendingId] = useState("");  // 가입 직후 로그인 화면에 prefill
+  const [skipBoot, setSkipBoot] = useState(false);  // 로그아웃으로 로그인 화면 진입 시 부팅 생략 (신규 로드는 부팅 유지)
+
+  // 부팅/새로고침 시 서버 세션 검증 (httpOnly 쿠키). 만료/무효면 로그인으로.
+  // 네트워크 일시 오류로는 로그아웃하지 않음 (서버가 명확히 미인증일 때만).
+  useEffect(() => {
+    let alive = true;
+    validateSession().then((res) => {
+      if (!alive) return;
+      if (res.ok) setUser(res.user);
+      else if (res.authed === false) { setUser(null); setScreen("login"); }
+    });
+    return () => { alive = false; };
+  }, []);
   const [tab, setTab]       = useState(() => localStorage.getItem("tab") || "dashboard");
   const [tweakState, setTweakState] = useState(() => {
     const el = typeof document !== "undefined" && document.getElementById("tweaks-defaults");
@@ -396,7 +407,7 @@ export function App() {
     }
   });
   const [tweaksOn,   setTweaksOn]   = useState(false);
-  const [bannerOpen, setBannerOpen] = useState(true);
+  // 긴급 배너는 상시 표시(dismiss 없음) — bannerOpen 상태 제거 (5/31)
   // analysis state 폐기 (5/26) — AI 탐지 카드 클릭은 챗봇 메시지 푸쉬로 대체 (Dashboard 내부 처리)
   const [drawer,     setDrawer]     = useState(null);
 
@@ -412,6 +423,7 @@ export function App() {
   const [dbStatus, setDbStatus] = useState(null);
   const [dbInfo,   setDbInfo]   = useState(null);   // { rows, model, ollama }
   const [aiEvents,  setAiEvents]  = useState([]);     // 실시간 로그로 전달되는 AI 이벤트
+  const [announcement, setAnnouncement] = useState(null);   // 관리자 등록 공지 (배너) — null=없음
   // ── 데모 모드 (발표용 가상 장비 10대) ─────────────
   const [demoMode, setDemoMode] = useState(() => {
     try { return JSON.parse(localStorage.getItem("siwon.demo.mode") || "false"); }
@@ -427,57 +439,67 @@ export function App() {
   }, [logOpen]);
 
   // ── AI 이벤트 생성 헬퍼 ────────────────────────────────────
+  // ⚠️ id 는 "내용 기반 안정 키"로 만든다. 매 폴링마다 now.getTime() 으로 새 id 를 주면
+  //    상태가 그대로여도 60초마다 9줄씩 무한 누적돼 실 DB 로그(미러링/도구호출)를 밀어냄.
+  //    상태 스냅샷이 바뀔 때만 새 id → processedIds 중복 차단으로 1세트만 남음.
   function makeAiLogEvents(devRes, anoRes) {
     const now = new Date();
     const t   = now.toTimeString().slice(0, 8); // HH:MM:SS
     const ts  = now.toISOString();              // 날짜 separator 용
-    const base = now.getTime();
     const events = [];
 
+    const commOutage = Array.isArray(anoRes.commOutage) ? anoRes.commOutage : [];
+    const offline = devRes.devices.filter((d) => d.status === "offline");
+    const normal = devRes.devices.filter((d) => d.status === "normal").length;
+    // 상태 스냅샷 시그니처 — 이 값이 같으면 "같은 배치 결과"로 보고 중복 누적 차단.
+    const sig = [
+      devRes.devices.length, normal, anoRes.anomalies.length, anoRes.watch.length,
+      commOutage.length || offline.length,
+      anoRes.anomalies.map((a) => a.node).join(","),
+      anoRes.watch.map((w) => w.node).join(","),
+    ].join("|");
+
     events.push({
-      id: base, ts, kind: "ai", time: t,
+      id: `aibatch:${sig}:head`, ts, kind: "ai", time: t,
       text: `AI: LSTM 배치 추론 완료 · ${devRes.devices.length}개 장비 분석 (${devRes.last_updated || t})`,
     });
 
-    anoRes.anomalies.slice(0, 5).forEach((a, i) => {
+    anoRes.anomalies.slice(0, 5).forEach((a) => {
       const ratio = fmtRatio(a.aiRatio);
       const cause = causeOf(a);
       events.push({
-        id: base + 1 + i, ts, kind: "alert", time: t,
-        text: `ALERT: ${a.node} 위험${ratio ? ` · AI 기준 ${ratio}` : ""}${cause ? ` · ${cause}` : ""}`,
+        id: `aibatch:${sig}:alert:${a.node}`, ts, kind: "alert", time: t,
+        text: `ALERT: ${a.node} 이상${ratio ? ` · AI 기준 ${ratio}` : ""}${cause ? ` · ${cause}` : ""}`,
       });
     });
 
-    anoRes.watch.slice(0, 3).forEach((w, i) => {
+    anoRes.watch.slice(0, 3).forEach((w) => {
       const ratio = fmtRatio(w.aiRatio);
       const cause = causeOf(w);
       events.push({
-        id: base + 10 + i, ts, kind: "warn", time: t,
-        text: `WARN: ${w.node} 이상 의심${ratio ? ` · AI 기준 ${ratio}` : ""}${cause ? ` · ${cause}` : ""}`,
+        id: `aibatch:${sig}:warn:${w.node}`, ts, kind: "warn", time: t,
+        text: `WARN: ${w.node} 관찰${ratio ? ` · AI 기준 ${ratio}` : ""}${cause ? ` · ${cause}` : ""}`,
       });
     });
 
-    const commOutage = Array.isArray(anoRes.commOutage) ? anoRes.commOutage : [];
-    commOutage.slice(0, 2).forEach((o, i) => {
+    commOutage.slice(0, 2).forEach((o) => {
       const dur = String(o.label || "").replace("통신 두절 ", "두절 ");
       events.push({
-        id: base + 16 + i, ts, kind: "warn", time: t,
+        id: `aibatch:${sig}:comm:${o.node}`, ts, kind: "warn", time: t,
         text: `WARN: ${o.node} 통신장애 · ${dur || "두절"}`,
       });
     });
 
-    const offline = devRes.devices.filter((d) => d.status === "offline");
     if (offline.length > 0) {
       events.push({
-        id: base + 20, ts, kind: "warn", time: t,
+        id: `aibatch:${sig}:offline`, ts, kind: "warn", time: t,
         text: `WARN: 통신장애 ${offline.length}건 · ${offline.slice(0, 2).map((d) => d.deviceId).join(", ")}`,
       });
     }
 
-    const normal = devRes.devices.filter((d) => d.status === "normal").length;
     events.push({
-      id: base + 30, ts, kind: "ok", time: t,
-      text: `SYS: 정상 ${normal}건 · 위험 ${anoRes.anomalies.length}건 · 이상 의심 ${anoRes.watch.length}건 · 통신 장애 ${commOutage.length || offline.length}건`,
+      id: `aibatch:${sig}:sys`, ts, kind: "ok", time: t,
+      text: `SYS: 정상 ${normal}건 · 이상 ${anoRes.anomalies.length}건 · 관찰 ${anoRes.watch.length}건 · 통신 장애 ${commOutage.length || offline.length}건`,
       tail: "OK",
     });
 
@@ -513,6 +535,18 @@ export function App() {
     const id = setInterval(loadData, POLL_MS);
     return () => clearInterval(id);
   }, [loadData]);
+
+  // 공지(배너) 폴링 — 장비 로드와 분리(공지 실패가 대시보드 데이터에 영향 X)
+  useEffect(() => {
+    let alive = true;
+    const loadNotice = async () => {
+      try { const r = await fetchAnnouncement(); if (alive && r?.ok) setAnnouncement(r.announcement); }
+      catch { /* 유지: 실패 시 직전 값/중립 바 */ }
+    };
+    loadNotice();
+    const id = setInterval(loadNotice, POLL_MS);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
 
   // /api/health 폴링 — DB·Ollama 가동 상태 (SubNav 배지용)
   //   60초 간격 (loadData 와 같은 주기). DB 끊김도 자동 감지.
@@ -552,12 +586,22 @@ export function App() {
 
   // admin 권한 사라지면 users 탭에서 자동 빠져나감 (탭 보호)
   useEffect(() => {
-    if (tab === "users" && user?.role !== "admin") setTab("dashboard");
+    if (tab === "users" && user?.role !== "admin" && user?.role !== "superadmin") setTab("dashboard");
   }, [tab, user]);
 
   // 테마 적용
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", tweakState.theme || "light");
+  }, [tweakState.theme]);
+
+  // 지도 타일이 테마를 따라가게 — 다크 테마면 지도도 다크 타일 (위성 선택 시엔 유지).
+  // 의존성이 theme 뿐이라, 같은 테마 안에서의 수동 지도 토글(밝게/어둡게/위성)은 덮어쓰지 않는다.
+  useEffect(() => {
+    setTweakState((s) => {
+      if (s.mapStyle === "satellite") return s;
+      const want = s.theme === "dark" ? "dark" : "light";
+      return s.mapStyle === want ? s : { ...s, mapStyle: want };
+    });
   }, [tweakState.theme]);
 
   // Design-mode protocol (claude.ai/design iframe 연동)
@@ -581,6 +625,7 @@ export function App() {
     return (
       <Login
         prefillId={pendingId}
+        skipBoot={skipBoot}
         onLogin={(u) => { setUser(u); setPendingId(""); setScreen("app"); }}
         onSignUp={() => setScreen("signup")}
       />
@@ -589,7 +634,7 @@ export function App() {
   if (screen === "signup") {
     return (
       <SignUp
-        onSuccess={(newId) => { setPendingId(newId); setScreen("login"); }}
+        onSuccess={(id) => { setPendingId(id); setScreen("login"); }}
         onBackToLogin={() => setScreen("login")}
       />
     );
@@ -598,7 +643,7 @@ export function App() {
   return (
     <>
       <Header
-        onLogout={() => { signOut(); setUser(null); setScreen("login"); }}
+        onLogout={() => { signOut(); setUser(null); setSkipBoot(true); setScreen("login"); }}
         apiStatus={apiStatus}
         user={user}
         setUser={setUser}
@@ -615,39 +660,30 @@ export function App() {
         tab={tab}
         setTab={(k) => {
           // 비-admin 이 users 탭 진입 차단 (URL/state 보호)
-          if (k === "users" && user?.role !== "admin") return;
+          if (k === "users" && user?.role !== "admin" && user?.role !== "superadmin") return;
           setTab(k);
         }}
         apiStatus={apiStatus}
         dbStatus={dbStatus}
         dbInfo={dbInfo}
         user={user}
-        pendingCount={user?.role === "admin" ? (listPending(user).users?.length || 0) : 0}
         demoMode={demoMode}
         /* onToggleDemo 제거 — 헤더 설정창으로 이동 (옴니 5/22 피드백) */
       />
-      {bannerOpen && tab === "dashboard" && (() => {
-        const criticalDevices = (equipment || []).filter((e) => e.status === "critical");
-        if (criticalDevices.length === 0) return null;
-        return (
-          <EmergencyBanner
-            criticalDevices={criticalDevices}
-            onDismiss={() => setBannerOpen(false)}
-            /* onOpen 제거 (5/26) — Banner 의 액션은 추후 결정 */
-          />
-        );
-      })()}
+      {/* 상시 표시 공지 배너 — 관리자 공지(레벨별 색)가 있으면 그걸, 없으면 중립 바 (chrome.jsx EmergencyBanner) */}
+      {(tab === "dashboard" || announcement) && <EmergencyBanner announcement={announcement} />}
       {(() => {
-        const hasCritical = tab === "dashboard" && bannerOpen && (equipment || []).some((e) => e.status === "critical");
+        const bannerShown = tab === "dashboard" || !!announcement;   // 대시보드는 상시 / 그 외 탭은 공지 있을 때 배너 표시
         return (
           <div style={{
             position: "absolute", left: 0, right: 0,
-            top: hasCritical ? 144 : 104,
+            top: bannerShown ? 144 : 104,
             bottom: 0,
             transition: "top 220ms",
           }}>
         {tab === "dashboard" && (
           <Dashboard
+            user={user}
             /* onAnalyze 제거 (5/26) — AI 탐지 카드 클릭은 Dashboard 내부에서 챗봇 푸쉬 */
             mapStyle={tweakState.mapStyle}
             setMapStyle={setMapStyle}

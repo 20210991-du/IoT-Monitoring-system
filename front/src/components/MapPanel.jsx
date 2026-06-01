@@ -125,8 +125,8 @@ function makeClusterIcon(count, status = "mixed") {
 }
 
 const STATUS_DISPLAY = {
-  critical: { ko: "위험",      color: "#991b1b", bg: "rgba(220,38,38,0.12)",  bd: "rgba(220,38,38,0.3)"  },
-  warn:     { ko: "이상 의심", color: "#b45309", bg: "rgba(245,158,11,0.12)", bd: "rgba(245,158,11,0.3)" },
+  critical: { ko: "이상",      color: "#991b1b", bg: "rgba(220,38,38,0.12)",  bd: "rgba(220,38,38,0.3)"  },
+  warn:     { ko: "관찰",      color: "#b45309", bg: "rgba(245,158,11,0.12)", bd: "rgba(245,158,11,0.3)" },
   normal:   { ko: "정상",      color: "#047857", bg: "rgba(16,185,129,0.12)", bd: "rgba(16,185,129,0.3)" },
   offline:  { ko: "통신 장애", color: "#475569", bg: "rgba(100,116,139,0.12)", bd: "rgba(100,116,139,0.3)" },
 };

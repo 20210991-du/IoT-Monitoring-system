@@ -18,10 +18,11 @@ async function get(path) {
   return res.json();
 }
 
-export const fetchHealth    = () => get("/api/health");
-export const fetchDevices   = () => get("/api/devices");
-export const fetchAnomalies = () => get("/api/anomalies");
-export const fetchInsights  = () => get("/api/insights");
+export const fetchHealth       = () => get("/api/health");
+export const fetchDevices      = () => get("/api/devices");
+export const fetchAnomalies    = () => get("/api/anomalies");
+export const fetchInsights     = () => get("/api/insights");
+export const fetchAnnouncement = () => get("/api/announcement");   // 배너 공지 (공개 GET)
 
 export async function predictDevice(deviceId) {
   const res = await fetch(`${BASE}${withDemo(`/api/predict/${deviceId}`)}`, {

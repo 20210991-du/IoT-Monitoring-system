@@ -214,9 +214,11 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
   id                   BIGINT AUTO_INCREMENT PRIMARY KEY,
   user_id              BIGINT,
   title                VARCHAR(200),
+  pinned               TINYINT(1) NOT NULL DEFAULT 0,   -- 상단 고정 (ChatGPT 스타일 즐겨찾기)
   created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_chat_session_user (user_id)
+  INDEX idx_chat_session_user (user_id),
+  INDEX idx_chat_session_pinned (pinned)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS chat_messages (
