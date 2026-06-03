@@ -20,13 +20,13 @@ export const RULES = {
   ID_RE:    /^[A-Za-z0-9._-]{2,20}$/,
   PW_RE:    /^.{4,}$/,
   NAME_RE:  /^.{1,20}$/,
-  ROLES:    ["superadmin", "admin", "operator", "guest"], // viewer 제외 (superadmin=총관리자, 임명은 총관리자만 — 백엔드 강제)
+  ROLES:    ["superadmin", "admin", "operator", "guest"], // viewer 제외 (superadmin=총괄 관리자, 임명은 총괄 관리자만 — 백엔드 강제)
   STATUSES: ["active", "disabled"],
 };
 
 export const ROLE_LABEL = {
-  superadmin: "총관리자",
-  admin:    "관리자",
+  superadmin: "총괄 관리자",
+  admin:    "시원팀",
   operator: "관제사",
   viewer:   "뷰어",      // 레거시 계정 표시용 폴백 (신규 생성 불가)
   guest:    "게스트",
@@ -101,6 +101,16 @@ export async function signIn({ id, pw }) {
     return { ok: true, user: res.user };
   }
   return { ok: false, error: res.error || "로그인에 실패했습니다.", status: res.status };
+}
+
+/** 1회용(에페메럴) 로그인 — DB 계정 없이 viewer 둘러보기 세션. @returns {{ok:true,user}}|{{ok:false,error}} */
+export async function guestLogin() {
+  const res = await jpost("/api/auth/guest", {});
+  if (res.ok && res.user) {
+    cacheSession(res.user);
+    return { ok: true, user: res.user };
+  }
+  return { ok: false, error: res.error || "1회용 로그인에 실패했습니다." };
 }
 
 /** 로그아웃 — 서버 쿠키 무효화 + 캐시 제거. */
@@ -188,8 +198,14 @@ export async function adminUpdateUser(_actor, id, { name, role, memo, newPw }) {
 
 // ── 본인 계정 ─────────────────────────────────────────────
 
-export async function updateProfile(_actor, { name }) {
-  const res = await jpatch("/api/auth/profile", { name });
+export async function updateProfile(_actor, { name, bio, title, github, avatar }) {
+  // avatar: data URL(새 사진) | null(제거) | undefined(변경 안 함). bio/title/github 는 문자열.
+  const body = { name };
+  if (bio !== undefined) body.bio = bio;
+  if (title !== undefined) body.title = title;
+  if (github !== undefined) body.github = github;
+  if (avatar !== undefined) body.avatar = avatar;
+  const res = await jpatch("/api/auth/profile", body);
   if (res.ok && res.user) {
     cacheSession(res.user);
     return { ok: true, user: res.user };

@@ -21,6 +21,9 @@ const LAT_MIN = 35.80, LAT_MAX = 36.00, LNG_MIN = 126.45, LNG_MAX = 126.83;
 // 초기 지도 중심 — 군산 시청 부근 (대다수 단말 분포 중심)
 const MAP_INITIAL_CENTER = [35.96, 126.70];
 const MAP_INITIAL_ZOOM   = 11;
+// 줌·이동 제한 — 군산 운영 구역 밖(세계지도 등)으로 빠져나가지 않도록
+const MAP_MIN_ZOOM  = 9;   // 이 이상 줌아웃 불가 (전라북도 정도가 최대)
+const MAP_MAX_BOUNDS = [[35.20, 125.80], [36.60, 127.60]];  // 군산 중심 ±여유 경계
 function toLatLng(m) {
   if (m.lat != null && m.lng != null) return [m.lat, m.lng];
   return [
@@ -202,6 +205,7 @@ export function MapPanel({ markers, onMarker, mapStyle, focus, fitTrigger, bound
       center: MAP_INITIAL_CENTER,   // 군산 시청 부근 (5/20 수정 — 이전 서울 좌표 버그)
       zoom: MAP_INITIAL_ZOOM,
       zoomControl: false,
+      minZoom: MAP_MIN_ZOOM,                     // 최소 줌 — 세계지도 방지 (이동은 자유, 줌아웃만 제한)
     });
     mapRef.current = map;
 

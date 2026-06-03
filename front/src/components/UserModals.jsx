@@ -7,6 +7,7 @@ import {
   ROLE_LABEL,
   STATUS_LABEL,
 } from "../lib/authMock.js";
+import { imageFileToDataURL } from "../lib/image.js";
 
 /* ── 사용자 본인 모달: 내 정보 (프로필 / 비밀번호 탭) ──────
  *  Header 드롭다운에서 두 가지 진입:
@@ -62,8 +63,8 @@ export function ProfileModal({ user, onClose, onUpdate, defaultTab = "profile" }
             display: "grid", placeItems: "center",
             color: "#fff", fontWeight: 800, fontSize: 18,
             boxShadow: "0 6px 16px -4px rgba(0,0,0,0.18)",
-            flexShrink: 0,
-          }}>{initial}</div>
+            flexShrink: 0, overflow: "hidden",
+          }}>{user?.avatar ? <img src={user.avatar} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : initial}</div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ink)" }}>
               {user?.id}
@@ -140,12 +141,28 @@ function TabBtn({ k, cur, set, icon, label }) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function ProfileTab({ user, fullRecord, onClose, onUpdate }) {
   const [name, setName] = useState(user?.name || "");
+  const [bio, setBio] = useState(user?.bio || "");
+  const [title, setTitle] = useState(user?.title || "");
+  const [github, setGithub] = useState(user?.github || "");
+  const [avatar, setAvatar] = useState(user?.avatar || null);   // data URL | null
+  const [avatarBusy, setAvatarBusy] = useState(false);
   const [errors, setErrors] = useState({});
   const [globalError, setGlobalError] = useState("");
   const [saving, setSaving] = useState(false);
   const [savedTick, setSavedTick] = useState(false);
 
-  const dirty = (name !== user?.name);
+  const grad = ROLE_GRAD[user?.role] || ROLE_GRAD.operator;
+  const avatarChanged = (avatar || null) !== (user?.avatar || null);
+  const dirty = name !== user?.name || bio !== (user?.bio || "") || title !== (user?.title || "") || github !== (user?.github || "") || avatarChanged;
+
+  const onPickAvatar = async (e) => {
+    const f = (e.target.files || [])[0]; e.target.value = "";
+    if (!f) return;
+    setGlobalError(""); setAvatarBusy(true);
+    try { const d = await imageFileToDataURL(f, { max: 256, square: true, mime: "image/jpeg", quality: 0.85 }); setAvatar(d); }
+    catch (err) { setGlobalError(err.message || "이미지 처리에 실패했습니다."); }
+    finally { setAvatarBusy(false); }
+  };
 
   const submit = (e) => {
     e && e.preventDefault();
@@ -153,7 +170,7 @@ function ProfileTab({ user, fullRecord, onClose, onUpdate }) {
     if (!dirty) { onClose(); return; }
     setSaving(true);
     setTimeout(async () => {
-      const res = await updateProfile(user, { name });
+      const res = await updateProfile(user, { name, bio, title, github, avatar: avatarChanged ? avatar : undefined });
       setSaving(false);
       if (!res.ok) {
         if (res.field) setErrors({ [res.field]: res.error });
@@ -168,6 +185,25 @@ function ProfileTab({ user, fullRecord, onClose, onUpdate }) {
 
   return (
     <form onSubmit={submit} style={{ padding: "18px 20px 6px" }}>
+      {/* 프로필 사진(아바타) — 업로드 시 정사각 크롭·256px·재인코딩(살균) */}
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+        <div style={{ width: 64, height: 64, borderRadius: "50%", overflow: "hidden", flexShrink: 0, background: grad, display: "grid", placeItems: "center", color: "#fff", fontWeight: 800, fontSize: 22 }}>
+          {avatar
+            ? <img src={avatar} alt="프로필" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            : (user?.name?.trim()?.[0] || "U").toUpperCase()}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 12px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg-elev)", color: "var(--ink-2)", fontSize: 12, fontWeight: 700, cursor: avatarBusy ? "default" : "pointer" }}>
+              <Icons.user size={12} />{avatarBusy ? "처리 중…" : (avatar ? "사진 변경" : "사진 업로드")}
+              <input type="file" accept="image/png,image/jpeg,image/webp" disabled={avatarBusy} style={{ display: "none" }} onChange={onPickAvatar} />
+            </label>
+            {avatar && <button type="button" onClick={() => setAvatar(null)} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid var(--line)", background: "transparent", color: "var(--ink-3)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>제거</button>}
+          </div>
+          <span style={{ fontSize: 10.5, color: "var(--ink-4)" }}>PNG·JPG·WEBP · 정사각 자동 크롭</span>
+        </div>
+      </div>
+
       <FormField
         label="이름"
         error={errors.name}
@@ -184,6 +220,18 @@ function ProfileTab({ user, fullRecord, onClose, onUpdate }) {
       <FormField label="ID" icon={<Icons.user size={14} />}>
         <input value={user?.id || ""} readOnly style={{ ...fieldInput, color: "var(--ink-3)" }} />
         <span style={{ fontSize: 10, color: "var(--ink-4)", paddingRight: 4, whiteSpace: "nowrap" }}>변경 불가</span>
+      </FormField>
+
+      <FormField label="직무·소속" icon={<Icons.briefcase size={14} />}>
+        <input value={title} onChange={(e) => setTitle(e.target.value.slice(0, 60))} placeholder="예: AI 모델 개발 · 대시보드 담당" style={fieldInput} />
+      </FormField>
+
+      <FormField label="한 줄 소개" icon={<Icons.sparkle size={14} />}>
+        <input value={bio} onChange={(e) => setBio(e.target.value.slice(0, 200))} placeholder="간단한 자기소개" style={fieldInput} />
+      </FormField>
+
+      <FormField label="GitHub·링크" error={errors.github} icon={<Icons.search size={14} />}>
+        <input value={github} onChange={(e) => { setGithub(e.target.value.trim()); if (errors.github) setErrors((s) => ({ ...s, github: undefined })); }} placeholder="https://github.com/username" style={fieldInput} />
       </FormField>
 
       <div style={{

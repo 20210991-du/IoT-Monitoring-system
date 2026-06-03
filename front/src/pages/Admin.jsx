@@ -42,6 +42,12 @@ function fmtDate(iso) {
   const d = new Date(iso);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
+// 초 단위까지 (마지막 로그인 시각용)
+function fmtDateSec(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso); const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 
 // 관리자 sub-tab 정의 (드래그로 순서 변경 — 순서는 localStorage 저장)
 const TAB_DEFS = [
@@ -49,7 +55,7 @@ const TAB_DEFS = [
   { k: "notice",    label: "공지사항" },
   { k: "chatbot",   label: "챗봇 통계" },
   { k: "inq_admin", label: "상담원 문의함" },
-  { k: "inq_dev",   label: "개발자 문의함" },
+  { k: "personas",  label: "봇 페르소나" },
   { k: "tokens",    label: "토큰 사용량" },
   { k: "loginlog",  label: "로그인 로그" },
   { k: "settings",  label: "시스템 설정" },
@@ -112,7 +118,7 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
     return () => clearTimeout(id);
   }, [toast]);
 
-  if (!user || (user.role !== "admin" && user.role !== "superadmin")) {
+  if (!user || (user.role !== "admin" && user.role !== "superadmin" && user.role !== "viewer" && user.role !== "guest")) {
     return (
       <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "var(--ink-3)" }}>
         관리자 권한이 필요합니다.
@@ -120,6 +126,7 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
     );
   }
 
+  const readOnly = user.role === "viewer" || user.role === "guest";   // 뷰어·게스트 = 읽기 전용 관람 (편집 컨트롤 비활성 + 백엔드도 쓰기 차단, 이중 안전)
   const counts = {
     pending:  users.filter((u) => u.status === "pending").length,
     active:   users.filter((u) => u.status === "active").length,
@@ -140,7 +147,6 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
               사용자 관리 · AI 사용량 통계 · 시스템 설정
             </div>
           </div>
-          <AdminBadge user={user} />
         </div>
 
         <div style={{ display: "flex", gap: 4, borderBottom: "1px solid var(--line)" }}>
@@ -165,6 +171,13 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
 
       {/* ── 섹션 컨텐츠 ── */}
       <div style={{ flex: 1, overflow: "auto", padding: "20px 32px 32px" }}>
+        {readOnly && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "10px 14px", borderRadius: 10, background: "rgba(100,116,139,0.12)", border: "1px solid rgba(100,116,139,0.28)", color: "var(--ink-2)", fontSize: 12.5, fontWeight: 600 }}>
+            👁️ 읽기 전용(뷰어) — 모든 내용을 볼 수 있지만 편집·삭제·전송은 할 수 없습니다.
+          </div>
+        )}
+        {/* 뷰어면 fieldset disabled 로 내부 모든 폼 컨트롤(버튼·입력·선택) 비활성. 백엔드도 쓰기 차단(이중 안전). 탭 네비는 헤더에 있어 영향 없음. */}
+        <fieldset disabled={readOnly} style={{ border: "none", margin: 0, padding: 0, minInlineSize: 0 }}>
         {section === "operators" && (
           <OperatorsSection
             user={user} users={users} counts={counts}
@@ -180,8 +193,8 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
         {section === "inq_admin" && (
           <InquiriesSection channel="admin" setToast={setToast} />
         )}
-        {section === "inq_dev" && (
-          <InquiriesSection channel="developer" setToast={setToast} />
+        {section === "personas" && (
+          <BotPersonasSection setToast={setToast} />
         )}
         {section === "tokens" && (
           <TokenUsageSection />
@@ -192,9 +205,160 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
         {section === "settings" && (
           <SettingsSection apiStatus={apiStatus} setToast={setToast} />
         )}
+        </fieldset>
       </div>
 
       {toast && <Toast toast={toast} />}
+    </div>
+  );
+}
+
+// ── 봇 페르소나 설정 (on/off·키워드·모델·프롬프트 편집 — 재시작 없이 즉시 반영) ──
+const PERSONA_MODEL_OPTS = [
+  { v: "", label: "기본 (로컬 Qwen3.5:9b · 무료)" },
+  { v: "qwen3.5:9b", label: "로컬 Qwen3.5:9b (무료)" },
+  { v: "gpt-4o-mini", label: "GPT-4o mini (외부 · 소액 비용)" },
+  { v: "gpt-4o", label: "GPT-4o (외부 · 고비용)" },
+];
+const PERSONA_LOUNGE_KEYS = ["park", "lee_jaeheon", "lee_duhyeon"];
+function BotPersonasSection({ setToast }) {
+  const [items, setItems] = useState([]);
+  const [drafts, setDrafts] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [savingKey, setSavingKey] = useState(null);
+
+  const load = useCallback(async () => {
+    try { const r = await fetch("/api/admin/bot-personas").then((x) => x.json()); if (r.ok) setItems(r.personas || []); }
+    catch { /* ignore */ }
+    setLoading(false);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const val = (p, f) => (drafts[p.persona_key]?.[f] !== undefined ? drafts[p.persona_key][f] : (p[f] ?? ""));
+  const setField = (key, f, v) => setDrafts((d) => ({ ...d, [key]: { ...d[key], [f]: v } }));
+  const dirty = (key) => !!drafts[key] && Object.keys(drafts[key]).length > 0;
+  const clearDraft = (key) => setDrafts((d) => { const n = { ...d }; delete n[key]; return n; });
+
+  const patch = async (key, body) => {
+    const r = await fetch(`/api/admin/bot-personas/${key}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((x) => x.json());
+    if (!r.ok) throw new Error(r.error || "저장 실패");
+    return r.persona;
+  };
+  const toggleEnabled = async (p) => {
+    try {
+      const next = p.enabled ? 0 : 1;
+      const updated = await patch(p.persona_key, { enabled: next });
+      setItems((arr) => arr.map((x) => (x.persona_key === p.persona_key ? (updated || { ...x, enabled: next }) : x)));
+      setToast && setToast({ kind: "ok", text: `${p.name} ${next ? "켜짐" : "꺼짐"}` });
+    } catch (e) { setToast && setToast({ kind: "err", text: e.message }); }
+  };
+  const save = async (p) => {
+    const key = p.persona_key;
+    if (!dirty(key)) return;
+    setSavingKey(key);
+    try {
+      const updated = await patch(key, drafts[key]);
+      setItems((arr) => arr.map((x) => (x.persona_key === key ? (updated || { ...x, ...drafts[key] }) : x)));
+      clearDraft(key);
+      setToast && setToast({ kind: "ok", text: `${p.name} 저장됨` });
+    } catch (e) { setToast && setToast({ kind: "err", text: e.message }); }
+    finally { setSavingKey(null); }
+  };
+
+  const inp = { width: "100%", padding: "7px 9px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg-elev)", color: "var(--ink)", fontSize: 12.5, outline: "none", fontFamily: "inherit", boxSizing: "border-box" };
+  const lbl = { fontSize: 11, fontWeight: 700, color: "var(--ink-3)", marginBottom: 4, display: "block" };
+
+  if (loading) return <div style={{ color: "var(--ink-4)", fontSize: 13, padding: "24px 0" }}>불러오는 중…</div>;
+
+  return (
+    <div style={{ maxWidth: 920 }}>
+      <div style={{ fontSize: 13, color: "var(--ink-3)", marginBottom: 4, lineHeight: 1.6 }}>
+        AI 봇 페르소나를 켜고/끄거나 <b>키워드(자동 라우팅)·모델·시스템 프롬프트</b>를 편집합니다. 저장하면 <b>재시작 없이 즉시</b> 반영돼요.
+      </div>
+      <div style={{ fontSize: 11.5, color: "var(--ink-4)", marginBottom: 16, lineHeight: 1.6 }}>
+        · 공통 안전수칙(비밀번호·접속정보·개인정보 노출 금지, 근거 밖 추측 금지)은 프롬프트와 별개로 <b>항상 적용</b>됩니다.<br />
+        · GPT 모델 선택 시 공개 LLM 호출로 <b>외부 비용</b>이 발생합니다(기본 로컬은 무료).
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {items.map((p) => {
+          const isLounge = PERSONA_LOUNGE_KEYS.includes(p.persona_key);
+          const on = !!p.enabled;
+          const d = dirty(p.persona_key);
+          return (
+            <div key={p.persona_key} style={{ border: "1px solid var(--line)", borderRadius: 14, padding: 16, background: "var(--bg-elev)", opacity: on ? 1 : 0.72 }}>
+              {/* 헤더 — 아바타 · 이름 · key · on/off */}
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+                {p.avatar
+                  ? <img src={p.avatar} alt="" style={{ width: 38, height: 38, borderRadius: "50%", objectFit: "cover", flexShrink: 0, border: "1px solid var(--line)" }} />
+                  : <div style={{ width: 38, height: 38, borderRadius: "50%", background: "var(--bg-sunk)", flexShrink: 0 }} />}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <input value={val(p, "name")} onChange={(e) => setField(p.persona_key, "name", e.target.value)}
+                    style={{ ...inp, fontWeight: 800, fontSize: 14, padding: "4px 8px" }} />
+                  <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 3, fontFamily: "JetBrains Mono, ui-monospace, monospace" }}>
+                    {p.persona_key}{isLounge && " · 공개문의 페르소나"}
+                  </div>
+                </div>
+                <button onClick={() => toggleEnabled(p)} title={on ? "끄기" : "켜기"} style={{
+                  flexShrink: 0, padding: "6px 14px", borderRadius: 999, border: "none", cursor: "pointer",
+                  fontSize: 12, fontWeight: 800, color: "#fff", background: on ? "var(--ok)" : "var(--ink-4)",
+                }}>{on ? "ON" : "OFF"}</button>
+              </div>
+
+              {/* 필드 그리드 */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label style={lbl}>담당 분야 (lane)</label>
+                  <input value={val(p, "lane")} onChange={(e) => setField(p.persona_key, "lane", e.target.value)} style={inp} />
+                </div>
+                <div>
+                  <label style={lbl}>모델</label>
+                  <select value={val(p, "model")} onChange={(e) => setField(p.persona_key, "model", e.target.value)} style={{ ...inp, cursor: "pointer" }}>
+                    {PERSONA_MODEL_OPTS.map((o) => <option key={o.v} value={o.v}>{o.label}</option>)}
+                  </select>
+                </div>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <div style={{ width: 90 }}>
+                    <label style={lbl}>정렬 순서</label>
+                    <input type="number" value={val(p, "sort_order")} onChange={(e) => setField(p.persona_key, "sort_order", e.target.value)} style={inp} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={lbl}>대표 답변자{isLounge ? "" : " (공개문의용)"}</label>
+                    <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--ink)", cursor: "pointer", padding: "6px 0" }}>
+                      <input type="checkbox" checked={!!val(p, "is_fallback")} onChange={(e) => setField(p.persona_key, "is_fallback", e.target.checked ? 1 : 0)} />
+                      애매한 질문 fallback
+                    </label>
+                  </div>
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label style={lbl}>키워드 (쉼표로 구분 — 자동 라우팅 점수에 사용)</label>
+                  <textarea value={val(p, "keywords")} onChange={(e) => setField(p.persona_key, "keywords", e.target.value)} rows={2}
+                    style={{ ...inp, resize: "vertical", lineHeight: 1.5 }} />
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label style={lbl}>시스템 프롬프트 (페르소나 지시문 — 공통 안전수칙은 별도로 항상 적용됨)</label>
+                  <textarea value={val(p, "system_prompt")} onChange={(e) => setField(p.persona_key, "system_prompt", e.target.value)} rows={6}
+                    style={{ ...inp, resize: "vertical", lineHeight: 1.55, fontSize: 12 }} />
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label style={lbl}>연락 이메일</label>
+                  <input value={val(p, "contact_email")} onChange={(e) => setField(p.persona_key, "contact_email", e.target.value)} style={inp} placeholder="(없음)" />
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <button onClick={() => save(p)} disabled={!d || savingKey === p.persona_key} style={{
+                  padding: "8px 18px", borderRadius: 9, border: "none", cursor: d ? "pointer" : "not-allowed",
+                  fontSize: 12.5, fontWeight: 800, color: "#fff",
+                  background: d ? "var(--brand)" : "var(--line)", opacity: savingKey === p.persona_key ? 0.6 : 1,
+                }}>{savingKey === p.persona_key ? "저장 중…" : "저장"}</button>
+                {d && <span style={{ fontSize: 11.5, color: "var(--ink-4)" }}>변경됨 — 저장 시 즉시 반영</span>}
+                {d && <button onClick={() => clearDraft(p.persona_key)} style={{ border: "none", background: "transparent", color: "var(--ink-4)", cursor: "pointer", fontSize: 11.5, marginLeft: "auto" }}>되돌리기</button>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -416,7 +580,7 @@ function AdminBadge({ user }) {
       fontSize: 11, fontWeight: 700, color: "#7c3aed",
     }}>
       <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#8b5cf6" }} />
-      관리자 · {user.id}
+      {ROLE_LABEL[user.role] || user.role} · {user.id}
     </div>
   );
 }
@@ -573,7 +737,7 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
   const [memoErr, setMemoErr]         = useState("");
   const [editTarget, setEditTarget]   = useState(null);    // 수정 대상 사용자
   const [eName, setEName] = useState("");
-  const [eRole, setERole] = useState("operator");
+  const [eRole, setERole] = useState("viewer");
   const [eMemo, setEMemo] = useState("");
   const [ePw, setEPw]     = useState("");
   const [eErr, setEErr]   = useState("");
@@ -582,27 +746,36 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
   const [showCreate, setShowCreate] = useState(false);
   const [cId, setCId]     = useState("");
   const [cName, setCName] = useState("");
-  const [cRole, setCRole] = useState("operator");
+  const [cRole, setCRole] = useState("viewer");
   const [cPw, setCPw]     = useState("");
   const [cMemo, setCMemo] = useState("");
   const [cErr, setCErr]   = useState("");
   const [createdCred, setCreatedCred] = useState(null); // {id, pw, name} — 등록 직후 1회 표시
 
   const filtered = useMemo(() => {
-    let list = filter === "all" ? users : users.filter((u) => u.status === filter);
+    let list = filter === "all" ? users : users.filter((u) => u.role === filter);   // 역할별 필터
     const q = search.trim().toLowerCase();
     if (q) {
       list = list.filter((u) =>
         [u.id, u.name].some((v) => (v || "").toLowerCase().includes(q))
       );
     }
+    const roleOrder = { superadmin: 0, admin: 1, viewer: 2, guest: 3 };
     return list.slice().sort((a, b) => {
-      const order = { pending: 0, active: 1, rejected: 2 };
-      const o = (order[a.status] || 9) - (order[b.status] || 9);
+      const o = (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9);   // 역할별 정렬: 총괄 관리자 → 관리자 → 뷰어 → 게스트
       if (o !== 0) return o;
-      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();   // 같은 역할 내 등록일 순
     });
   }, [users, filter, search]);
+
+  // 역할별 필터 태그 (전체 + 존재하는 역할만, 각 카운트 포함)
+  const filterTags = useMemo(() => {
+    const byRole = users.reduce((a, u) => { a[u.role] = (a[u.role] || 0) + 1; return a; }, {});
+    return [
+      { k: "all", ko: "전체", cnt: users.length },
+      ...["superadmin", "admin", "viewer", "guest"].filter((r) => byRole[r]).map((r) => ({ k: r, ko: ROLE_LABEL[r] || r, cnt: byRole[r] })),
+    ];
+  }, [users]);
 
   const openReset = (t) => {
     setResetTarget(t);
@@ -638,7 +811,7 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
     setMemoTarget(null); setMemoText(""); setMemoErr("");
     reload();
   };
-  const openEdit = (u) => { setEditTarget(u); setEName(u.name || ""); setERole(u.role || "operator"); setEMemo(u.memo || ""); setEPw(""); setEErr(""); setEDone(null); };
+  const openEdit = (u) => { setEditTarget(u); setEName(u.name || ""); setERole(u.role || "viewer"); setEMemo(u.memo || ""); setEPw(""); setEErr(""); setEDone(null); };
   const closeEdit = () => { setEditTarget(null); setEName(""); setEMemo(""); setEPw(""); setEErr(""); setEDone(null); };
   const genEditPw = () => {
     const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -685,8 +858,9 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
           { label: "전체", value: counts.all, fg: "var(--brand)" },
           { label: "활성", value: counts.active, fg: "var(--ok)" },
           { label: "대기", value: counts.pending, fg: "var(--warn)" },
-          { label: "관리자", value: byRole.admin || 0, fg: "var(--ink-2)" },
-          { label: "관제사", value: byRole.operator || 0, fg: "var(--ink-2)" },
+          { label: "총괄 관리자", value: byRole.superadmin || 0, fg: "var(--ink-2)" },
+          { label: "시원팀", value: byRole.admin || 0, fg: "var(--ink-2)" },
+          { label: "뷰어", value: byRole.viewer || 0, fg: "var(--ink-2)" },
           { label: "게스트", value: byRole.guest || 0, fg: "var(--ink-2)" },
         ];
         return (
@@ -701,10 +875,10 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
         );
       })()}
       {/* 사용자 등록 — 관리자 직접 생성 (즉시 활성) */}
-      <div style={{ marginBottom: 14, padding: 14, borderRadius: 12, background: "var(--bg-elev)", border: "1px solid var(--line)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: showCreate ? 12 : 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>
-            사용자 등록 <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-3)" }}>— 관리자가 직접 계정 생성 · 즉시 활성 (공개 가입 없음)</span>
+      <div style={{ marginBottom: 10, padding: "8px 12px", borderRadius: 12, background: "var(--bg-elev)", border: "1px solid var(--line)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: showCreate ? 12 : 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            사용자 등록 {showCreate && <span style={{ fontSize: 11, fontWeight: 500, color: "var(--ink-3)" }}>— 관리자가 직접 계정 생성 · 즉시 활성 · 역할 지정 (공개 가입은 뷰어로 생성)</span>}
           </div>
           <button type="button" onClick={() => { setShowCreate((v) => !v); setCErr(""); setCreatedCred(null); }}
             style={{ padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700,
@@ -726,7 +900,7 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
               역할
               <select value={cRole} onChange={(e) => setCRole(e.target.value)}
                 style={{ height: 34, width: 120, padding: "0 8px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--ink)", fontSize: 13 }}>
-                {Object.entries(ROLE_LABEL).filter(([k]) => k !== "viewer").map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                {Object.entries(ROLE_LABEL).filter(([k]) => ["superadmin", "admin", "viewer", "guest"].includes(k)).map(([k, v]) => <option key={k} value={k} disabled={k === "guest"}>{v}</option>)}
               </select>
             </label>
             <button type="button" onClick={genCreatePw}
@@ -754,9 +928,9 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
       {/* 필터 + 검색 */}
       <div style={{ display: "flex", gap: 10, marginBottom: 14, alignItems: "center" }}>
         <div style={{ display: "flex", gap: 6 }}>
-          {FILTERS.map((f) => {
+          {filterTags.map((f) => {
             const active = filter === f.k;
-            const cnt = counts[f.k];
+            const cnt = f.cnt;
             return (
               <button
                 key={f.k}
@@ -807,16 +981,17 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
       }}>
         <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
           <colgroup>
-            <col style={{ width: "16%" }} />
-            <col style={{ width: "18%" }} />
-            <col style={{ width: "12%" }} />
-            <col style={{ width: "18%" }} />
-            <col style={{ width: "16%" }} />
-            <col style={{ width: "20%" }} />
+            <col style={{ width: "15%" }} />
+            <col style={{ width: "14%" }} />
+            <col style={{ width: "10%" }} />
+            <col style={{ width: "15%" }} />
+            <col style={{ width: "15%" }} />
+            <col style={{ width: "17%" }} />
+            <col style={{ width: "14%" }} />
           </colgroup>
           <thead>
             <tr style={{ background: "var(--bg)", borderBottom: "1px solid var(--line)" }}>
-              {["ID", "이름", "역할", "메모", "등록일", "처리"].map((h) => (
+              {["ID", "이름", "역할", "메모", "등록일", "마지막 로그인", "처리"].map((h) => (
                 <th key={h} style={{
                   padding: "11px 14px", textAlign: "left",
                   fontSize: 11, fontWeight: 700, letterSpacing: "0.04em",
@@ -827,7 +1002,7 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
           </thead>
           <tbody>
             {filtered.length === 0 && (
-              <tr><td colSpan={6} style={{ padding: "48px 14px", textAlign: "center", color: "var(--ink-3)", fontSize: 13 }}>
+              <tr><td colSpan={7} style={{ padding: "48px 14px", textAlign: "center", color: "var(--ink-3)", fontSize: 13 }}>
                 표시할 사용자가 없습니다.
               </td></tr>
             )}
@@ -840,7 +1015,7 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
                 }}>
                   <td style={{ padding: "10px 14px", fontSize: 13, color: "var(--ink)", fontWeight: 600 }}>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                      <img src={ROLE_AVATAR[u.role] || "/avatars/guest.png"} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", flexShrink: 0, border: "1px solid var(--line)" }} />
+                      <img src={u.avatar || ROLE_AVATAR[u.role] || "/avatars/guest.png"} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", flexShrink: 0, border: "1px solid var(--line)" }} />
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {u.id}
                         {u.id === user.id && <span style={{ fontSize: 10, fontWeight: 700, color: "var(--brand)", marginLeft: 6 }}>(나)</span>}
@@ -859,10 +1034,17 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
                   <td style={{ padding: "10px 14px", fontSize: 12, color: "var(--ink-3)" }}>
                     {fmtDate(u.createdAt)}
                   </td>
+                  <td style={{ padding: "10px 14px", fontSize: 11.5, color: u.lastLoginAt ? "var(--ink-2)" : "var(--ink-4)", fontFamily: "JetBrains Mono, ui-monospace, monospace" }}>
+                    {fmtDateSec(u.lastLoginAt)}
+                  </td>
                   <td style={{ padding: "10px 14px" }}>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <ActionButton tone="brand" icon={<Icons.pencil size={13} />} label="수정" onClick={() => openEdit(u)} />
-                    </div>
+                    {u.role === "guest" ? (
+                      <span style={{ fontSize: 11, color: "var(--ink-4)" }}>—</span>   /* 게스트 계정은 처리(수정/삭제) 불가 — 버튼 제거 */
+                    ) : (
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <ActionButton tone="brand" icon={<Icons.pencil size={13} />} label="수정" onClick={() => openEdit(u)} />
+                      </div>
+                    )}
                   </td>
                 </tr>
               );
@@ -1145,7 +1327,7 @@ function EditUserModal({ target, name, setName, role, setRole, memo, setMemo, pw
                 역할
                 <select value={role} onChange={(e) => setRole(e.target.value)}
                   style={{ height: 36, padding: "0 8px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--ink)", fontSize: 13 }}>
-                  {Object.entries(ROLE_LABEL).filter(([k]) => k !== "viewer").map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                  {Object.entries(ROLE_LABEL).filter(([k]) => ["superadmin", "admin", "viewer", "guest"].includes(k)).map(([k, v]) => <option key={k} value={k} disabled={k === "guest"}>{v}</option>)}
                 </select>
               </label>
               <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, fontWeight: 600, color: "var(--ink-3)" }}>
