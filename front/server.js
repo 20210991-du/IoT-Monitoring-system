@@ -15,14 +15,14 @@
 
 import express from "express";
 import helmet from "helmet";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import path from "path";
-import { readFileSync, existsSync, createWriteStream } from "fs";
+import { readFileSync, existsSync, readdirSync, createWriteStream } from "fs";
 import { fileURLToPath } from "url";
 import mysql from "mysql2/promise";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { randomBytes, randomInt } from "crypto";
+import { randomBytes, randomInt, createHash } from "crypto";
 import { WebSocketServer } from "ws";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -76,6 +76,7 @@ function classifyMse(deviceId, mse) {
 const PORT         = process.env.PORT          || 5050;
 const OLLAMA_URL   = process.env.OLLAMA_URL    || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "qwen3.5:9b";
+const KEEP_ALIVE   = process.env.OLLAMA_KEEP_ALIVE || "30m";   // 모델 메모리 상주 시간 — 콜드스타트(매 요청 모델 로딩) 방지
 // UI 에서 선택 가능한 챗봇 모델 화이트리스트 (그 외 값은 기본 모델로 폴백 — 안전)
 const SELECTABLE_MODELS = ["qwen3.5:9b", "qwen3:14b", "qwen3.5:27b", "gpt-4o-mini", "gpt-5", "gpt-5.5"];
 const pickModel = (m) => (SELECTABLE_MODELS.includes(m) ? m : OLLAMA_MODEL);
@@ -96,11 +97,8 @@ const SITE_ID       = parseInt(process.env.SITE_ID || "2", 10);  // 군산도시
 //   토글 OFF 시 흔적 제로 / ON 시 KPI·지도·표·챗봇 모두에 추가 표시.
 //   클라이언트: GET ?demo=1 또는 POST body { demo: true }
 // ─────────────────────────────────────────────────────
-function isDemoMode(req) {
-  if (!req) return false;
-  if (req.query && String(req.query.demo) === "1") return true;
-  if (req.body && req.body.demo === true) return true;
-  return false;
+function isDemoMode(_req) {
+  return false;   // 데모 모드 제거(2026-06-02) — 항상 false. 모든 데모 분기 비활성(재현 불가). 죽은 DEMO_* 데이터는 추후 청소.
 }
 
 // 시간 마커 — lastMeasured 가 호출 시점 기준 N시간 전 timestamp 가 되도록
@@ -221,7 +219,7 @@ app.use(helmet({ contentSecurityPolicy: false }));  // CSP off — 인라인 스
 app.use(rateLimit({
   windowMs: 60_000,
   max: 300,                                          // 방문자당 분당 300 (대시보드 폴링 ~20-30/min 대비 넉넉)
-  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip,
+  keyGenerator: (req) => ipKeyGenerator(req.headers["cf-connecting-ip"] || req.ip),
   skip: (req) => req.path.startsWith("/assets"),     // 정적 에셋 제외
   standardHeaders: true,
   legacyHeaders: false,
@@ -273,18 +271,104 @@ async function ensureGuestbookSchema() {
       user_id INT NULL,
       display_name VARCHAR(40) NOT NULL,
       role VARCHAR(20) NULL,
-      body VARCHAR(500) NOT NULL,
+      body MEDIUMTEXT NOT NULL,
       ip VARCHAR(45) NULL,
       ua VARCHAR(255) NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       deleted_at DATETIME NULL,
+      bot_key VARCHAR(40) NULL,
       INDEX idx_gb_created (created_at),
       INDEX idx_gb_active (deleted_at, id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+    try { await pool.query("ALTER TABLE guestbook_messages ADD COLUMN bot_key VARCHAR(40) NULL"); } catch (e) { /* 이미 존재 */ }
+    try { await pool.query("ALTER TABLE guestbook_messages MODIFY body MEDIUMTEXT NOT NULL"); } catch (e) { /* 봇 답변 길이 대응 */ }
+    try { await pool.query("ALTER TABLE guestbook_messages ADD COLUMN image MEDIUMTEXT NULL"); } catch (e) { /* 이미 존재 — 사진 첨부 (data URL, 단일) */ }
     console.log("▶ 방명록  guestbook_messages 테이블 준비됨");
   } catch (e) { console.error("✗ 방명록 스키마 생성 실패:", e.message); }
 }
 ensureGuestbookSchema();
+
+// users 프로필 확장 컬럼(자기소개·직무·링크·커스텀 아바타) — users 테이블은 외부 생성이라 부팅 시 ALTER 로 보강(이미 있으면 무시)
+async function ensureUserProfileColumns() {
+  if (!pool) return;
+  const cols = [
+    ["bio", "VARCHAR(200) NULL"],       // 한 줄 자기소개
+    ["title", "VARCHAR(60) NULL"],      // 직무/소속
+    ["github", "VARCHAR(200) NULL"],    // GitHub/포트폴리오 링크(https)
+    ["avatar", "MEDIUMTEXT NULL"],      // 커스텀 아바타(살균된 data URL)
+  ];
+  for (const [name, def] of cols) {
+    try { await pool.query(`ALTER TABLE users ADD COLUMN ${name} ${def}`); } catch (e) { /* 이미 존재 */ }
+  }
+  console.log("▶ 사용자  프로필 컬럼(bio·title·github·avatar) 준비됨");
+}
+ensureUserProfileColumns();
+
+// ── 봇 페르소나(시원팀 공개문의 + 관제도우미·상담원) — 관리자 편집(DB). 부팅 시 테이블 보장 + 비어있으면 seed + 메모리 로드. ──
+// 시스템프롬프트는 페르소나-특화 부분만 저장(공통 grounding·규칙은 답변 시 주입). 이재헌·이두현은 본인 동의 전까지 enabled=0.
+let BOT_PERSONAS = [];
+const BOT_PERSONA_SEED = [
+  { key: "control_assistant", name: "AI 관제 도우미", avatar: "/chatbot.png", tone: "정확·전문적·간결, 존댓말",
+    lane: "실시간 운영 관제(단말 상태·KPI·이상탐지·도메인)", keywords: "상태,KPI,단말,장비,알람,위험,정상,통신,방식전위,AC,온도,습도,지도,위치",
+    model: "", is_fallback: 0, enabled: 1, sort: 0, email: "",
+    prompt: "너는 'AI 관제 도우미' — 매설 가스배관 통합관제의 실시간 운영 보조 AI. 운영자(관제사)에게 단말 상태·KPI·이상탐지·도메인 질문에 답한다. 도구로 실DB를 조회하며 숫자는 추측하지 말고 도구로 확인한다(환각 금지). 프로젝트를 '어떻게 만들었나'(개발/팀) 질문은 '시원팀 공개문의'로, 일반 문의는 '상담원'으로 안내." },
+  { key: "agent", name: "상담원", avatar: "/avatars/agent.png", tone: "친근·공손, 안내 중심",
+    lane: "일반 문의/안내·접수", keywords: "문의,이용,사용법,안내,연락,접수,버그,오류,건의,계정,로그인",
+    model: "", is_fallback: 0, enabled: 1, sort: 1, email: "",
+    prompt: "너는 '상담원' — 시원팀 서비스 안내 상담원. 일반 문의(서비스 소개·이용법·연락·기타)를 친절히 응대하고, 답하기 어렵거나 확인이 필요하면 관리자에게 전달(에스컬레이션)한다. 실시간 단말 데이터는 'AI 관제 도우미', 개발/기술 깊은 질문은 '시원팀 공개문의'로 안내." },
+  { key: "park", name: "AI 박지훈", avatar: "/avatars/park.png", tone: "차분·기술적, 군더더기 없이",
+    lane: "대시보드·프론트엔드·통합 (메인 답변자)", keywords: "대시보드,프론트,UI,UX,화면,React,Vite,지도,GIS,시각화,챗봇,통합,아키텍처,전체",
+    model: "gpt-4o-mini", is_fallback: 1, enabled: 1, sort: 2, email: "prjack1015@gmail.com",
+    prompt: "너는 'AI 박지훈' — 시원팀의 프론트엔드·대시보드 개발자이자 통합/메인 담당. 담당: React+Vite 관제 대시보드(KPI 카드·5단계 상태·AI 이상탐지 패널·Leaflet 군산 지도(커스텀 SVG 마커)+위치검색·시스템로그·AI 챗봇 18도구). 너는 메인 답변자다 — 프론트/대시보드/통합은 깊게 답하고, 분야가 애매하거나 종합적인 질문도 네가 받아 답한다. DB 깊은 질문은 'AI 이재헌', AI 모델 깊은 질문은 'AI 이두현'에게 넘기되 개요는 직접 답한다." },
+  { key: "lee_jaeheon", name: "AI 이재헌", avatar: "/avatars/lee_jaeheon.png", tone: "정리정연·구조적(요점·근거)",
+    lane: "DB·백엔드 + PM", keywords: "DB,데이터베이스,테이블,스키마,쿼리,SQL,동기화,sync,MySQL,미러,KSCG,백엔드,API,PM,일정,기획,역할,발표",
+    model: "gpt-4o-mini", is_fallback: 0, enabled: 1, sort: 3, email: "jaehun0420@naver.com",
+    prompt: "너는 'AI 이재헌' — 시원팀의 백엔드·DB 담당이자 PM. DB: 옴니 KSCG(MS SQL, 읽기전용) → 팀 MySQL(siwon) 미러로 자동 동기화(alarm 1h/sensor 2h/meta 6h), 약 210만행. 주요 테이블 TB_SENSOR_DATA(메인 시계열)·TB_TRANSMITTER_INFO·TB_FACILITY_INFO·TB_RECENT_DATA·TB_ALARM_LOG. 그룹핑=정류기 단위. PM: 일정·마일스톤·기획결정(ADR)·발표 역할분담. 접속정보·계정·비밀번호는 절대 말하지 않는다. AI 모델 내부는 'AI 이두현', 화면은 'AI 박지훈'에게." },
+  { key: "lee_duhyeon", name: "AI 이두현", avatar: "/avatars/lee_duhyeon.png", tone: "핵심·수치 중심, 명확하게",
+    lane: "AI 이상탐지(LSTM-AutoEncoder)", keywords: "AI,이상탐지,LSTM,오토인코더,모델,threshold,임계,MSE,학습,피처,feature,예측,정상,관찰,이상",
+    model: "gpt-4o-mini", is_fallback: 0, enabled: 1, sort: 4, email: "imidhops1@gmail.com",
+    prompt: "너는 'AI 이두현' — 시원팀의 AI 이상탐지 담당. LSTM-AutoEncoder 통합모델 1개. 입력 12채널 = 기본 4(방식전위·AC유입·온도·습도) + 파생 8(diff1·24h편차). 시퀀스 24, threshold=단말별 정상 데이터 MSE의 99 percentile. 판정 3단계: 정상(MSE<0.70×threshold)·관찰(0.70~1.0×)·이상(≥threshold). 센서별 기여도로 'TOP3 이상 센서' 태그. 희생전류는 ADR-018에서 제외(전용모델 성능 낮아 폐기)→55대 threshold 재산정. 측정 센서 8종은 AI 학습 4피처와 다름(혼동 금지). 화면은 'AI 박지훈', DB는 'AI 이재헌'에게." },
+  { key: "siwon", name: "AI 시원", avatar: "/avatars/siwon.png", tone: "친근·간결, 안내",
+    lane: "안내·라우팅(인사·일반 응대 + 담당 연결)", keywords: "",
+    model: "", is_fallback: 0, enabled: 1, sort: -1, email: "",
+    prompt: "너는 'AI 시원' — 시원팀 공개문의의 안내·라우터 봇. 인사나 간단한 일반 문의에는 직접 짧고 친근하게 답한다. 전문 질문(AI 이상탐지·DB·대시보드)은 담당 팀원(이두현/이재헌/박지훈)에게 연결한다. 깊은 기술 설명은 직접 하지 말고 담당에게 넘긴다." },
+];
+async function loadBotPersonas() {
+  if (!pool) return;
+  try {
+    const [rows] = await pool.query("SELECT * FROM bot_personas ORDER BY sort_order ASC");
+    BOT_PERSONAS = rows;
+    console.log(`▶ 봇 페르소나  ${rows.length}개 로드 (활성 ${rows.filter((r) => r.enabled).length})`);
+  } catch (e) { console.error("✗ bot_personas 로드 실패:", e.message); }
+}
+async function ensureBotPersonas() {
+  if (!pool) return;
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS bot_personas (
+      persona_key   VARCHAR(40) PRIMARY KEY,
+      name          VARCHAR(60) NOT NULL,
+      avatar        VARCHAR(120) NULL,
+      tone          VARCHAR(255) NULL,
+      lane          VARCHAR(160) NULL,
+      keywords      TEXT NULL,
+      system_prompt MEDIUMTEXT NULL,
+      model         VARCHAR(40) NOT NULL DEFAULT '',
+      is_fallback   TINYINT(1) NOT NULL DEFAULT 0,
+      enabled       TINYINT(1) NOT NULL DEFAULT 1,
+      sort_order    INT NOT NULL DEFAULT 0,
+      contact_email VARCHAR(120) NULL,
+      updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+    for (const p of BOT_PERSONA_SEED) {   // INSERT IGNORE — 없는 페르소나만 추가(기존 admin 편집 보존)
+      await pool.query(
+        "INSERT IGNORE INTO bot_personas (persona_key, name, avatar, tone, lane, keywords, system_prompt, model, is_fallback, enabled, sort_order, contact_email) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        [p.key, p.name, p.avatar, p.tone, p.lane, p.keywords, p.prompt, p.model, p.is_fallback, p.enabled, p.sort, p.email],
+      );
+    }
+    await loadBotPersonas();
+  } catch (e) { console.error("✗ bot_personas 스키마/seed 실패:", e.message); }
+}
+ensureBotPersonas();
 
 function dbRequired(_req, res, next) {
   if (!pool) return res.status(503).json({ ok: false, error: "DB pool 비활성 (서버 환경변수 SIWON_DB_PASS 누락)" });
@@ -300,15 +384,16 @@ const AUTH_JWT_SECRET = process.env.AUTH_JWT_SECRET || randomBytes(32).toString(
 if (!process.env.AUTH_JWT_SECRET) console.warn("⚠ AUTH_JWT_SECRET 미설정 — 임시 시크릿 사용(재시작 시 세션 만료).");
 const AUTH_COOKIE  = "siwon_auth";
 const AUTH_TTL_SEC = 12 * 3600;
-const CREATABLE_ROLES = ["superadmin", "admin", "operator", "guest"];   // viewer 제외
+const CREATABLE_ROLES = ["superadmin", "admin", "viewer", "operator", "guest"];   // viewer = 활성 읽기전용 역할(2026-06-02). operator/guest 는 레거시(프론트 드롭다운엔 미노출).
 const ROLE_SET = new Set(CREATABLE_ROLES);
-const ADMIN_TIER = (role) => role === "admin" || role === "superadmin";  // 관리자급 — 생성·삭제·역할변경은 총관리자만
+const ADMIN_TIER = (role) => role === "admin" || role === "superadmin";  // 관리자급(편집 권한) — 생성·삭제·역할변경은 총괄 관리자만
+const VIEW_TIER  = (role) => ADMIN_TIER(role) || role === "viewer" || role === "guest";   // 관리자 화면 '읽기' 계층 (viewer·guest = 읽기전용 관람, 쓰기 불가 — 기능 동일, 라벨만 구분)
 const LOGIN_ID_RE = /^[A-Za-z0-9._-]{2,20}$/;
 const PW_MIN = 4;
 
 const authLimiter = rateLimit({
   windowMs: 60_000, max: 20,                               // 로그인 무차별 대입 완화
-  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip,
+  keyGenerator: (req) => ipKeyGenerator(req.headers["cf-connecting-ip"] || req.ip),
   standardHeaders: true, legacyHeaders: false, validate: { trustProxy: false },
   message: { ok: false, error: "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요." },
 });
@@ -326,7 +411,12 @@ function setAuthCookie(req, res, token) {
 function authClaims(req) { const tok = parseCookies(req)[AUTH_COOKIE]; if (!tok) return null; try { return jwt.verify(tok, AUTH_JWT_SECRET); } catch { return null; } }
 function requireAuth(req, res, next)  { const c = authClaims(req); if (!c) return res.status(401).json({ ok: false, error: "로그인이 필요합니다." }); req.auth = c; next(); }
 function requireAdmin(req, res, next) { const c = authClaims(req); if (!c) return res.status(401).json({ ok: false, error: "로그인이 필요합니다." }); if (!ADMIN_TIER(c.role)) return res.status(403).json({ ok: false, error: "관리자 권한이 필요합니다." }); req.auth = c; next(); }
-function requireSuperAdmin(req, res, next) { const c = authClaims(req); if (!c) return res.status(401).json({ ok: false, error: "로그인이 필요합니다." }); if (c.role !== "superadmin") return res.status(403).json({ ok: false, error: "총관리자 권한이 필요합니다." }); req.auth = c; next(); }
+// 관리자 화면 '읽기' 게이트 — superadmin/admin + viewer(읽기전용). 쓰기 엔드포인트는 requireAdmin 유지(viewer 차단).
+function requireAdminView(req, res, next) { const c = authClaims(req); if (!c) return res.status(401).json({ ok: false, error: "로그인이 필요합니다." }); if (!VIEW_TIER(c.role)) return res.status(403).json({ ok: false, error: "권한이 필요합니다." }); req.auth = c; next(); }
+function requireSuperAdmin(req, res, next) { const c = authClaims(req); if (!c) return res.status(401).json({ ok: false, error: "로그인이 필요합니다." }); if (c.role !== "superadmin") return res.status(403).json({ ok: false, error: "총괄 관리자 권한이 필요합니다." }); req.auth = c; next(); }
+// 디버그/진단 엔드포인트 게이트 — Cloudflare 터널 경유(=공개 인터넷) 요청은 차단(404로 은닉),
+// 로컬 직결(팀/Evals: 127.0.0.1:5050, CF 헤더 없음)만 허용. :5050은 인터넷에 직접 노출 안 됨(웹은 CF 터널만).
+function localOnly(req, res, next) { if (req.headers["cf-connecting-ip"]) return res.status(404).json({ ok: false, error: "Not found" }); next(); }
 // 챗봇 계정 스코프 — 로그인 개인 계정만 계정-스코프(uid 반환), 공유 게스트(siwon)·비로그인은 null(브라우저-로컬).
 //   이 함수가 세션 소유권 + WS room 키를 동시에 결정 → 둘이 항상 일치.
 const SHARED_ACCOUNTS = new Set(["siwon"]);
@@ -352,7 +442,9 @@ function broadcastGuestbook(payload) {
     if (ws.readyState === 1 /* OPEN */) { try { ws.send(data); } catch {} }
   }
 }
-function mapUser(r) { return { id: r.login_id, name: r.display_name, role: r.role, status: r.status, memo: r.memo ?? "", createdAt: r.created_at, lastLoginAt: r.last_login_at, previousLoginAt: null, approvedAt: r.approved_at }; }
+function mapUser(r) { return { id: r.login_id, name: r.display_name, role: r.role, status: r.status, memo: r.memo ?? "", bio: r.bio ?? "", title: r.title ?? "", github: r.github ?? "", avatar: (typeof r.avatar === "string" && r.avatar[0] === "/") ? r.avatar : null, createdAt: r.created_at, lastLoginAt: r.last_login_at, previousLoginAt: null, approvedAt: r.approved_at }; }
+// 목록(mapUser)엔 경로형 아바타(/avatars/*.png)만 포함 — 큰 data URL은 제외(응답 비대 방지). 본인 응답(mapMe)엔 data URL 포함(아래).
+function mapMe(r) { return { ...mapUser(r), avatar: r.avatar || null }; }
 async function findUserRow(loginId) { const [rows] = await pool.query("SELECT * FROM users WHERE login_id = ? LIMIT 1", [loginId]); return rows[0] || null; }
 function genPw(n = 10) { const cs = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"; let s = ""; for (let i = 0; i < n; i++) s += cs[randomInt(cs.length)]; return s; }
 async function auditAuth(req, ok, loginId, reason, name, role) {
@@ -381,24 +473,51 @@ app.post("/api/auth/login", authLimiter, dbRequired, async (req, res) => {
     await pool.query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [u.id]);
     setAuthCookie(req, res, signAuthToken(u));
     await auditAuth(req, true, u.login_id, null, u.display_name, u.role);
-    res.json({ ok: true, user: mapUser(await findUserRow(u.login_id)) });
+    res.json({ ok: true, user: mapMe(await findUserRow(u.login_id)) });
   } catch (e) { console.error("[/api/auth/login]", e.message); res.status(500).json({ ok: false, error: "로그인 처리 중 오류" }); }
 });
 
 // POST /api/auth/logout
 app.post("/api/auth/logout", (req, res) => { res.clearCookie(AUTH_COOKIE, { path: "/" }); res.json({ ok: true }); });
 
-// POST /api/auth/signup — 공개 회원가입. 역할은 guest 고정 · 즉시 활성. 더 높은 권한은 관리자가 부여.
+// POST /api/auth/guest — 1회용 로그인. 누를 때마다 guest1·guest2·guest3… 실제 viewer 계정을 생성하고 바로 로그인(둘러보기·시연용). DB에 기록 남음(관리자가 정리 가능).
+app.post("/api/auth/guest", authLimiter, dbRequired, async (req, res) => {
+  try {
+    // 기존 guestN 중 최대 번호 + 1 (삭제로 생긴 빈 번호는 건너뜀)
+    const [rows] = await pool.query("SELECT login_id FROM users WHERE login_id REGEXP '^guest[0-9]+$'");
+    let maxN = 0;
+    for (const r of rows) { const n = parseInt(String(r.login_id).slice(5), 10); if (Number.isFinite(n) && n > maxN) maxN = n; }
+    const hash = await bcrypt.hash(randomBytes(16).toString("hex"), 10);   // 랜덤 비번 — 1회용이라 비번 재로그인 불가(세션은 이 엔드포인트가 직접 부여)
+    let lid = null;
+    for (let i = 1; i <= 8; i++) {   // 동시 클릭 충돌 시 다음 번호로 재시도
+      const cand = `guest${maxN + i}`;
+      try {
+        await pool.query("INSERT INTO users (login_id, password_hash, display_name, role, status) VALUES (?, ?, ?, 'guest', 'active')", [cand, hash, cand]);
+        lid = cand; break;
+      } catch (e) { if (e.code !== "ER_DUP_ENTRY") throw e; }
+    }
+    if (!lid) return res.status(409).json({ ok: false, error: "잠시 후 다시 시도해 주세요." });
+    const u = await findUserRow(lid);
+    await pool.query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [u.id]);
+    setAuthCookie(req, res, signAuthToken(u));
+    res.json({ ok: true, user: mapMe(u) });
+  } catch (e) { console.error("[/api/auth/guest]", e.message); res.status(500).json({ ok: false, error: "1회용 로그인 처리 중 오류" }); }
+});
+
+// POST /api/auth/signup — 공개 회원가입. 역할은 viewer(읽기전용) 고정 · 즉시 활성. 더 높은 권한(admin/superadmin)은 총괄 관리자가 부여.
 app.post("/api/auth/signup", authLimiter, dbRequired, async (req, res) => {
   const { id, pw, name } = req.body || {};
   const lid = String(id || "").trim();
   if (!LOGIN_ID_RE.test(lid))            return res.status(400).json({ ok: false, error: "ID 는 2~20자 (영문/숫자/._-).", field: "id" });
   if (!pw || String(pw).length < PW_MIN) return res.status(400).json({ ok: false, error: `비밀번호는 ${PW_MIN}자 이상.`, field: "pw" });
   if (!name || !String(name).trim())     return res.status(400).json({ ok: false, error: "이름을 입력하세요.", field: "name" });
+  // 'guest+숫자' 네임스페이스는 1회용 로그인 전용으로 예약 — 회원가입에서 금지(자동번호 충돌·사칭 방지)
+  if (/^guest\d+$/i.test(lid))                 return res.status(400).json({ ok: false, error: "‘guest+숫자’ 아이디는 1회용 로그인 전용입니다. 다른 아이디를 사용해 주세요.", field: "id" });
+  if (/^guest\d+$/i.test(String(name).trim())) return res.status(400).json({ ok: false, error: "‘guest+숫자’ 형식 이름은 사용할 수 없습니다.", field: "name" });
   try {
     if (await findUserRow(lid)) return res.status(409).json({ ok: false, error: "이미 사용 중인 ID 입니다.", field: "id" });
     const hash = await bcrypt.hash(String(pw), 10);
-    await pool.query("INSERT INTO users (login_id, password_hash, display_name, role, status) VALUES (?, ?, ?, 'guest', 'active')", [lid, hash, String(name).trim().slice(0, 60)]);
+    await pool.query("INSERT INTO users (login_id, password_hash, display_name, role, status) VALUES (?, ?, ?, 'viewer', 'active')", [lid, hash, String(name).trim().slice(0, 60)]);
     res.json({ ok: true, user: mapUser(await findUserRow(lid)) });
   } catch (e) { console.error("[/api/auth/signup]", e.message); res.status(500).json({ ok: false, error: "가입 처리 중 오류" }); }
 });
@@ -409,7 +528,7 @@ app.get("/api/auth/me", dbRequired, async (req, res) => {
   try {
     const u = await findUserRow(c.lid);
     if (!u || u.status !== "active") { res.clearCookie(AUTH_COOKIE, { path: "/" }); return res.json({ ok: false }); }
-    res.json({ ok: true, user: mapUser(u) });
+    res.json({ ok: true, user: mapMe(u) });
   } catch { res.status(500).json({ ok: false }); }
 });
 
@@ -418,7 +537,7 @@ app.get("/api/auth/me", dbRequired, async (req, res) => {
 //   활성(active) 계정만 true (로그인 가능 여부와 일치). 형식 불량 ID 는 DB 조회 없이 false.
 const existsLimiter = rateLimit({
   windowMs: 60_000, max: 100,
-  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip,
+  keyGenerator: (req) => ipKeyGenerator(req.headers["cf-connecting-ip"] || req.ip),
   standardHeaders: true, legacyHeaders: false, validate: { trustProxy: false },
   message: { ok: false, error: "요청이 너무 많습니다." },
 });
@@ -432,7 +551,7 @@ app.get("/api/auth/exists", existsLimiter, dbRequired, async (req, res) => {
 });
 
 // GET /api/auth/users (admin)
-app.get("/api/auth/users", dbRequired, requireAdmin, async (_req, res) => {
+app.get("/api/auth/users", dbRequired, requireAdminView, async (_req, res) => {
   try { const [rows] = await pool.query("SELECT * FROM users ORDER BY created_at ASC"); res.json({ ok: true, users: rows.map(mapUser) }); }
   catch (e) { console.error("[/api/auth/users GET]", e.message); res.status(500).json({ ok: false, error: "목록 조회 오류" }); }
 });
@@ -445,7 +564,7 @@ app.post("/api/auth/users", dbRequired, requireAdmin, async (req, res) => {
   if (!pw || String(pw).length < PW_MIN) return res.status(400).json({ ok: false, error: `비밀번호는 ${PW_MIN}자 이상.`, field: "pw" });
   if (!name || !String(name).trim())     return res.status(400).json({ ok: false, error: "이름을 입력하세요.", field: "name" });
   if (!ROLE_SET.has(role))               return res.status(400).json({ ok: false, error: "역할을 선택하세요.", field: "role" });
-  if (ADMIN_TIER(role) && req.auth.role !== "superadmin") return res.status(403).json({ ok: false, error: "관리자·총관리자 계정은 총관리자만 생성할 수 있습니다.", field: "role" });
+  if (ADMIN_TIER(role) && req.auth.role !== "superadmin") return res.status(403).json({ ok: false, error: "관리자·총괄 관리자 계정은 총괄 관리자만 생성할 수 있습니다.", field: "role" });
   try {
     if (await findUserRow(lid)) return res.status(409).json({ ok: false, error: "이미 사용 중인 ID 입니다.", field: "id" });
     const hash = await bcrypt.hash(String(pw), 10);
@@ -464,7 +583,7 @@ app.post("/api/auth/users/:id/reset-password", dbRequired, requireAdmin, async (
   try {
     const u = await findUserRow(lid);
     if (!u) return res.status(404).json({ ok: false, error: "사용자를 찾을 수 없습니다." });
-    if (ADMIN_TIER(u.role) && req.auth.role !== "superadmin") return res.status(403).json({ ok: false, error: "관리자·총관리자 비밀번호는 총관리자만 재설정할 수 있습니다." });
+    if (ADMIN_TIER(u.role) && req.auth.role !== "superadmin") return res.status(403).json({ ok: false, error: "관리자·총괄 관리자 비밀번호는 총괄 관리자만 재설정할 수 있습니다." });
     await pool.query("UPDATE users SET password_hash = ?, updated_at = NOW() WHERE id = ?", [await bcrypt.hash(newPw, 10), u.id]);
     res.json({ ok: true, userId: lid, newPw });
   } catch (e) { console.error("[/api/auth/reset-pw]", e.message); res.status(500).json({ ok: false, error: "재설정 처리 중 오류" }); }
@@ -477,14 +596,14 @@ app.delete("/api/auth/users/:id", dbRequired, requireAdmin, async (req, res) => 
     const u = await findUserRow(lid);
     if (!u) return res.status(404).json({ ok: false, error: "사용자를 찾을 수 없습니다." });
     if (u.login_id === req.auth.lid) return res.status(400).json({ ok: false, error: "본인 계정은 삭제할 수 없습니다." });
-    if (ADMIN_TIER(u.role) && req.auth.role !== "superadmin") return res.status(403).json({ ok: false, error: "관리자·총관리자 계정은 총관리자만 삭제할 수 있습니다." });
+    if (ADMIN_TIER(u.role) && req.auth.role !== "superadmin") return res.status(403).json({ ok: false, error: "관리자·총괄 관리자 계정은 총괄 관리자만 삭제할 수 있습니다." });
     if (u.role === "admin") {
       const [[{ n }]] = await pool.query("SELECT COUNT(*) n FROM users WHERE role = 'admin' AND status = 'active'");
       if (n <= 1) return res.status(400).json({ ok: false, error: "마지막 관리자 계정은 삭제할 수 없습니다." });
     }
     if (u.role === "superadmin") {
       const [[{ n }]] = await pool.query("SELECT COUNT(*) n FROM users WHERE role = 'superadmin' AND status = 'active'");
-      if (n <= 1) return res.status(400).json({ ok: false, error: "마지막 총관리자 계정은 삭제할 수 없습니다." });
+      if (n <= 1) return res.status(400).json({ ok: false, error: "마지막 총괄 관리자 계정은 삭제할 수 없습니다." });
     }
     await pool.query("DELETE FROM users WHERE id = ?", [u.id]);
     res.json({ ok: true, userId: lid });
@@ -521,7 +640,7 @@ app.patch("/api/auth/users/:id", dbRequired, requireAdmin, async (req, res) => {
     if (b.role !== undefined) {
       if (!ROLE_SET.has(b.role)) return res.status(400).json({ ok: false, error: "역할을 선택하세요.", field: "role" });
       if ((ADMIN_TIER(b.role) || ADMIN_TIER(u.role)) && req.auth.role !== "superadmin")
-        return res.status(403).json({ ok: false, error: "관리자·총관리자 권한 변경은 총관리자만 할 수 있습니다.", field: "role" });
+        return res.status(403).json({ ok: false, error: "관리자·총괄 관리자 권한 변경은 총괄 관리자만 할 수 있습니다.", field: "role" });
       if (u.role === "admin" && b.role !== "admin") {
         const [[{ n }]] = await pool.query("SELECT COUNT(*) n FROM users WHERE role = 'admin' AND status = 'active'");
         if (n <= 1) return res.status(400).json({ ok: false, error: "마지막 관리자의 역할은 변경할 수 없습니다.", field: "role" });
@@ -543,16 +662,50 @@ app.patch("/api/auth/users/:id", dbRequired, requireAdmin, async (req, res) => {
   } catch (e) { console.error("[/api/auth/users PATCH]", e.message); res.status(500).json({ ok: false, error: "수정 처리 중 오류" }); }
 });
 
-// PATCH /api/auth/profile (auth) {name}
+// PATCH /api/auth/profile (auth) {name, bio, title, github, avatar}
+const PROFILE_CTRL = /[\x00-\x08\x0B\x0C\x0E-\x1F]/g;   // 제어문자 제거
 app.patch("/api/auth/profile", dbRequired, requireAuth, async (req, res) => {
-  const name = String((req.body && req.body.name) || "").trim();
+  if (!ADMIN_TIER(req.auth.role)) return res.status(403).json({ ok: false, error: "관람 계정(뷰어·게스트)은 프로필을 수정할 수 없습니다." });
+  const b = req.body || {};
+  const name = String(b.name || "").trim();
   if (!name) return res.status(400).json({ ok: false, error: "이름을 입력하세요.", field: "name" });
-  try { await pool.query("UPDATE users SET display_name = ?, updated_at = NOW() WHERE id = ?", [name.slice(0, 60), req.auth.uid]); res.json({ ok: true, user: mapUser(await findUserRow(req.auth.lid)) }); }
-  catch (e) { res.status(500).json({ ok: false, error: "프로필 수정 오류" }); }
+  const bio   = String(b.bio   ?? "").replace(PROFILE_CTRL, "").trim().slice(0, 200);
+  const title = String(b.title ?? "").replace(PROFILE_CTRL, "").trim().slice(0, 60);
+  const github = String(b.github ?? "").trim().slice(0, 200);
+  // 링크: https:// URL 만 허용(javascript:/data: 등 차단), 공백·따옴표·꺾쇠 불가
+  if (github && !/^https:\/\/[^\s"'<>]+$/i.test(github)) return res.status(400).json({ ok: false, error: "링크는 https:// 로 시작하는 주소만 가능해요.", field: "github" });
+  // 아바타: 살균된 raster data URL 만(png/jpeg/webp), ~4MB 캡. "" 또는 null → 제거, 키 없음 → 기존 유지, 유효X → 무시(기존 유지)
+  let avatar;
+  if (b.avatar === null || b.avatar === "") avatar = null;
+  else if (typeof b.avatar === "string" && /^data:image\/(png|jpe?g|webp);base64,/.test(b.avatar)) {
+    if (b.avatar.length > 4_000_000) return res.status(413).json({ ok: false, error: "아바타 사진이 너무 큽니다 (4MB 이하)." });
+    avatar = b.avatar;
+  } else avatar = undefined;   // 키 미전송/유효하지 않음 → 기존 값 유지
+  try {
+    if (avatar === undefined)
+      await pool.query("UPDATE users SET display_name=?, bio=?, title=?, github=?, updated_at=NOW() WHERE id=?", [name.slice(0,60), bio || null, title || null, github || null, req.auth.uid]);
+    else
+      await pool.query("UPDATE users SET display_name=?, bio=?, title=?, github=?, avatar=?, updated_at=NOW() WHERE id=?", [name.slice(0,60), bio || null, title || null, github || null, avatar, req.auth.uid]);
+    res.json({ ok: true, user: mapMe(await findUserRow(req.auth.lid)) });
+  } catch (e) { res.status(500).json({ ok: false, error: "프로필 수정 오류" }); }
+});
+
+// GET /api/profile/:uid — 공개 프로필 조회(라운지 프로필 카드용). 공개 필드만: 이름·역할·직무·소개·링크·아바타.
+//   ⚠️ 이메일·메모·상태·로그인ID·비번 등 비공개 필드는 절대 미노출. 활성 계정만.
+app.get("/api/profile/:uid", dbRequired, async (req, res) => {
+  const uid = parseInt(req.params.uid, 10) || 0;
+  if (!uid) return res.status(400).json({ ok: false, error: "잘못된 요청" });
+  try {
+    const [rows] = await pool.query("SELECT display_name, role, title, bio, github, avatar, status FROM users WHERE id = ? LIMIT 1", [uid]);
+    const u = rows[0];
+    if (!u || u.status !== "active") return res.status(404).json({ ok: false, error: "프로필을 찾을 수 없습니다." });
+    res.json({ ok: true, profile: { uid, name: u.display_name, role: u.role, title: u.title || "", bio: u.bio || "", github: u.github || "", avatar: u.avatar || null } });
+  } catch (e) { res.status(500).json({ ok: false, error: "프로필 조회 오류" }); }
 });
 
 // POST /api/auth/change-password (auth) {currentPw, newPw}
 app.post("/api/auth/change-password", dbRequired, requireAuth, async (req, res) => {
+  if (!ADMIN_TIER(req.auth.role)) return res.status(403).json({ ok: false, error: "관람 계정(뷰어·게스트)은 비밀번호를 변경할 수 없습니다." });
   const { currentPw, newPw } = req.body || {};
   if (!newPw || String(newPw).length < PW_MIN) return res.status(400).json({ ok: false, error: `새 비밀번호는 ${PW_MIN}자 이상.`, field: "newPw" });
   try {
@@ -1450,11 +1603,15 @@ async function execToolInternal(name, args, demoMode = false) {
         }
 
         const now = Date.now();
-        let normal = 0, critical = 0, offline = 0;
+        // 상태 집계는 대시보드와 동일하게 AI risk_level(이두현 모델) 기준 — mapStatus 사용. (KSCG 알람 아님)
+        const zoneAi = await loadLatestAi();
+        let normal = 0, warn = 0, critical = 0, offline = 0;
         for (const r of rows) {
           const hours = r.lastSeen ? Math.floor((now - new Date(r.lastSeen).getTime()) / 3600000) : null;
-          if (hours != null && hours >= 24) offline++;
-          else if (Number(r.recentAlarms) > 0) critical++;
+          const st = mapStatus(null, hours, Number(r.recentAlarms), zoneAi.get(r.TRANSMITTER_ID));
+          if (st === "offline") offline++;
+          else if (st === "critical") critical++;
+          else if (st === "warn") warn++;
           else normal++;
         }
 
@@ -1475,13 +1632,14 @@ async function execToolInternal(name, args, demoMode = false) {
         `, [txids]);
 
         // 데모 단말 — facility prefix 의 첫 숫자가 zoneNum 와 일치하면 추가
-        let dNormal = 0, dCrit = 0, dOff = 0, dVolts = [], dRssi = [];
+        let dNormal = 0, dWarn = 0, dCrit = 0, dOff = 0, dVolts = [], dRssi = [];
         if (demoMode) {
           for (const d of getDemoDevices()) {
             const m2 = String(d.facility).match(/^(\d+)/);
             if (!m2 || m2[1] !== zoneNum) continue;
             if (d.status === "offline") dOff++;
             else if (d.status === "critical") dCrit++;
+            else if (d.status === "warn") dWarn++;
             else dNormal++;
             if (d.sensors.volt    != null) dVolts.push(d.sensors.volt);
             if (d.sensors.commDbm != null) dRssi.push(d.sensors.commDbm);
@@ -1497,8 +1655,8 @@ async function execToolInternal(name, args, demoMode = false) {
           : null;
         return {
           zone: `제${zoneNum}구역`,
-          count: rows.length + dNormal + dCrit + dOff,
-          normal: normal + dNormal, critical: critical + dCrit, offline: offline + dOff,
+          count: rows.length + dNormal + dWarn + dCrit + dOff,
+          normal: normal + dNormal, warn: warn + dWarn, critical: critical + dCrit, offline: offline + dOff,
           avgVolt: avgVolt != null ? Number(avgVolt) : null,
           avgRssi: avgRssi != null ? Number(avgRssi) : null,
           devices: rows.slice(0, 10).map((r) => r.deviceId),    // 미리보기 10대만
@@ -3455,7 +3613,7 @@ async function getUsdKrw() {
 }
 
 // ── GET /api/admin/token-usage — AI 모델별 토큰 사용량 (chat_messages 집계, admin 전용) ──
-app.get("/api/admin/token-usage", dbRequired, requireAdmin, async (_req, res) => {
+app.get("/api/admin/token-usage", dbRequired, requireAdminView, async (_req, res) => {
   try {
     const [rows] = await pool.query(`
       SELECT COALESCE(NULLIF(model, ''), '(미지정)') AS model,
@@ -3545,7 +3703,7 @@ app.get("/api/admin/token-usage", dbRequired, requireAdmin, async (_req, res) =>
 
 // ── GET /api/admin/login-log — 로그인 감사 로그 (admin 전용) ──
 //   audit_log 의 login/login_fail 이벤트 + 계정별 집계. 침입 시도 가시화용.
-app.get("/api/admin/login-log", dbRequired, requireAdmin, async (req, res) => {
+app.get("/api/admin/login-log", dbRequired, requireAdminView, async (req, res) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
     const [events] = await pool.query(
@@ -3587,7 +3745,7 @@ app.get("/api/chat/sessions", dbRequired, async (req, res) => {
   try {
     const c = authClaims(req);
     const owner = chatOwner(req);
-    const adminAll = c?.role === "admin" && req.query.scope === "all";   // 관리자 통계 = 전역
+    const adminAll = VIEW_TIER(c?.role) && req.query.scope === "all";   // 관리자 통계 = 전역 (superadmin·admin·viewer 읽기)
     if (!adminAll && owner == null) return res.json({ ok: true, count: 0, sessions: [] });  // 익명/공유는 서버 목록 없음(로컬)
     const ownerWhere = adminAll ? "" : "AND s.user_id = ?";
     const params = adminAll ? [] : [owner];
@@ -3765,45 +3923,275 @@ const SUPPORT_SYSTEM = `당신은 '군산도시가스 매설배관 AI 통합관�
 let PROJECT_KNOWLEDGE = "";
 try { PROJECT_KNOWLEDGE = readFileSync(path.join(__dirname, "project-knowledge.md"), "utf8"); }
 catch (e) { console.warn("[project-knowledge] 로드 실패:", e.message); }
-const DEV_SYSTEM = `당신은 '매설배관 AI 통합관제 시스템'(호서대 캡스톤, 시원팀) 프로젝트를 소개하는 개발자 어시스턴트입니다.
-아래 [프로젝트 지식]에 근거해, 이 프로젝트가 무엇이고 어떻게 동작하는지 한국어로 친절하고 구체적으로 설명하세요(포트폴리오 소개 톤).
-- 기능·아키텍처·기술스택·AI(이상탐지)·챗봇·도메인 용어 질문에 자세히 답하세요.
-- 지식에 없는 내용은 지어내지 말고, "그 부분은 문서에 없어 개발자(박지훈)가 직접 확인·답변할 수 있다"고 안내하세요.
-- 비밀번호·서버 접속·내부 IP·DB 자격증명 등 보안 정보는 절대 공개하지 마세요.
-
-[프로젝트 지식]
-${PROJECT_KNOWLEDGE}`;
-
-// 개발자 문의(포폴 Q&A) 답변 모델 — 품질 우선으로 GPT 사용. 키 없거나 실패 시 로컬 폴백.
-const INQUIRY_DEV_MODEL = process.env.INQUIRY_DEV_MODEL || "gpt-4o-mini";
-
-async function runInquiryReply(target, kind, message) {
-  const isDev = target === "developer";
-  const system = isDev ? DEV_SYSTEM : SUPPORT_SYSTEM;
-  const userContent = isDev ? message : `[${kind === "bug" ? "버그 신고" : "문의"}]\n${message}`;
-  const useGpt = isDev && isOpenAI(INQUIRY_DEV_MODEL) && OPENAI_API_KEY;
+// (DEV_SYSTEM·INQUIRY_DEV_MODEL 제거됨 — 개발자 문의 GPT Q&A는 '시원팀 공개문의'로 통합)
+// ── 로컬 RAG — project-knowledge.md를 섹션 청킹·임베딩(nomic-embed-text)해 kb_chunks 저장. 질문 임베딩 코사인 top-k(페르소나 도메인 필터). 전부 로컬·무료. ──
+const EMBED_MODEL = process.env.EMBED_MODEL || "nomic-embed-text";
+let KB_CHUNKS = [];   // [{ id, domain, section, text, vec:[...] }]
+async function embedText(text, kind = "document") {
+  // nomic-embed-text는 task prefix 필요(검색 품질 핵심): 문서=search_document, 질문=search_query
+  const prefixed = (kind === "query" ? "search_query: " : "search_document: ") + String(text || "").slice(0, 6000);
   try {
-    // 1) 개발자 문의 = GPT (OpenAI) 우선
-    if (useGpt) {
+    const res = await fetch(`${OLLAMA_URL}/api/embed`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: EMBED_MODEL, input: prefixed, keep_alive: KEEP_ALIVE }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    const v = (j.embeddings && j.embeddings[0]) || j.embedding || null;
+    return Array.isArray(v) ? v : null;
+  } catch { return null; }
+}
+// 섹션(## ) 단위 청킹 + 도메인 태그(헤딩 키워드)
+function chunkKnowledge(md) {
+  const RULES = [
+    [/이상탐지|LSTM|모델|threshold|MSE|학습|피처|AI 이상/i, "ai"],
+    [/\bDB\b|데이터베이스|테이블|스키마|동기화|MySQL|미러/i, "db"],
+    [/챗봇|대시보드|프론트|UI|화면|지도|시각화|기능/i, "dashboard"],
+  ];
+  return md.split(/\n(?=## )/).map((p) => p.trim()).filter((t) => t.length >= 20 && !/응대\s*지침/.test(t.slice(0, 40))).map((text) => {
+    const heading = (text.match(/^#{1,3}\s+(.+)/) || [, "intro"])[1].trim();
+    let domain = "general";
+    for (const [re, d] of RULES) if (re.test(heading)) { domain = d; break; }
+    return { domain, section: heading, text };
+  });
+}
+// project-knowledge.md(공통, 헤딩 키워드로 도메인) + ai/persona-knowledge/*.md(멤버 자필, 도메인 고정) → 청크 소스
+function gatherKbSources() {
+  const out = chunkKnowledge(PROJECT_KNOWLEDGE || "");
+  // 추가 지식: ai/kb/*.md (옵시디언에서 안전 큐레이션·스크럽한 ADR·자문·요구사항) — 공통(헤딩 키워드로 도메인 분류)
+  try {
+    const kbDir = path.join(__dirname, "ai", "kb");
+    for (const fn of readdirSync(kbDir)) {
+      if (!fn.endsWith(".md")) continue;
+      let md = ""; try { md = readFileSync(path.join(kbDir, fn), "utf8"); } catch { continue; }
+      md = md.replace(/<!--[\s\S]*?-->/g, "").replace(/^---[\s\S]*?---\s*/, "");   // 주석·frontmatter 제거
+      for (const c of chunkKnowledge(md)) out.push({ domain: c.domain, section: `kb · ${c.section}`, text: c.text });
+    }
+  } catch { /* ai/kb 폴더 없음 — 무시 */ }
+  const PF = [["lee_duhyeon", "ai"], ["lee_jaeheon", "db"], ["park", "dashboard"]];
+  const dir = path.join(__dirname, "ai", "persona-knowledge");
+  for (const [key, domain] of PF) {
+    const fp = path.join(dir, `${key}.md`);
+    if (!existsSync(fp)) continue;
+    let md = ""; try { md = readFileSync(fp, "utf8"); } catch { continue; }
+    md = md.replace(/<!--[\s\S]*?-->/g, "");   // 주석 제거
+    for (const seg of md.split(/\n(?=## )/).map((s) => s.trim()).filter((s) => s.length >= 30)) {
+      const heading = (seg.match(/^#{1,3}\s+(.+)/) || [, "intro"])[1].trim().slice(0, 80);
+      out.push({ domain, section: `${key} · ${heading}`, text: seg });
+    }
+  }
+  return out;
+}
+async function loadKbChunks() {
+  if (!pool) return;
+  try {
+    const [rows] = await pool.query("SELECT id, domain, section, text, embedding FROM kb_chunks");
+    KB_CHUNKS = rows.map((r) => ({ id: r.id, domain: r.domain, section: r.section, text: r.text, vec: JSON.parse(r.embedding) }));
+    console.log(`▶ RAG  kb_chunks ${KB_CHUNKS.length}개 메모리 로드`);
+  } catch (e) { console.error("✗ kb_chunks 로드 실패:", e.message); }
+}
+async function ensureKbChunks() {
+  if (!pool) return;
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS kb_chunks (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      domain VARCHAR(20) NOT NULL,
+      section VARCHAR(200) NULL,
+      text MEDIUMTEXT NOT NULL,
+      embedding MEDIUMTEXT NOT NULL,
+      doc_hash VARCHAR(40) NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+    const sources = gatherKbSources();
+    const hash = createHash("sha1").update("v4-persona:" + sources.map((s) => s.domain + "|" + s.text).join("")).digest("hex");
+    const [[{ n }]] = await pool.query("SELECT COUNT(*) AS n FROM kb_chunks WHERE doc_hash = ?", [hash]);
+    if (n === 0 && sources.length) {
+      const rows = [];
+      for (const c of sources) {
+        const vec = await embedText(c.text, "document");
+        if (vec) rows.push([c.domain, c.section, c.text, JSON.stringify(vec), hash]);
+        else console.warn("[kb] 임베딩 실패:", c.section);
+      }
+      if (rows.length) {
+        await pool.query("DELETE FROM kb_chunks");
+        await pool.query("INSERT INTO kb_chunks (domain, section, text, embedding, doc_hash) VALUES ?", [rows]);
+        console.log(`▶ RAG  kb_chunks ${rows.length}개 인제스트 (hash ${hash.slice(0, 8)})`);
+      }
+    }
+    await loadKbChunks();
+  } catch (e) { console.error("✗ kb_chunks 인제스트 실패:", e.message); }
+}
+ensureKbChunks();
+function cosineSim(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-8);
+}
+// 페르소나 → 허용 청크 도메인. park(fallback/메인)=전체, 나머지=자기+general
+const PERSONA_RAG_DOMAIN = { lee_duhyeon: "ai", lee_jaeheon: "db", control_assistant: "dashboard", agent: "general", park: "dashboard" };
+async function retrieveChunks(query, personaKey, k = 6) {
+  if (!KB_CHUNKS.length) return [];
+  const qv = await embedText(query, "query");
+  if (!qv) return [];
+  const dom = PERSONA_RAG_DOMAIN[personaKey] || "*";
+  const qWords = String(query).toLowerCase().match(/[가-힣a-z0-9]{2,}/g) || [];
+  // 하이브리드: 코사인 + 도메인 부스트 + 키워드(헤딩>본문 가중) + 타 페르소나 자필 누출 패널티
+  const PFX = ["park · ", "lee_jaeheon · ", "lee_duhyeon · "];
+  return KB_CHUNKS
+    .map((c) => {
+      let score = cosineSim(qv, c.vec);
+      if (dom !== "*" && c.domain === dom) score += 0.08;
+      const sec = c.section || "", secLo = sec.toLowerCase(), txtLo = String(c.text).toLowerCase();
+      let secKw = 0, txtKw = 0;
+      for (const w of qWords) { if (secLo.includes(w)) secKw++; else if (txtLo.includes(w)) txtKw++; }
+      score += Math.min(secKw, 4) * 0.05 + Math.min(txtKw, 6) * 0.02;
+      if (PFX.some((p) => sec.startsWith(p)) && !sec.startsWith(personaKey + " · ")) score -= 0.15;
+      return { c, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, k)
+    .map((x) => ({ section: x.c.section, text: x.c.text, score: +x.score.toFixed(3) }));
+}
+
+// ── 페르소나 답변 엔진 — 공통 base(가드레일·grounding·디스클로저) + RAG 검색조각 + 페르소나 프롬프트 → LLM(기본 로컬 qwen). ──
+const PERSONA_BASE = `너는 '매설 가스배관 AI 통합관제 시스템'(호서대 시원팀 · 군산도시가스 실데이터) 공개 단톡방의 AI 페르소나다.
+# 답변 규칙(반드시 지킴)
+- 한국어 존댓말, 간결·정확. 홍보성 과장 금지.
+- 답변은 **짧고 핵심만**(보통 2~4문장, 목록도 3~4개 이내). 장황하게 늘이지 말고, 질문에 직접 답한 뒤 "더 자세히 알려드릴까요?"처럼 끊어서 추가 질문을 유도한다. (가독성을 위해 꼭 필요한 말만.)
+- **단, '기술 스택'·'전체 소개'·'주요 기능'·'아키텍처' 같은 종합/목록형 질문은 예외** — 한두 가지만 말하지 말고 **카테고리를 빠짐없이** 정리한다(프론트엔드·백엔드·DB·AI/이상탐지·지도/GIS·인프라/배포 등, 근거에 있는 범위에서). 이때는 6~8줄 목록까지 허용. (예: 기술 스택 = React+Vite / Node·Express / MySQL / LSTM-AutoEncoder / Leaflet+OSM / Cloudflare Tunnel·Mac Studio 처럼 모든 축을 포함.)
+- 아래 [근거]와 너의 역할 지식 안에서만 사실을 말한다. 근거에 없고 확실치 않으면 추측하지 말고 "그건 제가 정확히 모르겠어요 — 실제 팀원이나 다른 담당이 확인해 드릴 수 있어요"라고 솔직히 답한다.
+- 기술 스택·라이브러리·모델명·버전·수치는 [근거]에 명시된 것만 말한다. 근거에 없는 구체적 기술명·라이브러리·숫자는 절대 지어내지 마라(추측하느니 일반적으로 답하거나 모른다고 한다).
+- [서비스 AI 창구 — 항상 정확히] 시원팀엔 세 AI 창구가 있다(서로 다름): ① 관제 도우미 = 실시간 단말 데이터 조회(Function Calling) ② 상담원 = 서비스 이용 문의·버그 신고를 받아 관리자(사람)에게 전달·에스컬레이션하는 AI 상담 봇(별도 채널) ③ 시원팀 공개문의 AI 페르소나(너 포함) = 프로젝트 설명(로컬 RAG). "상담원"을 물으면 ②(문의·버그 신고용 별도 채널)라고 답하고 — 공개문의 페르소나(너 자신)이 상담원이라고 혼동하지 마라. "RAG 구현했냐/검색증강 쓰냐"엔 "네 — 공개문의 AI 페르소나가 로컬 RAG로 동작합니다(관제 챗봇은 Function Calling)"라고 답하고 "RAG 안 썼다/미구현"이라 하지 마라.
+- [지도 — 항상 정확히] 관제 지도는 Leaflet(타일 OSM·Carto·ArcGIS) 위에 커스텀 SVG 마커를 얹어 만든다. "지도를 SVG로 직접 그렸다 / Leaflet 안 썼다"고 하지 마라(사실과 다름).
+- 근거에 "X를 쓰지 않고 Y로 했다 / X 대신 Y" 처럼 부정·대조가 있으면, X를 썼다고 답하지 말고 실제 사용한 Y를 답한다. (예: "분류 모델 대신 LSTM-AutoEncoder를 썼다" → 정답: "분류 모델이 아니라 LSTM-AutoEncoder를 썼다")
+- 네 전문 분야가 아니면 맞는 담당(AI 이상탐지=이두현 / DB·백엔드=이재헌 / 대시보드·프론트=박지훈)으로 안내한다.
+- 너는 AI 페르소나다(실제 본인 아님). 사칭하지 않는다.
+- 비밀번호·접속정보·내부 IP·DB 자격증명·팀원 개인 이메일/연락처는 절대 노출하지 않는다.`;
+
+// 공개문의 봇 모델 허용목록(프론트 CHAT_MODELS 동기화) — 임의 모델 주입 방지. GPT 포함(사용자 수용: 공개 비용 발생 가능).
+const GB_BOT_MODELS = new Set(["gpt-4o-mini", "gpt-5", "gpt-5.5"]);   // 라운지 봇 답변은 GPT 전용 — 방문자가 로컬을 고르거나(기본값 qwen) 안 바꿔도 set에 없어 botModel=null → 페르소나 기본(gpt-4o-mini) 폴백 = 모든 방문자 GPT 빠름(사용자 결정 2026-06-02). 더 높은 GPT는 고르면 적용.
+async function runPersonaReply(personaKey, message, modelOverride) {
+  const p = BOT_PERSONAS.find((x) => x.persona_key === personaKey && x.enabled);
+  if (!p) return null;
+  const hits = await retrieveChunks(message, personaKey, 4);
+  const grounding = hits.length
+    ? hits.map((h) => `[${h.section}]\n${h.text}`).join("\n\n")
+    : "(관련 근거 없음 — 근거 없는 내용은 추측하지 말 것)";
+  const system = `${PERSONA_BASE}\n\n# 너의 역할 (${p.name})\n${p.system_prompt}\n\n# 근거 (프로젝트 지식 — 이 범위에서만 사실 진술)\n${grounding}`;
+  const model = (modelOverride || p.model || "").trim() || OLLAMA_MODEL;   // 작성자가 라운지에서 고른 모델 우선(허용목록 검증됨)
+  try {
+    if (isOpenAI(model) && OPENAI_API_KEY) {
       const res = await fetch(OPENAI_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
-        body: JSON.stringify({
-          model: INQUIRY_DEV_MODEL,
-          messages: [{ role: "system", content: system }, { role: "user", content: userContent }],
-        }),  // temperature·max_tokens 생략 — gpt-4o-mini/5.x 호환
+        body: JSON.stringify({ model, messages: [{ role: "system", content: system }, { role: "user", content: message }] }),
         signal: AbortSignal.timeout(40_000),
       });
-      if (res.ok) {
-        const data = await res.json();
-        const out = (data.choices?.[0]?.message?.content || "").trim();
-        if (out) return out;
-      } else {
-        console.warn("[runInquiryReply] OpenAI HTTP", res.status, "→ 로컬 폴백");
-      }
-      // 실패 시 아래 로컬로 폴백
+      if (res.ok) { const d = await res.json(); const out = (d.choices?.[0]?.message?.content || "").trim(); if (out) return out; }
+      else console.warn("[runPersonaReply] OpenAI HTTP", res.status, "→ 로컬 폴백");
     }
-    // 2) 로컬 Ollama (상담원 문의 + 개발자 폴백)
+    // 로컬 Ollama (공개 단톡방 기본 — 무료)
+    const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: isOpenAI(model) ? OLLAMA_MODEL : model,
+        messages: [{ role: "system", content: system }, { role: "user", content: message }],
+        stream: false, think: false, keep_alive: KEEP_ALIVE, options: { temperature: 0.4, num_predict: 1100 },
+      }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!res.ok) return null;
+    const d = await res.json();
+    return (d.message?.content || "").trim() || null;
+  } catch (e) { console.warn("[runPersonaReply]", e.message); return null; }
+}
+
+// ── 단톡방 봇 라우팅 — 질문이면 팀 페르소나(이두현/이재헌/박지훈) 중 하나가 답. @지정 > 키워드 > 박지훈 fallback. ──
+const LOUNGE_KEYS = ["lee_duhyeon", "lee_jaeheon", "park"];
+function isQuestion(t) {
+  const s = String(t || "");
+  if (/[?？]/.test(s) || /@\S/.test(s)) return true;
+  return /(뭐|무엇|어떻게|어떤|왜|언제|어디|누구|누가|얼마|몇|있나요|있어요|인가요|까요|나요|되나요|될까|할까|을까|설명|알려|궁금|차이|이유|무슨)/.test(s);
+}
+function pickPersona(text) {
+  const lounge = BOT_PERSONAS.filter((p) => p.enabled && LOUNGE_KEYS.includes(p.persona_key));
+  if (!lounge.length) return null;
+  const s = String(text || "");
+  for (const p of lounge) {   // 1) 이름/@지정
+    const short = p.name.replace(/^AI\s*/, "");
+    if (s.includes(p.name) || (short.length >= 2 && s.includes(short)) || s.includes("@" + p.persona_key)) return p.persona_key;
+  }
+  // 1b) @멘션 오타 허용 — '@토큰'이 담당 이름과 앞 2글자 이상 공통접두면 그 담당으로 (예: @이두헌→이두현, @이재현→이재헌, @박지헌→박지훈)
+  const atTok = (s.match(/@([^\s@]{2,20})/) || [])[1];
+  if (atTok) {
+    let mBest = null, mLcp = 0;
+    for (const p of lounge) {
+      const short = p.name.replace(/^AI\s*/, "");
+      let lcp = 0; while (lcp < atTok.length && lcp < short.length && atTok[lcp] === short[lcp]) lcp++;
+      if (lcp > mLcp) { mLcp = lcp; mBest = p.persona_key; }
+    }
+    if (mBest && mLcp >= 2) return mBest;
+  }
+  let best = null, bestScore = 0;   // 2) 키워드 점수
+  for (const p of lounge) {
+    const kws = String(p.keywords || "").split(",").map((k) => k.trim()).filter(Boolean);
+    let score = 0; for (const k of kws) if (s.includes(k)) score++;
+    if (score > bestScore) { bestScore = score; best = p.persona_key; }
+  }
+  if (best && bestScore > 0) return best;
+  return null;   // 키워드 미스 → 호출부에서 AI 시원 LLM 분류로 위임
+}
+// AI 시원 LLM 라우터 — 키워드로 안 잡힐 때 분야 분류(싸고 빠른 로컬 모델, model-tiering)
+const DOMAIN_TO_PERSONA = { ai: "lee_duhyeon", db: "lee_jaeheon", dashboard: "park", general: "park" };
+async function siwonClassify(message) {
+  const sys = "사용자 질문이 어느 담당인지 한 단어로만 답해. 선택지: ai(이상탐지·LSTM·모델·임계치·예측), db(데이터베이스·동기화·테이블·백엔드·쿼리), dashboard(화면·대시보드·지도·UI·챗봇·기능), general(그 외·일반·소개). 설명 없이 단어 하나만.";
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: OLLAMA_MODEL, messages: [{ role: "system", content: sys }, { role: "user", content: String(message).slice(0, 500) }], stream: false, think: false, keep_alive: KEEP_ALIVE, options: { temperature: 0, num_predict: 6 } }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return "general";
+    const out = ((await res.json()).message?.content || "").toLowerCase();
+    if (/ai|이상|lstm|모델|임계|예측/.test(out)) return "ai";
+    if (/db|데이터|동기화|테이블|백엔|쿼리/.test(out)) return "db";
+    if (/dash|화면|대시|지도|ui|챗봇|기능/.test(out)) return "dashboard";
+    return "general";
+  } catch { return "general"; }
+}
+
+// ── 봇 호출 가드 (공개 단톡방 — 도배·과부하·LLM 비용 방지) ──
+let botInFlight = 0, botMinuteCount = 0, botMinuteReset = 0;
+const botLastByIp = new Map();
+const BOT_MAX_CONCURRENT = 2;     // 동시 LLM 호출 상한(Mac Studio 보호)
+const BOT_IP_COOLDOWN_MS = 8000;  // IP당 봇 응답 최소 간격
+const BOT_MAX_PER_MIN = 30;       // 전체 분당 상한
+function botGuard(ip) {
+  const now = Date.now();
+  if (now > botMinuteReset) { botMinuteCount = 0; botMinuteReset = now + 60000; }
+  if (botInFlight >= BOT_MAX_CONCURRENT) return "concurrent";
+  if (botMinuteCount >= BOT_MAX_PER_MIN) return "minute";
+  if (now - (botLastByIp.get(ip) || 0) < BOT_IP_COOLDOWN_MS) return "cooldown";
+  return null;
+}
+
+function isGreeting(t) {
+  const s = String(t || "").trim();
+  return s.length <= 24 && /(안녕|하이|ㅎㅇ|헬로|hello|^hi\b|반가|방가|좋은\s*(아침|오후|저녁)|첨\s*뵙|반갑)/i.test(s);
+}
+async function postGuestbookBot(pk, reply) {
+  const persona = BOT_PERSONAS.find((x) => x.persona_key === pk);
+  const [br] = await pool.query("INSERT INTO guestbook_messages (user_id, display_name, role, body, bot_key, ip) VALUES (NULL, ?, NULL, ?, ?, 'bot')", [persona?.name || "AI", reply, pk]);
+  broadcastGuestbook({ type: "gb:msg", message: { id: Number(br.insertId), userId: null, name: persona?.name || "AI", role: null, botKey: pk, avatar: persona?.avatar || null, body: reply, createdAt: new Date().toISOString() } });
+}
+
+async function runInquiryReply(kind, message) {
+  // 상담원 문의 전용 — 로컬 Ollama(무료). (개발자 문의 GPT 경로는 '시원팀 공개문의' 통합으로 제거됨)
+  const system = SUPPORT_SYSTEM;
+  const userContent = `[${kind === "bug" ? "버그 신고" : "문의"}]\n${message}`;
+  try {
     const res = await fetch(`${OLLAMA_URL}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3811,7 +4199,7 @@ async function runInquiryReply(target, kind, message) {
         model: OLLAMA_MODEL,
         messages: [{ role: "system", content: system }, { role: "user", content: userContent }],
         stream: false, think: false,
-        options: { temperature: isDev ? 0.5 : 0.4, num_predict: isDev ? 700 : 400 },
+        options: { temperature: 0.4, num_predict: 400 },
       }),
       signal: AbortSignal.timeout(30_000),   // 30초 초과 시 접수 확인 폴백
     });
@@ -3834,7 +4222,7 @@ function parseInquiryImages(v) {
 // POST /api/inquiries (로그인) — 문의 접수 + AI 지원 답변
 app.post("/api/inquiries", requireAuth, dbRequired, async (req, res) => {
   try {
-    const target = req.body?.target === "developer" ? "developer" : "admin";
+    const target = "admin";   // 개발자 문의는 '시원팀 공개문의'로 통합 — 모든 문의는 상담원(관리자) 채널
     const kind = req.body?.kind === "bug" ? "bug" : "question";
     const message = String(req.body?.message || "").trim().slice(0, 4000);
     // 첨부 이미지 배열(data URL, png/jpeg/webp만, 최대 5장). 형식 불량 제외 + 총 용량 가드.
@@ -3849,13 +4237,11 @@ app.post("/api/inquiries", requireAuth, dbRequired, async (req, res) => {
       `INSERT INTO inquiries (target, user_id, login_id, display_name, kind, message, reply_quote, image, status, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
       [target, c.uid, c.lid, c.name || null, kind, message, replyQuote, imageJson, reqIp(req)],
     );
-    const reply = await runInquiryReply(target, kind, message);
+    const reply = await runInquiryReply(kind, message);
     if (reply) await pool.query(`UPDATE inquiries SET bot_reply = ? WHERE id = ?`, [reply, r.insertId]);
     // 같은 계정 다른 화면에 실시간 반영 (발신 화면 제외)
     broadcastToOwner(c.uid, { type: "inquiry:new", target, kind, message, reply: reply || null, ts: Date.now() }, req.body?.clientId || null);
-    const fallback = target === "developer"
-      ? "질문이 접수되었습니다. 개발자가 직접 확인 후 답변해 드릴게요. 🙇"
-      : "문의가 접수되었습니다. 관리자가 확인 후 반영하겠습니다. 🙇";
+    const fallback = "문의가 접수되었습니다. 관리자가 확인 후 반영하겠습니다. 🙇";
     res.json({ ok: true, id: r.insertId, reply: reply || fallback });
   } catch (err) {
     console.error("[POST /api/inquiries]", err);
@@ -3879,7 +4265,7 @@ app.get("/api/inquiries/mine", requireAuth, dbRequired, async (req, res) => {
 });
 
 // GET /api/inquiries (admin) — 전체 문의 목록
-app.get("/api/inquiries", requireAdmin, dbRequired, async (req, res) => {
+app.get("/api/inquiries", requireAdminView, dbRequired, async (req, res) => {
   try {
     const status = (req.query.status === "open" || req.query.status === "done") ? req.query.status : null;
     const target = (req.query.target === "developer" || req.query.target === "admin") ? req.query.target : null;
@@ -3999,30 +4385,35 @@ app.use(express.static(path.join(__dirname, "dist"), {
 // ── 방명록(공개 단톡방) API — 전체공개. 작성은 레이트리밋+길이제한+XSS안전(순수텍스트). 역할뱃지는 JWT로만(사칭 방지). ──
 const guestbookPostLimiter = rateLimit({
   windowMs: 60_000, max: 20,                         // IP당 분당 20건 — 도배 방지
-  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip,
+  keyGenerator: (req) => ipKeyGenerator(req.headers["cf-connecting-ip"] || req.ip),
   standardHeaders: true, legacyHeaders: false, validate: { trustProxy: false },
   message: { ok: false, error: "메시지를 너무 빠르게 보내고 있어요. 잠시 후 다시 시도해 주세요." },
 });
 const GUESTBOOK_MAX_BODY = 500, GUESTBOOK_MAX_NAME = 40;
 function gbClean(s, max) { return String(s == null ? "" : s).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim().slice(0, max); }
-function gbRow(r) { return { id: Number(r.id), userId: r.user_id, name: r.display_name, role: r.role, body: r.body, createdAt: r.created_at }; }
+function gbRow(r, reqUid) { return { id: Number(r.id), userId: r.user_id, name: r.display_name, role: r.role, botKey: r.bot_key || null, mine: reqUid != null && r.user_id != null && r.user_id === reqUid, body: r.body, image: r.image || null, createdAt: r.created_at }; }
 
 // 최근 메시지 (오름차순). 공개.
 app.get("/api/guestbook", dbRequired, async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit || "60", 10) || 60, 1), 100);
   const before = parseInt(req.query.before || "0", 10) || 0;
   try {
+    const c = authClaims(req); const reqUid = c && c.uid != null ? c.uid : null;
     const where = before > 0 ? "deleted_at IS NULL AND id < ?" : "deleted_at IS NULL";
     const args = before > 0 ? [before, limit] : [limit];
-    const [rows] = await pool.query(`SELECT id, user_id, display_name, role, body, created_at FROM guestbook_messages WHERE ${where} ORDER BY id DESC LIMIT ?`, args);
-    res.json({ ok: true, messages: rows.reverse().map(gbRow) });
+    const [rows] = await pool.query(`SELECT id, user_id, display_name, role, body, image, bot_key, created_at FROM guestbook_messages WHERE ${where} ORDER BY id DESC LIMIT ?`, args);
+    res.json({ ok: true, messages: rows.reverse().map((r) => gbRow(r, reqUid)) });
   } catch (e) { res.status(500).json({ ok: false, error: "방명록을 불러오지 못했습니다." }); }
 });
 
 // 메시지 작성 — 공개(로그인 선택). 로그인 시 계정 이름·역할, 게스트는 닉네임 입력.
 app.post("/api/guestbook", guestbookPostLimiter, dbRequired, async (req, res) => {
   const body = gbClean(req.body?.body, GUESTBOOK_MAX_BODY);
-  if (!body) return res.status(400).json({ ok: false, error: "내용을 입력해 주세요." });
+  // 사진 첨부 — data URL 단일. 프론트 캔버스 재인코딩으로 살균된 raster(png/jpeg/webp)만 허용(SVG·스크립트 차단). 공개 surface라 ~4MB 캡.
+  let image = (typeof req.body?.image === "string" && /^data:image\/(png|jpe?g|webp);base64,/.test(req.body.image)) ? req.body.image : null;
+  if (image && image.length > 4_000_000) return res.status(413).json({ ok: false, error: "사진 용량이 너무 큽니다 (4MB 이하)." });
+  if (!body && !image) return res.status(400).json({ ok: false, error: "내용이나 사진을 넣어 주세요." });
+  const botModel = GB_BOT_MODELS.has(req.body?.model) ? req.body.model : null;   // 작성자가 고른 봇 답변 모델(허용목록 검증, 없으면 페르소나 기본)
   const c = authClaims(req);                          // 선택적 인증
   let userId = null, role = null, name;
   if (c) { userId = c.uid; role = c.role; name = gbClean(c.name, GUESTBOOK_MAX_NAME) || "사용자"; }
@@ -4030,10 +4421,31 @@ app.post("/api/guestbook", guestbookPostLimiter, dbRequired, async (req, res) =>
   const ip = (reqIp(req) || "").toString().split(",")[0].slice(0, 45);
   const ua = String(req.headers["user-agent"] || "").slice(0, 255);
   try {
-    const [r] = await pool.query("INSERT INTO guestbook_messages (user_id, display_name, role, body, ip, ua) VALUES (?, ?, ?, ?, ?, ?)", [userId, name, role, body, ip, ua]);
-    const message = { id: Number(r.insertId), userId, name, role, body, createdAt: new Date().toISOString() };
+    const [r] = await pool.query("INSERT INTO guestbook_messages (user_id, display_name, role, body, image, ip, ua) VALUES (?, ?, ?, ?, ?, ?, ?)", [userId, name, role, body, image, ip, ua]);
+    const message = { id: Number(r.insertId), userId, name, role, body, image, createdAt: new Date().toISOString() };
     broadcastGuestbook({ type: "gb:msg", message });
     res.json({ ok: true, message });
+    // 봇 자동 답변 — 질문이면 페르소나가 답(비동기 LLM), 인사면 환영. 사용자 메시지 먼저 뜨고 봇 답변이 뒤따라 broadcast.
+    // ⚠️ 시원팀(admin)·총괄관리자(superadmin) = 실제 팀(AI 페르소나 본인)이 쓴 글 → 봇 자동응답 안 함(본인이 직접 답하니까).
+    const isTeamPoster = !!(c && ADMIN_TIER(c.role));
+    if (!isTeamPoster && isQuestion(body)) (async () => {
+      const blocked = botGuard(ip);
+      if (blocked) { console.log("[guestbook bot] skip:", blocked); return; }
+      botInFlight++; botMinuteCount++; botLastByIp.set(ip, Date.now());
+      try {
+        let pk = pickPersona(body);
+        if (!pk) { const dom = await siwonClassify(body); pk = DOMAIN_TO_PERSONA[dom] || "park"; }   // AI 시원 LLM 라우팅
+        const tp = BOT_PERSONAS.find((x) => x.persona_key === pk);
+        await postGuestbookBot("siwon", `${tp ? tp.name : "담당"}이 답해 드릴게요 🙋`);   // 보이는 핸드오프
+        broadcastGuestbook({ type: "gb:typing", botKey: pk, name: tp ? tp.name : "담당", avatar: tp?.avatar || null });   // 타이핑 인디케이터에 담당 페르소나(아바타·이름) 표시
+        const reply = await runPersonaReply(pk, body, botModel);
+        if (reply) await postGuestbookBot(pk, reply);
+      } catch (e) { console.warn("[guestbook bot]", e.message); }
+      finally { botInFlight--; }
+    })();
+    else if (!isTeamPoster && isGreeting(body)) (async () => {
+      try { await postGuestbookBot("siwon", "안녕하세요! 시원팀 공개문의예요 🙂 매설 가스배관 AI 통합관제 프로젝트에 대해 무엇이든 물어보세요 — 화면은 박지훈, AI 이상탐지는 이두현, DB는 이재헌이 답해드려요."); } catch (e) { console.warn("[guestbook greet]", e.message); }
+    })();
   } catch (e) { res.status(500).json({ ok: false, error: "메시지 저장에 실패했습니다." }); }
 });
 
@@ -4048,6 +4460,76 @@ app.delete("/api/guestbook/:id", dbRequired, requireAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: "삭제에 실패했습니다." }); }
 });
 
+// 공개 — 활성 봇 페르소나 표시정보(프론트 렌더용). system_prompt·이메일·키워드 등 내부정보 제외.
+app.get("/api/personas", (_req, res) => {
+  res.json({ ok: true, personas: BOT_PERSONAS.filter((p) => p.enabled).map((p) => ({ key: p.persona_key, name: p.name, avatar: p.avatar, lane: p.lane, tone: p.tone, isFallback: !!p.is_fallback })) });
+});
+
+// ── 관리자: 봇 페르소나 설정 (on/off·키워드·모델·프롬프트 편집). 편집 후 즉시 reload(재시작 불필요). ──
+// requireAdmin 게이트. contact_email 은 관리자에게만 반환(공개 /api/personas 는 비노출 유지).
+app.get("/api/admin/bot-personas", dbRequired, requireAdminView, async (_req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT persona_key, name, avatar, tone, lane, keywords, system_prompt, model, is_fallback, enabled, sort_order, contact_email, updated_at FROM bot_personas ORDER BY sort_order ASC");
+    res.json({ ok: true, personas: rows });
+  } catch (e) { console.error("[GET bot-personas]", e.message); res.status(500).json({ ok: false, error: "페르소나를 불러오지 못했습니다." }); }
+});
+
+app.patch("/api/admin/bot-personas/:key", dbRequired, requireAdmin, async (req, res) => {
+  const key = String(req.params.key || "").slice(0, 40);
+  try {
+    const [exist] = await pool.query("SELECT persona_key FROM bot_personas WHERE persona_key = ?", [key]);
+    if (!exist.length) return res.status(404).json({ ok: false, error: "없는 페르소나입니다." });
+    const b = req.body || {};
+    const sets = [], vals = [], changed = [];
+    const strField = (col, max) => { if (typeof b[col] === "string") { sets.push(`${col} = ?`); vals.push(b[col].slice(0, max)); changed.push(col); } };
+    strField("name", 60); strField("tone", 255); strField("lane", 160);
+    strField("keywords", 4000); strField("system_prompt", 60000); strField("avatar", 120); strField("contact_email", 120);
+    if (b.model !== undefined)       { sets.push("model = ?");       vals.push(String(b.model || "").slice(0, 40)); changed.push("model"); }
+    if (b.enabled !== undefined)     { sets.push("enabled = ?");     vals.push(b.enabled ? 1 : 0); changed.push("enabled"); }
+    if (b.is_fallback !== undefined) { sets.push("is_fallback = ?"); vals.push(b.is_fallback ? 1 : 0); changed.push("is_fallback"); }
+    if (b.sort_order !== undefined)  { sets.push("sort_order = ?");  vals.push(parseInt(b.sort_order, 10) || 0); changed.push("sort_order"); }
+    if (!sets.length) return res.status(400).json({ ok: false, error: "변경할 내용이 없습니다." });
+    vals.push(key);
+    await pool.query(`UPDATE bot_personas SET ${sets.join(", ")} WHERE persona_key = ?`, vals);
+    await loadBotPersonas();   // 즉시 반영 (BOT_PERSONAS 재로드)
+    // 감사로그 — 누가 어떤 페르소나의 어떤 필드를 바꿨는지(공개 봇 동작 변경 추적). best-effort.
+    try {
+      const ip = (reqIp(req) || "").toString().split(",")[0].slice(0, 45);
+      await pool.query(
+        "INSERT INTO audit_log (action, target_type, target_id, ip, user_agent, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+        ["persona_edit", "bot_persona", key, ip, String(req.headers["user-agent"] || "").slice(0, 255), JSON.stringify({ by: req.auth?.lid || null, fields: changed })],
+      );
+    } catch (_) { /* swallow */ }
+    const updated = BOT_PERSONAS.find((p) => p.persona_key === key) || null;
+    res.json({ ok: true, persona: updated });
+  } catch (e) { console.error("[PATCH bot-personas]", e.message); res.status(500).json({ ok: false, error: "저장에 실패했습니다." }); }
+});
+
+// 디버그 — RAG 검색 확인(섹션·점수). 지식은 공개 정보라 노출 무방.
+app.get("/api/rag/test", localOnly, async (req, res) => {
+  const q = String(req.query.q || "").slice(0, 500);
+  const persona = String(req.query.persona || "park");
+  if (!q) return res.json({ ok: false, error: "q 파라미터 필요" });
+  const hits = await retrieveChunks(q, persona, 4);
+  res.json({ ok: true, kbChunks: KB_CHUNKS.length, persona, hits: hits.map((h) => ({ section: h.section, score: h.score })) });
+});
+
+// 디버그 — 페르소나 답변 엔진 확인(grounding 주입 + LLM 생성).
+app.get("/api/persona/test", localOnly, async (req, res) => {
+  const persona = String(req.query.persona || "park");
+  const q = String(req.query.q || "").slice(0, 1000);
+  if (!q) return res.json({ ok: false, error: "q 파라미터 필요" });
+  const t0 = Date.now();
+  const reply = await runPersonaReply(persona, q);
+  res.json({ ok: true, persona, ms: Date.now() - t0, reply: reply || "(응답 없음)" });
+});
+
+// 디버그 — 라우팅 확인(질문 판정 + 선택 페르소나). Evals용.
+app.get("/api/route/test", localOnly, (req, res) => {
+  const q = String(req.query.q || "");
+  res.json({ ok: true, isQuestion: isQuestion(q), persona: pickPersona(q) });
+});
+
 // SPA fallback (모르는 경로 → index.html)
 app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "dist", "index.html"));
@@ -4057,6 +4539,14 @@ const httpServer = app.listen(PORT, () => {
   console.log(`▶ Server  http://localhost:${PORT}`);
   console.log(`▶ Ollama  ${OLLAMA_URL}`);
   console.log(`▶ Model   ${OLLAMA_MODEL}`);
+  // 모델 예열 — 첫 방문자 콜드스타트 방지. 부팅 직후 qwen 1토큰 생성 + nomic 임베드 1회로 메모리 로드(keep_alive로 상주 유지).
+  (async () => {
+    try {
+      await fetch(`${OLLAMA_URL}/api/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: OLLAMA_MODEL, messages: [{ role: "user", content: "안녕" }], stream: false, think: false, keep_alive: KEEP_ALIVE, options: { num_predict: 1 } }) });
+      await embedText("warmup", "query").catch(() => {});
+      console.log(`▶ 예열   Ollama 모델 로드 완료 (keep_alive ${KEEP_ALIVE})`);
+    } catch (e) { console.warn("[warmup]", e.message); }
+  })();
 });
 
 // ── 챗봇 WebSocket (/ws/chat) — 로그인 개인 계정만. 쿠키 인증 후 uid room 등록. (게스트/익명은 업그레이드 401) ──
@@ -4097,8 +4587,23 @@ wssGuest.on("connection", (ws) => {
   try { ws.send(JSON.stringify({ type: "gb:hello", online: guestbookRoom.size })); } catch {}
   broadcastGuestbook({ type: "gb:presence", online: guestbookRoom.size });
   ws.on("pong", () => { ws.isAlive = true; });
-  ws.on("message", () => {});
-  ws.on("close", () => { guestbookRoom.delete(ws); broadcastGuestbook({ type: "gb:presence", online: guestbookRoom.size }); });
+  // 단톡방 '입력 중…' 신호 중계 — 작성은 REST(POST)로만. 그 외 inbound 는 무시.
+  ws.on("message", (raw) => {
+    if (!raw || raw.length > 600) return;                       // 타이핑 신호는 작음 — 큰 페이로드 무시
+    let m; try { m = JSON.parse(String(raw)); } catch { return; }
+    if (!m || m.type !== "typing") return;
+    const connId = String(m.connId || "").slice(0, 40);
+    if (!connId) return;
+    if (m.typing) { const now = Date.now(); if (ws._gbTypingAt && now - ws._gbTypingAt < 900) return; ws._gbTypingAt = now; }  // per-conn 스로틀(도배 방지)
+    ws._gbConnId = connId;
+    const name = String(m.name || "").replace(/[\x00-\x1F]/g, "").slice(0, 40);
+    broadcastGuestbook({ type: "gb:usertyping", connId, name, typing: !!m.typing });   // 발신자 제외는 클라가 connId 로 처리
+  });
+  ws.on("close", () => {
+    guestbookRoom.delete(ws);
+    if (ws._gbConnId) broadcastGuestbook({ type: "gb:usertyping", connId: ws._gbConnId, typing: false });   // 입력 중이던 소켓 끊김 → 표시 정리
+    broadcastGuestbook({ type: "gb:presence", online: guestbookRoom.size });
+  });
   ws.on("error", () => {});
 });
 // 하트비트 — 죽은 소켓 정리 (CF 터널 idle reaping 대비)
@@ -4187,6 +4692,10 @@ function buildSystemPrompt(ctx) {
 # 숫자 판정 규칙 (환각 방지)
 - 실제값이 기준값 이상이면 항상 **초과**입니다. 이 경우 "근접", "가까움", "임박" 같은 표현 금지.
 - "근접"은 실제값이 기준값 미만이면서 기준값의 80% 이상일 때만 사용합니다. 예: AC 450mV 는 500mV 에 근접, AC 971mV 는 500mV 초과.
+- **수치 조건 비교는 부호 포함 수학적 비교**(음수 주의): 사용자의 "이상/이하/초과/미만" 을 find_devices_by_value 의 op 에 그대로 매핑 — 이상=gte(≥), 이하=lte(≤), 초과=gt(>), 미만=lt(<). 방식전위·통신품질처럼 값이 **음수여도 동일**하게 적용한다. 예: "방식전위 -1500mV 초과" = 값 > -1500 (즉 -1499·-900·6 처럼 -1500 보다 **큰** 값만 — **-2050·-1940 은 -1500 보다 작으므로 제외**). "방식전위 -800mV 이상" = 값 ≥ -800 (-700·6 등만, -1594 는 제외). **CP 도메인의 "방호 강도(더 음수=양호)" 로 부등호를 뒤집어 재해석하지 말 것** — 질문의 부등호를 측정값 자체에 그대로 적용한다.
+- find_devices_by_value 결과가 limit(기본 20개)에 도달하면 그 수를 전체 개수로 단정하지 말고 "상위 N개(더 있을 수 있음)" 로 안내한다. 정확한 전체 개수가 필요하면 get_aggregate 등으로 확인.
+- **단말 ID는 도구 결과의 표기를 그대로** 쓴다 — 예: TB24-250446 (하이픈·자릿수 임의 변형 금지, "TB250446" 처럼 쓰지 말 것).
+- 수치·상태는 **도구 결과값을 그대로** 인용하고 임의 재계산하지 않는다. 상태/상세 답변에는 가능하면 **측정 시각**(도구의 measuredAt/lastSeen/predictedAt)을 함께 밝힌다(값이 시점마다 변할 수 있으므로).
 - 기준값을 말할 때는 가능하면 차이도 함께 말합니다. 예: "971mV 는 500mV 기준보다 471mV 높습니다."
 - 최신 단일값만 조회한 경우 "상승 중/하락 중/추세" 라고 단정 금지. 추세 표현은 get_device_history, get_recent_changes, 또는 최근 12시간 MSE 추이 표가 있을 때만 사용.
 - **시계열 해석 주의**: 값이 평탄/안정적이어도 기준을 벗어나면 정상이라고 말하지 마세요. 예: 방식전위 7~8mV 는 변동이 작아도 -850mV 방호 기준을 크게 초과한 위험/보호 미흡 상태입니다. get_device_history 의 latestJudgement, get_recent_changes 의 endJudgement 가 있으면 그 판정을 반드시 함께 말하세요.

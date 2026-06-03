@@ -104,7 +104,7 @@ export function SignUp({ onSuccess, onBackToLogin }) {
     pw: "",
     pw2: "",
     name: "",
-    role: "operator",
+    role: "viewer",   // 신규 가입 기본 = 뷰어(읽기전용). 관리자 승급은 총괄 관리자만.
   });
   const [focus, setFocus] = useState(null);
   const [errors, setErrors] = useState({});
@@ -301,7 +301,7 @@ export function SignUp({ onSuccess, onBackToLogin }) {
             <form onSubmit={submit}>
               <Field
                 icon={<Icons.user size={16} />}
-                label="운영자 ID"
+                label="아이디"
                 hint="2~20자"
                 error={errors.id}
                 focused={focus === "id"}
@@ -312,7 +312,7 @@ export function SignUp({ onSuccess, onBackToLogin }) {
                   onFocus={() => setFocus("id")}
                   onBlur={() => setFocus(null)}
                   style={inputStyle}
-                  placeholder="예: kim.operator"
+                  placeholder="영문·숫자 2~20자"
                   autoComplete="username"
                 />
               </Field>

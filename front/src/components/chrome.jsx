@@ -7,8 +7,8 @@ import { useWeather } from "../lib/weather.js";
 
 // 역할별 라벨/그라디언트 (Header 아바타 · 드롭다운 톤)
 const ROLE_META = {
-  superadmin: { label: "총관리자", grad: "linear-gradient(135deg, #f43f5e, #9f1239)", glow: "rgba(244,63,94,0.45)", avatar: "/avatars/developer.png" },
-  admin:    { label: "관리자", grad: "linear-gradient(135deg, #8b5cf6, #6d28d9)", glow: "rgba(139,92,246,0.45)", avatar: "/avatars/admin.png" },
+  superadmin: { label: "총괄 관리자", grad: "linear-gradient(135deg, #f43f5e, #9f1239)", glow: "rgba(244,63,94,0.45)", avatar: "/avatars/developer.png" },
+  admin:    { label: "시원팀", grad: "linear-gradient(135deg, #8b5cf6, #6d28d9)", glow: "rgba(139,92,246,0.45)", avatar: "/avatars/admin.png" },
   operator: { label: "관제사", grad: "linear-gradient(135deg, #38bdf8, #0284c7)", glow: "rgba(56,189,248,0.45)", avatar: "/avatars/operator.png" },
   viewer:   { label: "뷰어",   grad: "linear-gradient(135deg, #94a3b8, #64748b)", glow: "rgba(148,163,184,0.4)"  },
   guest:    { label: "게스트", grad: "linear-gradient(135deg, #fbbf24, #d97706)", glow: "rgba(245,158,11,0.45)", avatar: "/avatars/guest.png" },
@@ -105,6 +105,8 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
   };
 
   const roleMeta = ROLE_META[user?.role] || ROLE_META.operator;
+  const myAvatar = user?.avatar || roleMeta.avatar;   // 본인 커스텀/멤버 아바타 우선, 없으면 역할 기본
+  const isStaff = user?.role === "admin" || user?.role === "superadmin";   // 관람 계정(뷰어·게스트)은 프로필/비번 메뉴 숨김 (읽기 전용)
   const displayName = user?.name || "사용자";
   const initial = (displayName.trim()[0] || "U").toUpperCase();
 
@@ -121,7 +123,12 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
       padding: "0 32px", zIndex: 50,   // SubNav(40)·Banner(35) 위로
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-        <div style={{ fontSize: 17, fontWeight: 800, letterSpacing: "-0.01em" }}>
+        <div
+          onClick={() => window.location.reload()}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); window.location.reload(); } }}
+          role="button" tabIndex={0} title="새로고침"
+          style={{ fontSize: 17, fontWeight: 800, letterSpacing: "-0.01em", cursor: "pointer", userSelect: "none" }}
+        >
           AI 기반 지능형 통합관제 시스템
         </div>
         <div style={{ width: 1, height: 18, background: "var(--line)", margin: "0 8px" }} />
@@ -299,7 +306,7 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
               color: "#fff", fontWeight: 800, fontSize: 13,
               boxShadow: `0 0 0 2px var(--bg-sunk)`,
               flexShrink: 0, overflow: "hidden",
-            }}>{roleMeta.avatar ? <img src={roleMeta.avatar} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : initial}</div>
+            }}>{myAvatar ? <img src={myAvatar} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : initial}</div>
             <span style={{
               color: "var(--ink-3)",
               transform: open ? "rotate(90deg)" : "rotate(0deg)",
@@ -340,7 +347,7 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
                   boxShadow: `0 4px 12px -3px ${roleMeta.glow}`,
                   flexShrink: 0, overflow: "hidden",
                 }}>
-                  {roleMeta.avatar ? <img src={roleMeta.avatar} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : initial}
+                  {myAvatar ? <img src={myAvatar} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : initial}
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{
@@ -368,17 +375,21 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
 
               {/* 메뉴 영역 */}
               <div style={{ padding: 6 }}>
-                <MenuItem
-                  icon={<Icons.user size={14} />}
-                  label="내 정보"
-                  onClick={() => { setOpen(false); setProfileOpen("profile"); }}
-                />
-                <MenuItem
-                  icon={<Icons.lock size={14} />}
-                  label="비밀번호 변경"
-                  onClick={() => { setOpen(false); setProfileOpen("password"); }}
-                />
-                <div style={{ height: 1, background: "var(--line)", margin: "4px 6px" }} />
+                {isStaff && (
+                  <>
+                    <MenuItem
+                      icon={<Icons.user size={14} />}
+                      label="내 정보"
+                      onClick={() => { setOpen(false); setProfileOpen("profile"); }}
+                    />
+                    <MenuItem
+                      icon={<Icons.lock size={14} />}
+                      label="비밀번호 변경"
+                      onClick={() => { setOpen(false); setProfileOpen("password"); }}
+                    />
+                    <div style={{ height: 1, background: "var(--line)", margin: "4px 6px" }} />
+                  </>
+                )}
                 <MenuItem
                   icon={<span style={{ display: "grid", placeItems: "center" }}>↩</span>}
                   label="로그아웃"
@@ -532,10 +543,9 @@ export function SubNav({ tab, setTab, apiStatus = "mock", dbStatus = null, dbInf
     { k: "dashboard", ko: "대시보드" },
     { k: "equipment", ko: "전체 장비 현황" },
   ];
-  const tabs = (user?.role === "admin" || user?.role === "superadmin")
+  const tabs = (user?.role === "admin" || user?.role === "superadmin" || user?.role === "viewer" || user?.role === "guest")
     ? [...baseTabs, { k: "users", ko: "관리자 페이지", badge: pendingCount }]
     : baseTabs;
-  const st = API_STATUS_STYLE[apiStatus] || API_STATUS_STYLE.mock;
   return (
     <div style={{
       position: "absolute", left: 0, right: 0, top: 56, height: 48,
@@ -589,24 +599,13 @@ export function SubNav({ tab, setTab, apiStatus = "mock", dbStatus = null, dbInf
       )}
       {/* 데모 모드 토글은 헤더 설정 드롭다운(⚙️) 으로 이동 — 옴니 5/22 피드백 반영
           이전 SubNav 토글은 제거. ON 상태는 위 'DEMO MODE' 배지로 명시. */}
-      <span style={{
-        display: "flex", alignItems: "center", gap: 6,
-        fontSize: 11, fontWeight: 700, color: st.textColor,
-        fontFamily: "JetBrains Mono, monospace",
-        marginRight: 16,
-      }}>
-        <span style={{
-          width: 6, height: 6, borderRadius: "50%", background: st.dot,
-          animation: apiStatus === "ok" ? "pulse-dot 2s infinite" : "none",
-        }} />
-        {st.text}
-      </span>
-      {/* DB 연결 상태 (AI 연동됨 옆) — null=확인 중, true=OK, false=끊김 */}
+      {/* 'AI 연동됨' 배지 제거 (사용자 요청) — DB 연동과 사실상 중복이라 DB 배지만 유지 */}
+      {/* DB 연결 상태 — 문구는 'DB'만, 상태는 점 색(초록=OK/빨강=끊김/노랑=확인중)·툴팁으로 표시 */}
       {(() => {
         const isOk  = dbStatus === true;
         const isBad = dbStatus === false;
         const color = isOk ? "var(--ok)" : isBad ? "var(--err)" : "var(--warn)";
-        const text  = isOk ? "DB 연결됨" : isBad ? "DB 끊김" : "DB 확인 중";
+        const text  = "DB";   // 문구는 'DB'만
         const tip   = isOk && dbInfo
           ? `siwon MySQL · 시계열 ${dbInfo.rows?.toLocaleString() || "?"} row${dbInfo.ollama ? " · Ollama OK" : ""}`
           : isBad ? "/api/health 실패 — Mac Studio·DB 점검 필요" : "/api/health 확인 중";

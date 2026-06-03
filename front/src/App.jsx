@@ -375,7 +375,7 @@ function EquipmentDrawer({ item, onClose }) {
 
 export function App() {
   const [screen, setScreen] = useState(() => {
-    // 세션이 살아있으면 바로 app, 아니면 login (공개 회원가입 제거 — signup 화면 없음)
+    // 세션이 살아있으면 바로 app, 아니면 login (공개 회원가입 화면 있음 — Login '회원가입 →' 버튼)
     return currentSession() ? "app" : "login";
   });
   const [user, setUser]     = useState(() => currentSession());
@@ -424,11 +424,8 @@ export function App() {
   const [dbInfo,   setDbInfo]   = useState(null);   // { rows, model, ollama }
   const [aiEvents,  setAiEvents]  = useState([]);     // 실시간 로그로 전달되는 AI 이벤트
   const [announcement, setAnnouncement] = useState(null);   // 관리자 등록 공지 (배너) — null=없음
-  // ── 데모 모드 (발표용 가상 장비 10대) ─────────────
-  const [demoMode, setDemoMode] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("siwon.demo.mode") || "false"); }
-    catch { return false; }
-  });
+  // 데모 모드 제거(2026-06-02) — 기능 폐지, 항상 false
+  const demoMode = false;
   // 시스템 로그 드로어 토글 (5/26 floating → 헤더 알약으로 이동)
   const [logOpen, setLogOpen] = useState(false);
   useEffect(() => {
@@ -576,17 +573,10 @@ export function App() {
   useEffect(() => { localStorage.setItem("screen", screen); }, [screen]);
   useEffect(() => { localStorage.setItem("tab",    tab);    }, [tab]);
 
-  // 데모 모드 변경 시: API client flag 갱신 + localStorage 저장 + 즉시 리로드
-  useEffect(() => {
-    setApiDemoMode(demoMode);
-    try { localStorage.setItem("siwon.demo.mode", JSON.stringify(demoMode)); } catch {}
-    // 토글 즉시 데이터 새로고침
-    loadData();
-  }, [demoMode, loadData]);
 
   // admin 권한 사라지면 users 탭에서 자동 빠져나감 (탭 보호)
   useEffect(() => {
-    if (tab === "users" && user?.role !== "admin" && user?.role !== "superadmin") setTab("dashboard");
+    if (tab === "users" && user?.role !== "admin" && user?.role !== "superadmin" && user?.role !== "viewer" && user?.role !== "guest") setTab("dashboard");
   }, [tab, user]);
 
   // 테마 적용
@@ -652,7 +642,6 @@ export function App() {
         mapStyle={tweakState.mapStyle}
         setMapStyle={setMapStyle}
         demoMode={demoMode}
-        onToggleDemo={() => setDemoMode((v) => !v)}
         /* 로그 토글은 5/26 Header → AIPanels 헤더 안으로 이동
            Header 알약 제거. Dashboard 에 직접 onToggleLog 전달 */
       />
@@ -660,7 +649,7 @@ export function App() {
         tab={tab}
         setTab={(k) => {
           // 비-admin 이 users 탭 진입 차단 (URL/state 보호)
-          if (k === "users" && user?.role !== "admin" && user?.role !== "superadmin") return;
+          if (k === "users" && user?.role !== "admin" && user?.role !== "superadmin" && user?.role !== "viewer" && user?.role !== "guest") return;
           setTab(k);
         }}
         apiStatus={apiStatus}
@@ -678,7 +667,7 @@ export function App() {
           <div style={{
             position: "absolute", left: 0, right: 0,
             top: bannerShown ? 144 : 104,
-            bottom: 0,
+            bottom: 0,   // 예약 없음 — 푸터는 그리드 하단 패딩(18px) 위에 투명 오버레이로 얹혀 카드에 붙어 보임
             transition: "top 220ms",
           }}>
         {tab === "dashboard" && (
@@ -715,6 +704,15 @@ export function App() {
       </div>
         );
       })()}
+      {/* 하단 카피라이트 푸터 — 로그인/가입 화면과 동일 문구. 앱 셸 공통(대시보드·장비·관리자) */}
+      <footer style={{
+        position: "absolute", left: 0, right: 0, bottom: 0, height: 18, zIndex: 5,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 10, color: "var(--ink-4)", letterSpacing: "-0.01em",
+        background: "transparent", pointerEvents: "none", userSelect: "none",
+      }}>
+        © 2026 시원팀 · 호서대학교 컴퓨터공학부 캡스톤디자인
+      </footer>
       {/* AnalysisModal 폐기 (5/26) — AI 탐지 카드 클릭은 챗봇 메시지 푸쉬로 대체 */}
       <EquipmentDrawer item={drawer} onClose={() => setDrawer(null)} />
       <TweaksPanel state={tweakState} setState={setTweakState} show={tweaksOn} />

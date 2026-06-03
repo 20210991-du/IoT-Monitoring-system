@@ -28,7 +28,7 @@ src/
 ├── components/
 │   ├── Icons.jsx             # ic() 팩토리 + 30여 아이콘
 │   ├── chrome.jsx            # Header, SubNav, EmergencyBanner, FooterBar, useClock
-│   ├── MapPanel.jsx          # SVG 지형 3스타일(light/dark/satellite)
+│   ├── MapPanel.jsx          # Leaflet 지도(타일 3종 light=OSM/dark=Carto/satellite=ArcGIS) + 커스텀 SVG 마커
 │   └── TweaksPanel.jsx
 └── pages/
     ├── Login.jsx

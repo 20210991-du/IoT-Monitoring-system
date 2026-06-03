@@ -1376,6 +1376,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
   const stickBottomRef = useRef(true);   // 맨아래 고정 상태인지 — onScroll 로 추적, 전송/스트리밍 추적용
   const [guestbookOpen, setGuestbookOpen] = useState(false);   // 단톡방(방명록) 모드 — 토글 4번째 칸
   const gb = useGuestbook(guestbookOpen);
+  const [gbImage, setGbImage] = useState(null);                // 라운지(공개문의) 사진 첨부 — 단일 data URL(살균·리사이즈)
   const isGbAdmin = !!user && (user.role === "admin" || user.role === "superadmin");
   useEffect(() => {
     if (!modelMenuOpen) return;
@@ -1782,11 +1783,12 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
       const r = await fetch(`/api/inquiries/mine?target=${channel}`).then((x) => x.json());
       if (r?.ok) for (const q of (r.inquiries || [])) {
         const _qt = ttime(q.createdAt);
+        const _dk = localDateKey(q.createdAt);   // 날짜 구분선용
         const _imgs = Array.isArray(q.images) ? q.images : (q.image ? [q.image] : []);
-        for (const _src of _imgs) msgs.push({ role: "user", image: _src, text: "", time: _qt, qid: q.id });   // 사진 먼저(각각)
-        if (q.message) msgs.push({ role: "user", text: q.message, time: _qt, qid: q.id, quote: q.replyQuote || null });  // 글자 다음
-        if (q.botReply) msgs.push({ role: "ai", text: q.botReply, time: ttime(q.createdAt), replyTo: q.id, meta: { model: channel === "developer" ? "AI 설명" : (q.kind === "bug" ? "버그 접수" : "문의 접수") } });
-        if (q.adminReply) msgs.push({ role: "ai", text: q.adminReply, time: ttime(q.createdAt), human: true, replyTo: q.id, meta: { model: channel === "developer" ? "개발자 답변" : "관리자 답변" } });
+        for (const _src of _imgs) msgs.push({ role: "user", image: _src, text: "", time: _qt, dateKey: _dk, qid: q.id });   // 사진 먼저(각각)
+        if (q.message) msgs.push({ role: "user", text: q.message, time: _qt, dateKey: _dk, qid: q.id, quote: q.replyQuote || null });  // 글자 다음
+        if (q.botReply) msgs.push({ role: "ai", text: q.botReply, time: ttime(q.createdAt), dateKey: _dk, replyTo: q.id, meta: { model: channel === "developer" ? "AI 설명" : (q.kind === "bug" ? "버그 접수" : "문의 접수") } });
+        if (q.adminReply) msgs.push({ role: "ai", text: q.adminReply, time: ttime(q.createdAt), dateKey: _dk, human: true, replyTo: q.id, meta: { model: channel === "developer" ? "개발자 답변" : "관리자 답변" } });
       }
     } catch { /* 비어있어도 진행 */ }
     setInquiryMsgs(msgs);
@@ -1802,10 +1804,11 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     setInput(""); setInquiryImages([]); setReplyTarget(null);
     stickBottomRef.current = true;   // 전송 시 맨아래로 따라 내리도록 고정
     const _now = ttime(Date.now());
+    const _dk = todayKey();   // 날짜 구분선용
     setInquiryMsgs((m) => {
       const add = [];
-      imgs.forEach((src) => add.push({ role: "user", image: src, text: "", time: _now }));   // 사진 말풍선 먼저(각각)
-      if (text) add.push({ role: "user", text, time: _now, quote: quoteText });   // 글자 말풍선 다음
+      imgs.forEach((src) => add.push({ role: "user", image: src, text: "", time: _now, dateKey: _dk }));   // 사진 말풍선 먼저(각각)
+      if (text) add.push({ role: "user", text, time: _now, dateKey: _dk, quote: quoteText });   // 글자 말풍선 다음
       return [...m, ...add];
     });
     setInquirySending(true);
@@ -1815,9 +1818,9 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
         body: JSON.stringify({ target: channel, kind, message: text, images: imgs, replyQuote: quoteText, clientId: connIdRef.current }),
       }).then((x) => x.json());
       const reply = (r && r.reply) || (channel === "developer" ? "질문이 접수되었습니다. 개발자가 확인 후 답변드립니다. 🙇" : "문의가 접수되었습니다. 관리자가 확인 후 반영하겠습니다. 🙇");
-      setInquiryMsgs((m) => [...m, { role: "ai", text: reply, time: ttime(Date.now()), meta: { model: channel === "developer" ? "AI 설명" : (kind === "bug" ? "버그 접수" : "문의 접수") } }]);
+      setInquiryMsgs((m) => [...m, { role: "ai", text: reply, time: ttime(Date.now()), dateKey: todayKey(), meta: { model: channel === "developer" ? "AI 설명" : (kind === "bug" ? "버그 접수" : "문의 접수") } }]);
     } catch {
-      setInquiryMsgs((m) => [...m, { role: "ai", text: "접수 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", time: ttime(Date.now()) }]);
+      setInquiryMsgs((m) => [...m, { role: "ai", text: "접수 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", time: ttime(Date.now()), dateKey: todayKey() }]);
     } finally { setInquirySending(false); }
   };
 
@@ -1844,7 +1847,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
   // 추천 질문 항목 (부모 보유 — 목록·↑/↓ 네비·Enter 선택용). 아이콘 · 요약단어 · 상세설명 · 전송질문.
   const quickPromptItems = [
     // 문의 채널 (목록 최상단) — 선택 시 프롬프트 전송이 아니라 문의방을 연다 (channel 필드로 구분)
-    { img: "/avatars/developer.png", title: "개발자 문의", desc: "프로젝트 기능 설명 — 개발자가 답변",   channel: "developer" },
+    { img: "/avatars/siwon.png", title: "시원팀 공개문의", desc: "프로젝트·팀에게 질문 — AI 페르소나가 답변", lounge: true },
     { img: "/avatars/agent.png",     title: "상담원 문의", desc: "문의·버그 신고 — 관리자에게 전달", channel: "admin" },
     // ── 추천 질문 50선 (매설배관 음극방식·AI(XAI)·운영 도메인 — 예리한 진단/분석 질문) ──
     { icon: Icons.crosshair, title: "우선 점검", desc: "위험도 순 TOP 5 + 근거·조치", prompt: "전체 단말을 AI 위험도 순으로 정렬해 즉시 점검이 필요한 TOP 5와 각 단말의 근거 수치(방식전위·AC유입·MSE)·권장 조치를 표로 정리해줘" },
@@ -1899,20 +1902,80 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
     { icon: Icons.sparkle, title: "용어 설명", desc: "도메인 용어 쉽게", prompt: "방식전위·교류부식·희생양극 등 핵심 용어를 비전문가용으로 쉽게 설명해줘" },
   ];
   // 슬래시 명령 모드 — input 이 '/' 로 시작하면 추천 질문 팝업을 열고, '/' 뒤 글자로 필터링
-  const slashMode = !inquiryMode && input.startsWith("/");
+  const slashMode = input.startsWith("/");
   const promptQuery = slashMode ? input.slice(1).trim().toLowerCase() : "";
+  // 시원팀 공개문의(라운지) 전용 추천문구 — AI 페르소나에게 묻는 질문(스킬 칩으로 동작: 선택 → 덧붙임 입력 → 전송)
+  //  · 아바타(img)가 붙은 항목은 담당 AI 페르소나에게 자동 라우팅됨 (이두현=AI, 이재헌=DB·PM, 박지훈=대시보드·통합)
+  //  · arg 가 있으면 입력칸이 '인자' 입력칸으로 동작 (관제 도우미 추천질문과 동일 메커니즘)
+  const loungePrompts = [
+    // ── 프로젝트 전반 ──
+    { icon: Icons.sparkle, title: "프로젝트 소개", desc: "이 시스템이 뭐예요?", prompt: "이 프로젝트가 어떤 시스템인지 한눈에 소개해줘" },
+    { icon: Icons.briefcase, title: "핵심 가치", desc: "차별점·강점이 뭐예요?", prompt: "이 프로젝트의 핵심 가치와 다른 관제 시스템과의 차별점이 뭐예요?" },
+    { icon: Icons.layers, title: "기술 스택", desc: "프론트·백·AI·DB·인프라", prompt: "이 프로젝트의 전체 기술 스택(프론트·백엔드·AI·DB·인프라)을 정리해줘" },
+    { icon: Icons.box, title: "전체 흐름", desc: "센서→AI→대시보드", prompt: "센서 데이터가 수집되고 AI를 거쳐 대시보드에 뜨기까지 전체 흐름을 설명해줘" },
+    // ── AI 이상탐지 (이두현) ──
+    { img: "/avatars/lee_duhyeon.png", title: "AI 이상탐지", desc: "어떤 모델·판정 기준?", prompt: "AI 이상탐지는 어떤 모델을 쓰고 위험을 어떻게 판정해요?" },
+    { img: "/avatars/lee_duhyeon.png", title: "왜 이 모델?", desc: "분류 대신 AutoEncoder", prompt: "왜 분류 모델 대신 LSTM AutoEncoder를 선택했어요?" },
+    { img: "/avatars/lee_duhyeon.png", title: "3단계 판정", desc: "정상·관찰·이상", prompt: "정상·관찰·이상 3단계로 나눈 이유와 '관찰' 단계의 의미가 뭐예요?" },
+    { img: "/avatars/lee_duhyeon.png", title: "임계치 설계", desc: "고정값·장비별 기준", prompt: "이상 임계치를 고정값으로, 그것도 장비마다 다르게 설정한 이유가 뭐예요?" },
+    { img: "/avatars/lee_duhyeon.png", title: "AI 신뢰도", desc: "결과를 믿어도 되나", prompt: "AI 결과에 신뢰도(ai_reliability) 값을 같이 출력하는 이유가 뭐예요?" },
+    // ── 데이터·DB·PM (이재헌) ──
+    { img: "/avatars/lee_jaeheon.png", title: "데이터·DB", desc: "출처·동기화", prompt: "데이터는 어디서 오고 DB는 어떻게 동기화해요?" },
+    { img: "/avatars/lee_jaeheon.png", title: "센서·통신", desc: "어떤 센서·누가 제공", prompt: "어떤 센서 데이터를 수집하고 IoT 센서 통신은 누가 제공했어요?" },
+    { img: "/avatars/lee_jaeheon.png", title: "PM·일정", desc: "프로젝트 관리 방식", prompt: "PM으로서 일정과 팀 협업은 어떻게 관리했어요?" },
+    // ── 대시보드·통합 (박지훈) ──
+    { img: "/avatars/park.png", title: "대시보드·지도", desc: "화면 어떻게 만들었나", prompt: "대시보드와 지도는 무엇으로 어떻게 만들었어요?" },
+    { img: "/avatars/park.png", title: "통합 아키텍처", desc: "파트들을 어떻게 연결", prompt: "프론트·백엔드·AI 파트를 어떻게 하나의 시스템으로 통합했어요?" },
+    // ── 팀·과정 ──
+    { icon: Icons.user, title: "팀 역할", desc: "누가 뭘 맡았나", prompt: "팀원들이 각자 어떤 역할을 맡았어요?" },
+    { icon: Icons.alert, title: "어려웠던 점", desc: "가장 큰 도전", prompt: "프로젝트에서 가장 어려웠던 점은 뭐였어요?" },
+  ];
+  // 상담원 문의(문의·버그 신고) 전용 추천 템플릿 — 선택 시 입력칸에 채워짐(빈칸 채워 제출). kind 가 있으면 문의 종류도 설정.
+  const inquiryPrompts = [
+    { icon: Icons.alert,    title: "버그 신고",       desc: "오작동·에러 신고",   kind: "bug",      prompt: "[버그 신고]\n- 어느 화면/기능: \n- 무엇을 하다가: \n- 어떤 문제가 났는지: \n- 재현 방법(있다면): " },
+    { icon: Icons.eye,      title: "화면 오류·깨짐",  desc: "레이아웃·표시 문제", kind: "bug",      prompt: "[화면 오류]\n- 어느 화면: \n- 브라우저/기기: \n- 어떻게 보이는지(증상): " },
+    { icon: Icons.database, title: "데이터·수치 오류", desc: "값이 이상해요",       kind: "bug",      prompt: "[데이터 오류]\n- 어느 장비/화면: \n- 표시된 값: \n- 기대한 값: " },
+    { icon: Icons.sparkle,  title: "기능 제안",       desc: "이런 기능이 있으면", kind: "question", prompt: "[기능 제안]\n- 원하는 기능: \n- 왜 필요한지(기대효과): " },
+    { icon: Icons.settings, title: "개선 요청",       desc: "더 편했으면",       kind: "question", prompt: "[개선 요청]\n- 어디를: \n- 어떻게 바뀌면 좋을지: " },
+    { icon: Icons.search,   title: "사용법 문의",     desc: "어떻게 쓰나요?",     kind: "question", prompt: "[사용법 문의]\n- 무엇을 하고 싶은지: \n- 어디서 막히는지: " },
+    { icon: Icons.lock,     title: "계정·로그인",     desc: "로그인·권한 문제",   kind: "question", prompt: "[계정·로그인 문의]\n- 증상: \n- 계정 ID(선택): " },
+    { icon: Icons.mail,     title: "기타 문의",       desc: "그 외 무엇이든",     kind: "question", prompt: "[문의]\n- 내용: " },
+  ];
+  const promptSource = guestbookOpen ? loungePrompts : inquiryMode ? inquiryPrompts : quickPromptItems;
   const filteredPrompts = promptQuery
-    ? quickPromptItems.filter((it) => (it.title + " " + it.desc + " " + (it.prompt || "")).toLowerCase().includes(promptQuery))
-    : quickPromptItems;
-  const showPrompts = !inquiryMode && (promptsOpen || slashMode);
-  // 슬래시 명령 모드(선택지 있음) — Enter/클릭이 '전송'이 아니라 '추천 항목 선택' → 전송 버튼은 비활성으로 표시
-  const cmdActive = showPrompts && slashMode && filteredPrompts.length > 0;
+    ? promptSource.filter((it) => (it.title + " " + it.desc + " " + (it.prompt || "")).toLowerCase().includes(promptQuery))
+    : promptSource;
+  // @멘션 모드(라운지 전용) — 입력 끝에 '@글자'가 있으면 팀원 페르소나 목록을 띄움(/ 와 동일 UX). 라우팅은 짧은 이름(박지훈 등) 매칭.
+  const mentionMatch = guestbookOpen ? input.match(/(?:^|\s)@([^\s@]*)$/) : null;
+  const mentionMode = !!mentionMatch;
+  const mentionQuery = mentionMatch ? mentionMatch[1].toLowerCase() : "";
+  const LOUNGE_FE_KEYS = ["park", "lee_jaeheon", "lee_duhyeon"];
+  const mentionItems = mentionMode
+    ? (gb.personas || [])
+        .filter((p) => LOUNGE_FE_KEYS.includes(p.key))
+        .map((p) => { const short = (p.name || "").replace(/^AI\s*/, ""); return { img: p.avatar, title: short, desc: p.lane || p.tone || "담당 페르소나", mention: short }; })
+        .filter((m) => !mentionQuery || (m.title + " " + m.desc).toLowerCase().includes(mentionQuery) || (mentionQuery.length >= 2 && m.title.slice(0, 2) === mentionQuery.slice(0, 2)))   // 오타 허용: 앞 2글자 일치(이두헌→이두현)
+    : [];
+  // 팝업에 띄울 항목/선택 핸들러 — 멘션 모드면 팀원, 아니면 추천(슬래시/＋)
+  const popupItems = mentionMode ? mentionItems : filteredPrompts;
+  const showPrompts = promptsOpen || slashMode || mentionMode;
+  // 선택지 팝업 활성(슬래시/멘션) — Enter/클릭이 '전송'이 아니라 '항목 선택' → 전송 버튼은 비활성으로 표시
+  const cmdActive = showPrompts && (slashMode || mentionMode) && popupItems.length > 0;
   // 추천 질문/문의 항목 선택 — channel 있으면 문의방 열기, 추천 질문은 (전송 대신) 입력칸에 전체 문장 채우기
   const selectPrompt = (it) => {
     if (!it) return;
     setPromptsOpen(false);
+    if (it.lounge) { setCmdPrompt(null); setInput(""); setGuestbookOpen(true); return; }   // 시원팀 공개문의로 전환
     if (it.channel) { setCmdPrompt(null); setInput(""); openInquiry(it.channel); return; }
+    if (inquiryMode) {   // 상담원 문의 추천 = 템플릿 채움(빈칸 채워 제출). 문의 종류(kind)도 함께 설정.
+      setCmdPrompt(null);
+      if (it.kind) setInquiryKind(it.kind);
+      setInput(it.prompt || it.title || "");
+      requestAnimationFrame(() => { const ta = taRef.current; if (ta) { ta.focus(); ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 140) + "px"; } });
+      return;
+    }
     // 추천 질문을 '스킬 칩'으로 보관(아이콘·제목·전체 프롬프트·인자 힌트). 입력칸은 비워서 '인자(대상·조건)'를 받는다.
+    // 라운지(시원팀 공개문의)도 동일 메커니즘 — 칩 선택 → 덧붙임 입력 → doSend 에서 결합해 AI 페르소나에게 전송.
     setCmdPrompt(it);
     setInput("");
     requestAnimationFrame(() => {
@@ -1920,9 +1983,36 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
       if (ta) { ta.focus(); ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 140) + "px"; }
     });
   };
+  // @멘션 선택 — 파란 칩(cmdPrompt 재사용)으로 표시. 입력의 '@쿼리'는 제거, 메시지는 칩 뒤에 작성. 전송 시 "@이름 메시지"로 합쳐 라우팅.
+  const selectMention = (it) => {
+    if (!it) return;
+    setPromptsOpen(false);
+    const rest = input.replace(/(^|\s)@([^\s@]*)$/, "$1").replace(/\s+$/, "");
+    setCmdPrompt({ title: `@${it.mention}`, prompt: `@${it.mention}`, mention: true });
+    setInput(rest);
+    requestAnimationFrame(() => { const ta = taRef.current; if (ta) { ta.focus(); ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 140) + "px"; } });
+  };
+  // 팝업 항목 선택 — 멘션이면 팀원 삽입, 아니면 추천 선택
+  const popupPick = (it) => (mentionMode ? selectMention(it) : selectPrompt(it));
   // 전송 — 스킬 칩(cmdPrompt)이 있으면 스킬 프롬프트 + 입력한 인자(대상·조건)를 결합해 보냄 (인자 없으면 스킬만)
   const doSend = (e) => {
-    if (guestbookOpen) { const t = input.trim(); if (t) { gb.send(t, !!user); setInput(""); } return; }
+    if (guestbookOpen) {
+      // 라운지: 스킬 칩(추천 질문)이 있으면 질문 + 덧붙인 입력을 결합해 전송, 없으면 입력칸 그대로. 사진(gbImage) 동봉 가능.
+      if (cmdPrompt !== null) {
+        const arg = input.trim();
+        let full = cmdPrompt.prompt;
+        if (cmdPrompt.mention) full = arg ? `${cmdPrompt.prompt} ${arg}` : cmdPrompt.prompt;   // @멘션 칩 → "@이름 메시지"
+        else if (arg) full = cmdPrompt.arg
+          ? `${cmdPrompt.prompt} (${cmdPrompt.arg}: ${arg})`
+          : `${cmdPrompt.prompt}\n\n덧붙임: ${arg}`;
+        setCmdPrompt(null); setInput("");
+        gb.send(full, !!user, gbImage, selectedModel); setGbImage(null); gb.stopTyping();
+        return;
+      }
+      const t = input.trim();
+      if (t || gbImage) { gb.send(t, !!user, gbImage, selectedModel); setInput(""); setGbImage(null); gb.stopTyping(); }
+      return;
+    }
     if (busy) return;
     if (cmdPrompt !== null) {
       const arg = input.trim();
@@ -1952,23 +2042,31 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
           );
         })()}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, minHeight: 30, flex: 1 }}>
+        <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, minHeight: 30, flex: 1 }}>
           {/* 세션 목록 토글 버튼 제거(2026-06-01) — 사이드바/핸들러/백엔드 코드는 보존(향후 채팅 확장용),
               진입로만 차단해 showSessions 가 항상 false → 사이드바 미노출. 되살리려면 이 버튼만 복구. */}
           {/* 모드 토글 — AI 챗봇(일반) / 관리자 문의 / 개발자 문의 (장비현황 세그먼트 토글 스타일) */}
           <SegmentedToggle
             pad="5px 11px"
-            items={[{ label: "AI 관제 도우미" }, { label: "상담원 문의" }, { label: "개발자 문의" }, { label: "단톡방" }]}
-            activeIdx={guestbookOpen ? 3 : (!inquiryMode ? 0 : inquiryChannel === "admin" ? 1 : 2)}
+            items={[{ label: "AI 관제 도우미" }, { label: "상담원 문의" }, { label: "시원팀 공개문의" }]}
+            activeIdx={guestbookOpen ? 2 : (!inquiryMode ? 0 : 1)}
             onSelect={(i) => {
-              if (i === 3) { setGuestbookOpen(true); }
-              else { setGuestbookOpen(false); if (i === 0) setInquiryMode(false); else openInquiry(i === 1 ? "admin" : "developer"); }
+              // 방(탭) 전환 시 작성 중이던 입력 초기화 — 사용자 요청 (텍스트·스킬/멘션 칩·첨부 사진·답장)
+              setInput(""); setCmdPrompt(null); setGbImage(null); setInquiryImages([]); setReplyTarget(null); setPromptsOpen(false);
+              if (i === 2) { setGuestbookOpen(true); }
+              else { setGuestbookOpen(false); if (i === 0) setInquiryMode(false); else openInquiry("admin"); }
             }}
           />
+          {/* 접속 표시 — 시원팀 공개문의(라운지)일 때만, 헤더 오른쪽 끝에 고정(토글은 중앙 유지) */}
+          {guestbookOpen && (
+            <span style={{ position: "absolute", right: 2, top: "50%", transform: "translateY(-50%)", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: "var(--ink-3)", whiteSpace: "nowrap" }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: gb.connected ? "var(--ok)" : "var(--ink-4)" }} />{gb.connected ? `접속 ${gb.online}` : "연결 중…"}
+            </span>
+          )}
         </div>
       </PanelHeader>
 
-      {guestbookOpen ? <GuestbookList gb={gb} isGuest={!user} isAdmin={isGbAdmin} me={user ? { name: user.name, role: user.role } : null} ChatMessage={ChatMessage} /> : (
+      {guestbookOpen ? <GuestbookList gb={gb} isGuest={!user} isAdmin={isGbAdmin} me={user ? { name: user.name, role: user.role } : null} ChatMessage={ChatMessage} DayDivider={DayDivider} /> : (
       <div ref={listRef} className="scroll"
         onScroll={(e) => { const c = e.currentTarget; stickBottomRef.current = (c.scrollHeight - c.scrollTop - c.clientHeight) < 80; }}
         style={{
@@ -1980,7 +2078,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
         {chatView.map((m, i) => {
           const prevKey = i > 0 ? chatView[i - 1]?.dateKey : null;
           // 첫 메시지(i===0)도 날짜 구분선 표시 — 대화 시작 시 연도+날짜 노출
-          const showDivider = m.dateKey && (i === 0 || (prevKey && m.dateKey !== prevKey));
+          const showDivider = m.dateKey && (i === 0 || m.dateKey !== prevKey);   // 미데이트 인트로(상담원 greeting) 다음 첫 날짜 메시지에도 구분선
           // 같은 사람(role)·같은 분(time)·같은 날이 이어지면 시간은 그 묶음의 '마지막' 메시지에만 표시 (분 중복 제거)
           const nextM = chatView[i + 1];
           const hideTime = !!nextM && nextM.role === m.role && nextM.time === m.time && nextM.dateKey === m.dateKey;
@@ -2012,16 +2110,19 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
       <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: "8px 10px 10px", background: "transparent" }}>
 
         {/* + 추천 질문 팝업 (위로) */}
-        {!guestbookOpen && showPrompts && (
+        {showPrompts && (
           <div className="scroll glass-input" style={{
             position: "absolute", left: 12, right: 12, bottom: "calc(100% + 2px)", zIndex: 40,
             borderRadius: 22, padding: 8,
             maxHeight: "min(260px, 40vh)", overflowY: "auto",
           }}>
-            {filteredPrompts.length === 0 ? (
-              <div style={{ padding: "8px 10px 12px", fontSize: 12, color: "var(--ink-3)" }}>일치하는 추천 질문이 없습니다</div>
+            {mentionMode && (
+              <div style={{ padding: "4px 10px 6px", fontSize: 11, fontWeight: 700, color: "var(--ink-3)" }}>팀원 멘션 — 콕 집어 물어볼 페르소나 선택</div>
+            )}
+            {popupItems.length === 0 ? (
+              <div style={{ padding: "8px 10px 12px", fontSize: 12, color: "var(--ink-3)" }}>{mentionMode ? "해당하는 팀원이 없어요" : "일치하는 추천 질문이 없습니다"}</div>
             ) : (
-              <QuickPrompts items={filteredPrompts} highlightIndex={promptIndex} onHover={setPromptIndex} onPick={selectPrompt} disabled={false} />
+              <QuickPrompts items={popupItems} highlightIndex={promptIndex} onHover={setPromptIndex} onPick={popupPick} disabled={false} />
             )}
           </div>
         )}
@@ -2029,8 +2130,8 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
         {/* 입력 카드 */}
         <form onSubmit={(e) => {
             e.preventDefault();
-            if (!guestbookOpen && showPrompts && slashMode && filteredPrompts.length) {
-              selectPrompt(filteredPrompts[promptIndex] || filteredPrompts[0]);
+            if (showPrompts && (slashMode || mentionMode) && popupItems.length) {
+              popupPick(popupItems[promptIndex] || popupItems[0]);
               return;
             }
             doSend(e);
@@ -2066,8 +2167,9 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
             onChange={(e) => {
               const v = e.target.value;
               setInput(v);
-              // '/' 로 시작하면 명령(추천 질문) 모드 — 입력할 때마다 첫 항목으로 하이라이트 리셋
-              if (!inquiryMode && v.startsWith("/")) setPromptIndex(0);
+              // '/' 명령 또는 '@' 멘션 입력 시 — 입력할 때마다 첫 항목으로 하이라이트 리셋
+              if (v.startsWith("/") || /(?:^|\s)@[^\s@]*$/.test(v)) setPromptIndex(0);
+              if (guestbookOpen) { if (v.trim()) gb.sendTyping(user ? user.name : (gb.guestName || "게스트")); else gb.stopTyping(); }   // 단톡방 '입력 중' 신호
               const t = e.target; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 140) + "px";
             }}
             onKeyDown={(e) => {
@@ -2077,16 +2179,16 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
                 const t = taRef.current; if (t) t.style.height = "auto";
                 return;
               }
-              // 추천 질문 목록 열림 → ↑/↓ 이동, Enter 선택, Esc 닫기 (필터된 목록 기준)
+              // 추천/멘션 목록 열림 → ↑/↓ 이동, Enter 선택, Esc 닫기 (슬래시·@멘션 공통)
               if (showPrompts) {
-                const n = filteredPrompts.length;
+                const n = popupItems.length;
                 if (e.key === "ArrowDown") { e.preventDefault(); if (n) setPromptIndex((i) => (i + 1) % n); return; }
                 if (e.key === "ArrowUp")   { e.preventDefault(); if (n) setPromptIndex((i) => (i - 1 + n) % n); return; }
-                if (e.key === "Escape")    { e.preventDefault(); setPromptsOpen(false); if (slashMode) setInput(""); return; }
-                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                if (e.key === "Escape")    { e.preventDefault(); setPromptsOpen(false); if (slashMode) setInput(""); else if (mentionMode) setInput(input.replace(/(^|\s)@[^\s@]*$/, "$1")); return; }
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && n) {
                   e.preventDefault();
-                  selectPrompt(filteredPrompts[promptIndex]);
-                  return;   // 명령 모드에선 '/쿼리' 를 그대로 전송하지 않음
+                  popupPick(popupItems[promptIndex]);
+                  return;   // 명령/멘션 모드에선 그대로 전송하지 않고 항목 선택
                 }
               }
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); doSend(e); }
@@ -2104,7 +2206,8 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
               }
             }}
             placeholder={
-              inquiryMode ? (inquiryKind === "bug" ? "버그 내용을 적어 주세요…" : "문의 내용을 적어 주세요…")
+              guestbookOpen ? (cmdPrompt ? "덧붙일 내용 입력 (없으면 그대로 전송)" : "/ 를 입력해 추천 질문 받기 , @ 를 입력해 팀원 지정하기")
+              : inquiryMode ? "/ 를 입력해 추천 양식 받기"
               : cmdPrompt ? ""   // 스킬 활성 시 안내 문구 없음 (사용자 요청)
               : "/ 를 입력해 추천 질문 받기"
             }
@@ -2134,8 +2237,41 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
               ))}
             </div>
           )}
+          {/* 라운지 사진 첨부 미리보기 (썸네일 + 제거) */}
+          {guestbookOpen && gbImage && (
+            <div style={{ display: "flex", gap: 10, padding: "4px 2px 0" }}>
+              <div style={{ position: "relative", display: "inline-block" }}>
+                <img src={gbImage} alt="첨부 미리보기" style={{ display: "block", height: 56, borderRadius: 8, border: "1px solid var(--line)" }} />
+                <button type="button" onClick={() => setGbImage(null)} aria-label="첨부 제거"
+                  style={{
+                    position: "absolute", top: -7, right: -7,
+                    width: 20, height: 20, borderRadius: "50%", padding: 0,
+                    display: "grid", placeItems: "center",
+                    background: "var(--err)", color: "#fff",
+                    border: "2px solid var(--bg-elev)", boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+                    fontSize: 12, fontWeight: 800, lineHeight: 1, cursor: "pointer",
+                  }}>×</button>
+              </div>
+            </div>
+          )}
           {/* 하단 액션줄 */}
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            {/* 추천 질문/양식 토글 — 모든 모드(관제·라운지·상담원 문의) 공통. 공통 버튼이라 항상 맨 왼쪽 고정(통일감) */}
+            {(
+              <button type="button" onClick={() => { setPromptsOpen((o) => !o); setPromptIndex(0); }} title="추천 질문"
+                style={{
+                  width: 34, height: 34, borderRadius: "50%", display: "grid", placeItems: "center",
+                  border: "none",
+                  background: promptsOpen ? "var(--brand-wash)" : "transparent",
+                  color: promptsOpen ? "var(--brand)" : "var(--ink-3)", cursor: "pointer", flexShrink: 0,
+                }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" style={{ flexShrink: 0 }}>
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </button>
+            )}
+            {/* 상담원 문의 이미지 첨부 — '+' 뒤로 배치(공통 버튼 정렬 통일) */}
             {inquiryMode && (
               <label title="이미지 첨부 (PNG/JPG · 최대 5장)" style={{
                 width: 34, height: 34, borderRadius: "50%", display: "grid", placeItems: "center", position: "relative",
@@ -2158,21 +2294,25 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
                   }} />
               </label>
             )}
-            {!inquiryMode && (
-              <button type="button" onClick={() => { setPromptsOpen((o) => !o); setPromptIndex(0); }} title="추천 질문"
-                style={{
-                  width: 34, height: 34, borderRadius: "50%", display: "grid", placeItems: "center",
-                  border: "none",
-                  background: promptsOpen ? "var(--brand-wash)" : "transparent",
-                  color: promptsOpen ? "var(--brand)" : "var(--ink-3)", cursor: "pointer", flexShrink: 0,
-                }}>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" style={{ flexShrink: 0 }}>
-                  <line x1="12" y1="5" x2="12" y2="19" />
-                  <line x1="5" y1="12" x2="19" y2="12" />
+            {/* 라운지(공개문의) 사진 첨부 — 모델/웹검색이 있던 자리. 단일 이미지, 캔버스 재인코딩으로 살균·1200px 리사이즈 */}
+            {!inquiryMode && guestbookOpen && (
+              <label title="사진 첨부 (PNG/JPG · 1장)" style={{
+                width: 34, height: 34, borderRadius: "50%", display: "grid", placeItems: "center", position: "relative",
+                background: gbImage ? "var(--brand-wash)" : "transparent",
+                color: gbImage ? "var(--brand)" : "var(--ink-3)", cursor: "pointer", flexShrink: 0,
+              }}>
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" />
                 </svg>
-              </button>
+                <input type="file" accept="image/png,image/jpeg" style={{ display: "none" }}
+                  onChange={async (e) => {
+                    const f = (e.target.files || [])[0];
+                    e.target.value = "";
+                    if (f) { try { const _d = await imageFileToDataURL(f, 1200); setGbImage(_d); } catch { /* 무시 */ } }
+                  }} />
+              </label>
             )}
-            {!inquiryMode && (
+            {!inquiryMode && !guestbookOpen && (
               <button type="button" onClick={() => setWebSearch((w) => !w)} title={webSearch ? "웹검색 켜짐 (DuckDuckGo)" : "웹검색 끄기/켜기"}
                 style={{
                   height: 34, borderRadius: 999, display: "inline-flex", alignItems: "center", gap: 6, justifyContent: "center",
@@ -2189,7 +2329,7 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
                 </svg>{webSearch && <span style={{ fontSize: 11.5, fontWeight: 700 }}>검색</span>}
               </button>
             )}
-            {/* 모델칩 — 누르면 위로 뜨는 [로컬|GPT] 토글 + 모델 팝업 */}
+            {/* 모델칩 — [로컬|GPT] 토글 + 모델 팝업. 라운지(공개문의)에선 선택 모델이 AI 페르소나 답변에 적용(사용자 요청, GPT 공개비용 수용). */}
             {!inquiryMode && (
               <div ref={modelBtnRef} style={{ position: "relative", flexShrink: 0 }}>
                 <button
@@ -2267,12 +2407,12 @@ function ChatPanel({ equipment = [], weather = null, onBotReply, onAutoKpi, demo
             <button
               type={stopBtn ? "button" : "submit"}
               onClick={stopBtn ? () => { try { abortRef.current?.abort(); } catch {} } : undefined}
-              disabled={stopBtn ? false : (busy || cmdActive || (!cmdPrompt && !input.trim()))}
+              disabled={stopBtn ? false : (busy || cmdActive || (!cmdPrompt && !input.trim() && !(guestbookOpen && gbImage)))}
               title={stopBtn ? "생성 중지" : cmdActive ? "추천 항목 선택 모드" : "전송"}
               style={{
                 width: 34, height: 34, borderRadius: "50%", display: "grid", placeItems: "center", border: "none", flexShrink: 0,
-                background: stopBtn ? "var(--err)" : (busy || cmdActive || (!cmdPrompt && !input.trim())) ? "var(--line)" : "var(--brand)",
-                color: "#fff", cursor: stopBtn ? "pointer" : (busy || cmdActive || (!cmdPrompt && !input.trim())) ? "not-allowed" : "pointer",
+                background: stopBtn ? "var(--err)" : (busy || cmdActive || (!cmdPrompt && !input.trim() && !(guestbookOpen && gbImage))) ? "var(--line)" : "var(--brand)",
+                color: "#fff", cursor: stopBtn ? "pointer" : (busy || cmdActive || (!cmdPrompt && !input.trim() && !(guestbookOpen && gbImage))) ? "not-allowed" : "pointer",
                 transition: "background 140ms",
               }}>
               {stopBtn
@@ -2495,12 +2635,11 @@ function SessionSidebar({ open, loading, sessions, activeSessionId, onClose, onP
 
       {/* 목록 */}
       <div className="scroll" style={{ flex: 1, overflow: "auto" }}>
-        {/* 고정 — 문의 채널 (항상 최상단): 관리자 문의 + 개발자 문의 (가로 2열 타일) */}
+        {/* 고정 — 문의 채널 (항상 최상단): 상담원 문의. (개발자 문의는 '시원팀 공개문의'로 통합되어 제거됨) */}
         {!searchMode && (
           <div style={{ display: "flex", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--line)" }}>
             {[
               { ch: "admin",     icon: "📩",   img: "/avatars/agent.png",     title: "상담원 문의", tip: "문의 · 버그 신고 — 관리자에게 전달" },
-              { ch: "developer", icon: "👨‍💻", img: "/avatars/developer.png", title: "개발자 문의", tip: "프로젝트 기능 설명 — 개발자가 답변" },
             ].map((it) => {
               const active = inquiryActive === it.ch;
               return (
@@ -2739,6 +2878,9 @@ function DayDivider({ dateKey }) {
 // 추천 질문 — 입력창 위 팝업에 세로 목록으로. ↑/↓ 하이라이트(부모 onKeyDown) + Enter 선택, 클릭·호버 지원.
 // 항목(items)은 부모가 보유 — 화살표 네비 시 부모가 선택 prompt 를 알아야 하기 때문.
 function QuickPrompts({ items = [], highlightIndex = 0, onHover, onPick, disabled }) {
+  const activeRef = useRef(null);
+  // 키보드 ↑/↓ 로 하이라이트가 화면 밖 항목으로 이동하면 팝업이 함께 스크롤되도록 (block:nearest = 보이면 그대로, 벗어나면 최소 스크롤)
+  useEffect(() => { activeRef.current?.scrollIntoView({ block: "nearest" }); }, [highlightIndex]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
       {items.map((item, idx) => {
@@ -2747,6 +2889,7 @@ function QuickPrompts({ items = [], highlightIndex = 0, onHover, onPick, disable
         return (
           <button
             key={idx}
+            ref={active ? activeRef : null}
             type="button"
             onClick={() => !disabled && onPick(item)}
             onMouseEnter={() => onHover && onHover(idx)}
@@ -2827,7 +2970,7 @@ function renderInlineMD(text) {
   return tokens;
 }
 
-function ChatMessage({ message, botAvatar = "/chatbot.png", botLabel = "AI 관제 도우미", onReply, hideTime = false }) {
+function ChatMessage({ message, botAvatar = "/chatbot.png", botLabel = "AI 관제 도우미", onReply, hideTime = false, onAuthorClick }) {
   const isAi = message.role === "ai";
   const [hov, setHov] = useState(false);
   return (
@@ -2841,7 +2984,7 @@ function ChatMessage({ message, botAvatar = "/chatbot.png", botLabel = "AI 관�
       alignItems: isAi ? "flex-start" : "flex-end",
     }}>
       {isAi && (
-        <div className={message.human ? "neon-green" : undefined} style={{
+        <div className={message.human ? "neon-green" : undefined} onClick={onAuthorClick} title={onAuthorClick ? "프로필 보기" : undefined} style={{
           width: 34, height: 34, borderRadius: "50%",
           background: "linear-gradient(135deg, #4f46e5, #8b83ff)",
           color: "#fff",
@@ -2849,13 +2992,14 @@ function ChatMessage({ message, botAvatar = "/chatbot.png", botLabel = "AI 관�
           flexShrink: 0,
           marginTop: 1,
           overflow: "hidden",
+          cursor: onAuthorClick ? "pointer" : "default",
         }}>
           <img src={botAvatar} alt="AI" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         </div>
       )}
       <div style={{ maxWidth: "min(85%, 360px)", display: "flex", flexDirection: "column", gap: 3 }}>
         {isAi && (
-          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-3)", paddingLeft: 2, marginBottom: 1 }}>
+          <div onClick={onAuthorClick} title={onAuthorClick ? "프로필 보기" : undefined} style={{ fontSize: 11, fontWeight: 600, color: "var(--ink-3)", paddingLeft: 2, marginBottom: 1, cursor: onAuthorClick ? "pointer" : "default" }}>
             {botLabel}
           </div>
         )}
@@ -3623,7 +3767,7 @@ export function Dashboard({ user = null, mapStyle, setMapStyle, theme, autoPlay 
       */}
       <div className="dashboard-grid" style={{
         position: "absolute", left: 0, right: 0, top: 0, bottom: 0,
-        padding: "var(--dash-pad)",
+        padding: "var(--dash-pad) var(--dash-pad) 18px",   /* 하단만 18px 고정 — 카드 바로 아래 카피라이트 푸터가 붙어 보이도록 간격 축소 */
         display: "grid",
         gridTemplateColumns: "minmax(0, 1fr) var(--dash-chat-col)",
         gridTemplateRows: "var(--dash-kpi-row) minmax(var(--dash-map-min), 1.2fr) minmax(var(--dash-bottom-min), 1fr)",

@@ -17,6 +17,7 @@
   --brand: #4f46e5;
   --brand-2: #3525cd;
   --brand-wash: rgba(79, 70, 229, 0.08);
+  --brand-wash-solid: #e6e3fb;          /* 불투명 라벤더 — 라운지 안내 배너 등 */
   --ok: #10b981;
   --warn: #f59e0b;
   --err: #ef4444;
@@ -58,6 +59,7 @@ html[data-theme="dark"] {
   --brand: #8b83ff;
   --brand-2: #ada4ff;
   --brand-wash: rgba(139, 131, 255, 0.16);
+  --brand-wash-solid: #32314c;          /* 불투명(다크) — 라운지 안내 배너 등 */
   --ok: #34d399;
   --warn: #fbbf24;
   --err: #f87171;

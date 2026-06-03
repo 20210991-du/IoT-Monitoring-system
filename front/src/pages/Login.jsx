@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Icons } from "../components/Icons.jsx";
-import { signIn, RULES, checkUserId } from "../lib/authMock.js";
+import { signIn, signUp, guestLogin, RULES, checkUserId } from "../lib/authMock.js";
 
 function fmtTime(d = new Date()) {
   return d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -553,11 +553,15 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
   const [errStatus, setErrStatus] = useState(null);
   const [failCount, setFailCount] = useState(0);
   const [idOk, setIdOk] = useState(false);            // 체크표시 = 실제 존재하는 활성 계정일 때만
+  const [mode, setMode] = useState("login");          // login | signup — 같은 카드에서 토글(새 창 없이)
+  const [name, setName] = useState("");               // 가입: 이름
   const idChkTimer = useRef(null);                    // ID 존재확인 디바운스 타이머
   useEffect(() => {                                   // 프리필 ID 가 있으면 마운트 시 1회 확인
     if (RULES.ID_RE.test(id)) checkUserId(id).then(setIdOk);
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
   const [pwFilled,  setPwFilled]  = useState(!!pw);
+
+  // 배경 영상은 ffmpeg 로 정방향+역방향을 이어붙인 '부메랑 파일'(video-boomerang.mp4) → 네이티브 loop 로 매끄럽게 왕복(JS 핑퐁 불필요).
 
   const typedText   = useTyping("통합관제 시스템", 75, 500);
   const nodeCount   = useCount(55, 1800, 900);
@@ -598,10 +602,37 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
     setTimeout(() => span.remove(), 700);
   };
 
+  // 로그인 ⟷ 회원가입 토글 (같은 카드, 새 화면 없음)
+  const switchMode = (m) => { if (m === mode) return; setMode(m); setError(""); setErrStatus(null); };
+
+  // 1회용(둘러보기) 로그인 — 자격증명 없이 즉석 뷰어 세션(에페메럴)
+  const guestSubmit = () => {
+    setLoading(true); setError(""); setErrStatus(null);
+    setTimeout(async () => {
+      const res = await guestLogin();
+      if (!res.ok) { setLoading(false); setError(res.error || "1회용 로그인에 실패했습니다."); return; }
+      setFailCount(0); onLogin && onLogin(res.user);
+    }, 300);
+  };
+
   const submit = (e) => {
     e && e.preventDefault();
     setLoading(true); setError(""); setErrStatus(null);
     setTimeout(async () => {
+      if (mode === "signup") {
+        // 가입 검증(시연용 — 최소): 아이디·비번·비번확인·이름
+        if (!RULES.ID_RE.test(id))   { setLoading(false); setError("아이디는 2~20자 (영문/숫자/._-) 입니다."); return; }
+        if (String(pw).length < 4)   { setLoading(false); setError("비밀번호는 4자 이상 입력해 주세요."); return; }
+        if (!name.trim())            { setLoading(false); setError("이름을 입력해 주세요."); return; }
+        if (/^guest\d+$/i.test(id.trim()) || /^guest\d+$/i.test(name.trim())) { setLoading(false); setError("‘guest+숫자’는 1회용 로그인 전용이라 가입에 쓸 수 없어요."); return; }
+        const reg = await signUp({ id, pw, name });
+        if (!reg.ok) { setLoading(false); setError(reg.error || "가입에 실패했습니다."); return; }
+        // 가입 성공 → 바로 자동 로그인(시연 흐름 매끄럽게)
+        const li = await signIn({ id, pw, remember });
+        if (!li.ok) { setLoading(false); setMode("login"); setPw(""); setError("가입 완료! 로그인해 주세요."); return; }
+        setFailCount(0); onLogin && onLogin(li.user);
+        return;
+      }
       const res = await signIn({ id, pw, remember });
       if (!res.ok) {
         setLoading(false); setError(res.error); setErrStatus(res.status || null);
@@ -684,26 +715,12 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
         }} />
       </div>
 
-      {/* ── Header ── */}
-      <header style={{ position: "relative", zIndex: 1, padding: "30px 52px 0", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ width: 8, height: 8, borderRadius: "50%", background: C.brand, boxShadow: `0 0 14px ${C.brand}`, animation: "_pulseDot 2s ease-in-out infinite", display: "inline-block" }} />
-          <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: "-0.02em", color: C.ink }}>AI 기반 지능형 통합관제 시스템</span>
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          {[{ label: "AI 정상", color: C.ok }, { label: "실시간 감시중", color: C.brand }].map((b) => (
-            <div key={b.label} style={{
-              display: "flex", alignItems: "center", gap: 6,
-              padding: "5px 13px", borderRadius: 999,
-              background: `${b.color}18`, border: `1px solid ${b.color}42`,
-              fontSize: 11, fontWeight: 600, color: b.color,
-            }}>
-              <span style={{ width: 5, height: 5, borderRadius: "50%", background: b.color, boxShadow: `0 0 6px ${b.color}`, animation: "_pulseDot 2s ease-in-out infinite", display: "inline-block" }} />
-              {b.label}
-            </div>
-          ))}
-        </div>
-      </header>
+      {/* ── 배경 영상 (back1.mp4) — 사용자 설정. 데코 레이어 위 · 컨텐츠(zIndex 1) 아래. 로드 실패 시 뒤 데코가 비쳐 폴백 ── */}
+      {/* 배경 영상(부메랑: ffmpeg 정방향+역방향 concat) — loop 로 매끄럽게 왕복. 원본 밝기 그대로(밝기 필터·오버레이 제거 — 사용자 요청). 중앙 1.45배 확대로 우측 하단 워터마크 크롭 */}
+      <video autoPlay loop muted playsInline aria-hidden src="/video-boomerang.mp4"
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 0, pointerEvents: "none", transform: "scale(1.45)", transformOrigin: "center" }} />
+
+      {/* 상단 헤더(브랜드 로고/타이틀) 제거 — 사용자 요청 */}
 
       {/* ── Main ── */}
       <main style={{
@@ -746,47 +763,9 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
             )}
           </h1>
 
-          <p style={{ margin: "20px 0 0", fontSize: 16, lineHeight: 1.7, color: C.inkSoft, fontWeight: 400, maxWidth: 440 }}>
-            분산된 IoT 센서 데이터를 통합 관제,<br />
-            AI가 이상을 사전에 포착합니다.
-          </p>
+          {/* 부제 문구(분산된 IoT 센서…) 제거 — 사용자 요청 */}
 
-          <div style={{ display: "flex", gap: 14, marginTop: 40 }}>
-            {[
-              { val: nodeCount,   unit: "개", label: "감시 노드",   color: C.brand  },
-              { val: sensorCount, unit: "종", label: "센서 타입",   color: C.brand2 },
-              { val: "24/7",      unit: "",   label: "실시간 수집", color: C.ok     },
-            ].map((s) => (
-              <div key={s.label}
-                style={{
-                  padding: "14px 20px", borderRadius: 14,
-                  background: isDark ? "rgba(255,255,255,.03)" : "rgba(255,255,255,.6)",
-                  border: `1px solid ${isDark ? "rgba(255,255,255,.07)" : "rgba(0,0,0,.07)"}`,
-                  backdropFilter: "blur(10px)", minWidth: 88,
-                  transition: "border-color 200ms, background 200ms, transform 200ms",
-                  cursor: "default",
-                  boxShadow: isDark ? "none" : "0 2px 8px rgba(0,0,0,.06)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = `${s.color}55`;
-                  e.currentTarget.style.background   = `${s.color}0d`;
-                  e.currentTarget.style.transform    = "translateY(-3px)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = isDark ? "rgba(255,255,255,.07)" : "rgba(0,0,0,.07)";
-                  e.currentTarget.style.background   = isDark ? "rgba(255,255,255,.03)" : "rgba(255,255,255,.6)";
-                  e.currentTarget.style.transform    = "translateY(0)";
-                }}
-              >
-                <div style={{ fontSize: 28, fontWeight: 800, letterSpacing: "-0.03em", color: s.color, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>
-                  {s.val}{s.unit}
-                </div>
-                <div style={{ fontSize: 11, color: C.inkMuted, marginTop: 5, fontWeight: 500 }}>{s.label}</div>
-              </div>
-            ))}
-          </div>
-
-          <LiveLog C={C} isDark={isDark} />
+          {/* 통계 카드(감시노드/센서타입/24·7) + 실시간 시스템 로그 패널 제거 — 사용자 요청 */}
         </div>
 
         {/* 우측 카드 */}
@@ -815,13 +794,30 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
           }} />
 
           <div style={{ position: "relative", zIndex: 1 }}>
-            <div style={{ marginBottom: 28 }}>
-              <div style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-0.025em", marginBottom: 6, color: C.ink }}>관제 시스템 접속</div>
-              <div style={{ fontSize: 13, color: C.inkSoft }}>운영자 계정으로 로그인해 주세요.</div>
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-0.025em", color: C.ink }}>관제 시스템 접속</div>
+            </div>
+
+            {/* 로그인 ⟷ 회원가입 토글 — 슬라이딩 알약(같은 카드에서 전환, 새 화면 없음) */}
+            <div style={{ position: "relative", display: "flex", padding: 4, marginBottom: 24, borderRadius: 999, background: isDark ? "rgba(255,255,255,0.06)" : "rgba(15,23,42,0.05)", border: `1px solid ${C.inkFaint}` }}>
+              <div aria-hidden="true" style={{
+                position: "absolute", top: 4, bottom: 4, left: 4, width: "calc(50% - 4px)",
+                borderRadius: 999, background: `linear-gradient(135deg,${C.brand},${C.brand2})`,
+                boxShadow: `0 8px 20px -8px ${C.brand}aa`,
+                transform: mode === "signup" ? "translateX(100%)" : "translateX(0)",
+                transition: "transform 380ms cubic-bezier(.34,1.56,.64,1)",
+              }} />
+              {[["login", "로그인"], ["signup", "회원가입"]].map(([m, label]) => (
+                <button key={m} type="button" onClick={() => switchMode(m)} style={{
+                  position: "relative", zIndex: 1, flex: 1, height: 38, border: "none", background: "transparent",
+                  cursor: "pointer", fontSize: 13.5, fontWeight: 800, letterSpacing: "0.02em",
+                  color: mode === m ? "#fff" : C.inkSoft, transition: "color 220ms",
+                }}>{label}</button>
+              ))}
             </div>
 
             <form onSubmit={submit}>
-              <Field icon={<Icons.user size={16} />} label="운영자 ID" focused={focus === "id"} filled={idOk} C={C}>
+              <Field icon={<Icons.user size={16} />} label="아이디" focused={focus === "id"} filled={mode === "login" && idOk} C={C}>
                 <input
                   value={id}
                   onChange={(e) => {
@@ -836,6 +832,18 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
                 />
               </Field>
 
+              {mode === "signup" && (
+                <Field icon={<Icons.id_card size={16} />} label="이름" focused={focus === "name"} C={C}>
+                  <input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    onFocus={() => setFocus("name")}
+                    onBlur={() => setFocus(null)}
+                    style={inputStyle} placeholder="이름을 입력하세요" autoComplete="name"
+                  />
+                </Field>
+              )}
+
               <Field icon={<Icons.lock size={16} />} label="비밀번호" focused={focus === "pw"} filled={pwFilled && focus !== "pw"} C={C}>
                 <input
                   type="password" value={pw}
@@ -846,6 +854,8 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
                 />
               </Field>
 
+
+              {mode === "login" && (
               <div style={{ display: "flex", alignItems: "center", marginBottom: 22, marginTop: 4 }}>
                 <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: C.inkSoft, userSelect: "none" }}
                   onClick={() => setRemember((v) => !v)}>
@@ -861,6 +871,7 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
                   로그인 상태 유지
                 </label>
               </div>
+              )}
 
               {error && (() => {
                 const isPending  = errStatus === "pending";
@@ -889,11 +900,28 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
                 );
               })()}
 
+              <div style={{ display: "flex", gap: 8 }}>
+              {mode === "login" && (
+                <button
+                  type="button" onClick={guestSubmit} disabled={loading}
+                  title="자격증명 없이 둘러보기 — 읽기 전용 뷰어 · 1회용 세션"
+                  style={{
+                    flex: 1, minWidth: 0, height: 50, borderRadius: 12,
+                    border: `1.5px solid ${C.brand}55`,
+                    background: isDark ? "rgba(124,116,255,0.10)" : "rgba(79,70,229,0.06)",
+                    color: C.brand, fontSize: 14, fontWeight: 700, letterSpacing: "-0.01em",
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                    cursor: loading ? "not-allowed" : "pointer", transition: "transform 140ms, background 160ms",
+                  }}
+                  onMouseEnter={(e) => { if (!loading) { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.background = isDark ? "rgba(124,116,255,0.18)" : "rgba(79,70,229,0.12)"; } }}
+                  onMouseLeave={(e) => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.background = isDark ? "rgba(124,116,255,0.10)" : "rgba(79,70,229,0.06)"; }}
+                >1회용 로그인</button>
+              )}
               <button
                 ref={btnRef} type="submit" disabled={loading} onClick={doRipple}
                 style={{
                   position: "relative", overflow: "hidden",
-                  width: "100%", height: 50, borderRadius: 12, border: "none",
+                  flex: 1, minWidth: 0, height: 50, borderRadius: 12, border: "none",
                   background: loading
                     ? `${C.brand}70`
                     : `linear-gradient(135deg,${C.brand} 0%,${C.brand2} 100%)`,
@@ -912,44 +940,34 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
                 {loading ? (
                   <>
                     <span style={{ width: 16, height: 16, borderRadius: "50%", border: "2px solid rgba(255,255,255,.3)", borderTopColor: "#fff", animation: "spin .7s linear infinite" }} />
-                    인증 중...
+                    {mode === "signup" ? "가입 중..." : "인증 중..."}
                   </>
                 ) : (
-                  <>로그인<Icons.chevron_right size={16} /></>
+                  <>{mode === "signup" ? "회원가입" : "로그인"}<Icons.chevron_right size={16} /></>
                 )}
               </button>
-
-              <div style={{
-                marginTop: 18, paddingTop: 18, borderTop: `1px solid ${C.inkFaint}`,
-                display: "flex", justifyContent: "space-between", alignItems: "center",
-                fontSize: 13, color: C.inkSoft,
-              }}>
-                <span style={{
-                  fontSize: 12,
-                  color: failCount >= 3 ? (isDark ? "#fbbf24" : "#d97706") : "transparent",
-                  fontWeight: failCount >= 3 ? 600 : 400,
-                  transition: "color 240ms", pointerEvents: "none", userSelect: "none",
-                }}>
-                  {failCount >= 3 ? "비밀번호는 관리자에게 문의" : "·"}
-                </span>
-                <button type="button" onClick={() => onSignUp && onSignUp()} style={{
-                  fontSize: 12.5, fontWeight: 700, color: isDark ? "#a5b4fc" : "#4f46e5",
-                  background: "none", border: "none", cursor: "pointer", padding: 0,
-                }}>회원가입 →</button>
               </div>
+
+              {mode === "login" && failCount >= 3 && (
+                <div style={{
+                  marginTop: 18, paddingTop: 18, borderTop: `1px solid ${C.inkFaint}`,
+                  textAlign: "center", fontSize: 12, fontWeight: 600,
+                  color: isDark ? "#fbbf24" : "#d97706",
+                }}>
+                  비밀번호는 관리자에게 문의
+                </div>
+              )}
+              {mode === "signup" && (
+                <div style={{ marginTop: 16, textAlign: "center", fontSize: 11.5, color: C.inkSoft }}>
+                  가입하면 바로 로그인됩니다.
+                </div>
+              )}
             </form>
           </div>
         </div>
       </main>
 
-      {/* ── Footer ── */}
-      <footer style={{
-        position: "relative", zIndex: 1,
-        padding: "0 56px 26px", textAlign: "center",
-        fontSize: 12, color: C.inkMuted, letterSpacing: "-0.01em", flexShrink: 0,
-      }}>
-        © 2026 시원팀 · 호서대학교 컴퓨터공학부 캡스톤디자인
-      </footer>
+      {/* 하단 푸터(카피라이트) 제거 — 사용자 요청 */}
     </div>
   );
 }
