@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Icons } from "../components/Icons.jsx";
-import { signIn, signUp, guestLogin, RULES, checkUserId } from "../lib/authMock.js";
+import { signIn, signUp, guestLogin, RULES, checkUserId, getLoginBg } from "../lib/authMock.js";
+import { getBootBar } from "../lib/userPrefs.js";
 
 function fmtTime(d = new Date()) {
   return d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -234,6 +235,22 @@ function BootScreen({ onDone, C, isDark }) {
   const [visible,  setVisible]  = useState(true);
   const [progress, setProgress] = useState(0);
   const [exiting,  setExiting]  = useState(false);
+  const timersRef = useRef([]);
+  const doneRef   = useRef(false);
+
+  // 화면 클릭 시 부팅 즉시 완료 — progress 100% → 짧은 페이드 → onDone (느린 부팅 대기 스킵)
+  const skip = useCallback(() => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    timersRef.current.forEach(clearTimeout);
+    setIdx(BOOT_LINES.length - 1);
+    setVisible(true);
+    setProgress(100);                 // 바가 100%까지 차오르는 애니메이션(width 260ms)을 먼저 보여줌
+    setTimeout(() => {                 // 100% 도달을 본 뒤에 페이드아웃 → 진입 (동시에 안 사라지게)
+      setExiting(true);
+      setTimeout(onDone, 360);
+    }, 360);
+  }, [onDone]);
 
   useEffect(() => {
     const timers = BOOT_LINES.map((line, i) =>
@@ -246,7 +263,8 @@ function BootScreen({ onDone, C, isDark }) {
         }, 120);
       }, line.delay)
     );
-    timers.push(setTimeout(() => { setExiting(true); setTimeout(onDone, 480); }, 2350));
+    timers.push(setTimeout(() => { if (!doneRef.current) { setExiting(true); setTimeout(onDone, 480); } }, 2350));
+    timersRef.current = timers;
     return () => timers.forEach(clearTimeout);
   }, [onDone]);
 
@@ -254,11 +272,11 @@ function BootScreen({ onDone, C, isDark }) {
   const isLast  = idx === BOOT_LINES.length - 1;
 
   return (
-    <div style={{
+    <div onClick={skip} title="클릭하면 건너뛰기" style={{
       position: "fixed", inset: 0, background: C.bg0, zIndex: 100,
       display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center",
       fontFamily: "'JetBrains Mono','Courier New',monospace",
-      opacity: exiting ? 0 : 1, transition: "opacity 480ms ease",
+      opacity: exiting ? 0 : 1, transition: "opacity 480ms ease", cursor: "pointer",
     }}>
       <style>{`
         @keyframes _bootFade { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
@@ -543,7 +561,7 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
   const isDark = useTheme();
   const C      = isDark ? DARK : LIGHT;
 
-  const [booting,   setBooting]   = useState(!skipBoot);  // 로그아웃 진입 시 부팅 생략
+  const [booting,   setBooting]   = useState(getBootBar() && !skipBoot);  // 부팅 로딩바: 설정(getBootBar)으로 on/off. 로그아웃 진입 시엔 생략
   const [id,        setId]        = useState(prefillId || "");
   const [pw,        setPw]        = useState("");
   const [remember,  setRemember]  = useState(true);
@@ -561,7 +579,12 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
   const [pwFilled,  setPwFilled]  = useState(!!pw);
 
-  // 배경 영상은 ffmpeg 로 정방향+역방향을 이어붙인 '부메랑 파일'(video-boomerang.mp4) → 네이티브 loop 로 매끄럽게 왕복(JS 핑퐁 불필요).
+  // 배경 영상: 부메랑 파일(ffmpeg 정방향+역방향 concat) → 네이티브 loop 로 매끄럽게 왕복.
+  //   관리자(시스템 설정)가 고른 값: "light"=빛퍼짐(wallpaper-boomerang) · "flower"=꽃(video-boomerang). 기본 빛퍼짐.
+  const [bgChoice, setBgChoice] = useState("light");
+  useEffect(() => { getLoginBg().then((r) => { if (r?.bg) setBgChoice(r.bg); }).catch(() => {}); }, []);
+  // ?v=2 — 부메랑 매끄럽게 재생성(이음새 중복프레임 제거) 후 캐시 무효화(브라우저·Cloudflare 우회). 영상 교체 시 버전 올림.
+  const bgSrc = bgChoice === "flower" ? "/video-boomerang.mp4" : "/wallpaper-boomerang.mp4?v=2";
 
   const typedText   = useTyping("통합관제 시스템", 75, 500);
   const nodeCount   = useCount(55, 1800, 900);
@@ -610,7 +633,7 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
     setLoading(true); setError(""); setErrStatus(null);
     setTimeout(async () => {
       const res = await guestLogin();
-      if (!res.ok) { setLoading(false); setError(res.error || "1회용 로그인에 실패했습니다."); return; }
+      if (!res.ok) { setLoading(false); setError(res.error || "게스트 로그인에 실패했습니다."); return; }
       setFailCount(0); onLogin && onLogin(res.user);
     }, 300);
   };
@@ -624,7 +647,7 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
         if (!RULES.ID_RE.test(id))   { setLoading(false); setError("아이디는 2~20자 (영문/숫자/._-) 입니다."); return; }
         if (String(pw).length < 4)   { setLoading(false); setError("비밀번호는 4자 이상 입력해 주세요."); return; }
         if (!name.trim())            { setLoading(false); setError("이름을 입력해 주세요."); return; }
-        if (/^guest\d+$/i.test(id.trim()) || /^guest\d+$/i.test(name.trim())) { setLoading(false); setError("‘guest+숫자’는 1회용 로그인 전용이라 가입에 쓸 수 없어요."); return; }
+        if (/^guest\d+$/i.test(id.trim()) || /^guest\d+$/i.test(name.trim())) { setLoading(false); setError("‘guest+숫자’는 게스트 로그인 전용이라 가입에 쓸 수 없어요."); return; }
         const reg = await signUp({ id, pw, name });
         if (!reg.ok) { setLoading(false); setError(reg.error || "가입에 실패했습니다."); return; }
         // 가입 성공 → 바로 자동 로그인(시연 흐름 매끄럽게)
@@ -669,6 +692,7 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
                                50%{clip-path:inset(15% 0 65% 0);transform:translate(-3px,1px)}
                                100%{clip-path:inset(45% 0 35% 0);transform:translate(2px,-1px)} }
         @keyframes spin      { to { transform:rotate(360deg) } }
+        @keyframes _sheen    { 0%,70%{transform:translateX(-130%)} 85%,100%{transform:translateX(130%)} }
         .card-glow::before {
           content:''; position:absolute; inset:0; border-radius:20px; pointer-events:none; z-index:0;
           background: radial-gradient(340px circle at var(--mx,50%) var(--my,50%), ${isDark ? "rgba(124,116,255,.18)" : "rgba(79,70,229,.10)"}, transparent 68%);
@@ -716,9 +740,11 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
       </div>
 
       {/* ── 배경 영상 (back1.mp4) — 사용자 설정. 데코 레이어 위 · 컨텐츠(zIndex 1) 아래. 로드 실패 시 뒤 데코가 비쳐 폴백 ── */}
-      {/* 배경 영상(부메랑: ffmpeg 정방향+역방향 concat) — loop 로 매끄럽게 왕복. 원본 밝기 그대로(밝기 필터·오버레이 제거 — 사용자 요청). 중앙 1.45배 확대로 우측 하단 워터마크 크롭 */}
-      <video autoPlay loop muted playsInline aria-hidden src="/video-boomerang.mp4"
-        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 0, pointerEvents: "none", transform: "scale(1.45)", transformOrigin: "center" }} />
+      {/* 배경 영상(부메랑: ffmpeg 정방향+역방향 concat) — loop 로 매끄럽게 왕복. 원본 밝기 그대로.
+          관리자 시스템 설정에서 선택: 빛퍼짐(wallpaper-boomerang, 기본) / 꽃(video-boomerang). 둘 다 4K(3840×2160) lanczos.
+          key={bgSrc} — fetch 후 선택이 바뀌면 <video> 를 리마운트해 새 소스 로드. */}
+      <video key={bgSrc} autoPlay loop muted playsInline aria-hidden src={bgSrc}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", zIndex: 0, pointerEvents: "none", transform: "scale(1.0)", transformOrigin: "center" }} />
 
       {/* 상단 헤더(브랜드 로고/타이틀) 제거 — 사용자 요청 */}
 
@@ -904,8 +930,9 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
               {mode === "login" && (
                 <button
                   type="button" onClick={guestSubmit} disabled={loading}
-                  title="자격증명 없이 둘러보기 — 읽기 전용 뷰어 · 1회용 세션"
+                  title="로그인 없이 바로 둘러볼 수 있어요 · 보기 전용"
                   style={{
+                    position: "relative", overflow: "hidden",
                     flex: 1, minWidth: 0, height: 50, borderRadius: 12,
                     border: `1.5px solid ${C.brand}55`,
                     background: isDark ? "rgba(124,116,255,0.10)" : "rgba(79,70,229,0.06)",
@@ -915,7 +942,17 @@ export function Login({ onLogin, onSignUp, prefillId, skipBoot }) {
                   }}
                   onMouseEnter={(e) => { if (!loading) { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.background = isDark ? "rgba(124,116,255,0.18)" : "rgba(79,70,229,0.12)"; } }}
                   onMouseLeave={(e) => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.background = isDark ? "rgba(124,116,255,0.10)" : "rgba(79,70,229,0.06)"; }}
-                >1회용 로그인</button>
+                >
+                  {/* 가끔 한 번씩 빛줄기가 스윽 — 항상 빛나지 않고 '눌러도 돼' 신호만 */}
+                  <span aria-hidden style={{
+                    position: "absolute", top: 0, bottom: 0, left: 0, width: "55%",
+                    background: `linear-gradient(100deg, transparent, ${isDark ? "rgba(190,185,255,0.40)" : "rgba(255,255,255,0.70)"}, transparent)`,
+                    transform: "translateX(-130%)",
+                    animation: loading ? "none" : "_sheen 5s ease-in-out infinite",
+                    pointerEvents: "none",
+                  }} />
+                  <span style={{ position: "relative", zIndex: 1 }}>게스트 로그인</span>
+                </button>
               )}
               <button
                 ref={btnRef} type="submit" disabled={loading} onClick={doRipple}

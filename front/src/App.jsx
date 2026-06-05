@@ -19,7 +19,7 @@ import {
   AI_WATCH    as MOCK_WATCH,
   AI_INSIGHTS as MOCK_INSIGHTS,
 } from "./data/mockData.js";
-import { fetchDevices, fetchAnomalies, fetchInsights, fetchAnnouncement, devicesToMarkers, setApiDemoMode } from "./api/client.js";
+import { fetchDevices, fetchAnomalies, fetchInsights, fetchAnnouncement, devicesToMarkers } from "./api/client.js";
 
 const TWEAK_DEFAULTS = { theme: "light", mapStyle: "light", autoPlay: true };
 const POLL_MS = 60_000;
@@ -424,8 +424,6 @@ export function App() {
   const [dbInfo,   setDbInfo]   = useState(null);   // { rows, model, ollama }
   const [aiEvents,  setAiEvents]  = useState([]);     // 실시간 로그로 전달되는 AI 이벤트
   const [announcement, setAnnouncement] = useState(null);   // 관리자 등록 공지 (배너) — null=없음
-  // 데모 모드 제거(2026-06-02) — 기능 폐지, 항상 false
-  const demoMode = false;
   // 시스템 로그 드로어 토글 (5/26 floating → 헤더 알약으로 이동)
   const [logOpen, setLogOpen] = useState(false);
   useEffect(() => {
@@ -487,10 +485,24 @@ export function App() {
       });
     });
 
-    if (offline.length > 0) {
+    // offline 집계는 commOutage(단말별)가 비었을 때만 폴백 — 둘은 같은 24h+ 무측정 집합이라 중복 로그 방지
+    if (commOutage.length === 0 && offline.length > 0) {
       events.push({
         id: `aibatch:${sig}:offline`, ts, kind: "warn", time: t,
         text: `WARN: 통신장애 ${offline.length}건 · ${offline.slice(0, 2).map((d) => d.deviceId).join(", ")}`,
+      });
+    }
+
+    // 미러 동기화 지연 감지 — 가장 최신 측정조차 오래됐으면 '통신 장애'는 단말 고장이 아니라 KSCG→MySQL 동기화 지연일 수 있음.
+    // (정상 시 최신 측정 ~3h. 12h+ = 동기화 잡 점검 필요. 단말이 24h 넘어 일괄 offline 표시되기 전 조기경보.)
+    const freshestH = (() => {
+      const a = devRes.devices.map((d) => d.hoursSilent).filter((h) => h != null && isFinite(h));
+      return a.length ? Math.min(...a) : null;
+    })();
+    if (freshestH != null && freshestH >= 12) {
+      events.push({
+        id: `aibatch:${sig}:syncstale`, ts, kind: "warn", time: t,
+        text: `WARN: 데이터 동기화 지연 의심 — 최신 측정이 ${freshestH}시간 전. '통신 장애' 표시는 단말 고장이 아닌 KSCG→MySQL 동기화 지연일 수 있음(미러 잡 점검).`,
       });
     }
 
@@ -641,7 +653,6 @@ export function App() {
         setTheme={(t) => setTweakState((s) => ({ ...s, theme: t }))}
         mapStyle={tweakState.mapStyle}
         setMapStyle={setMapStyle}
-        demoMode={demoMode}
         /* 로그 토글은 5/26 Header → AIPanels 헤더 안으로 이동
            Header 알약 제거. Dashboard 에 직접 onToggleLog 전달 */
       />
@@ -656,8 +667,6 @@ export function App() {
         dbStatus={dbStatus}
         dbInfo={dbInfo}
         user={user}
-        demoMode={demoMode}
-        /* onToggleDemo 제거 — 헤더 설정창으로 이동 (옴니 5/22 피드백) */
       />
       {/* 상시 표시 공지 배너 — 관리자 공지(레벨별 색)가 있으면 그걸, 없으면 중립 바 (chrome.jsx EmergencyBanner) */}
       {(tab === "dashboard" || announcement) && <EmergencyBanner announcement={announcement} />}
@@ -684,7 +693,6 @@ export function App() {
             watch={watch}
             commOutage={commOutage}
             aiEvents={aiEvents}
-            demoMode={demoMode}
             logOpen={logOpen}
             onLogClose={() => setLogOpen(false)}
             onToggleLog={() => setLogOpen((v) => !v)}

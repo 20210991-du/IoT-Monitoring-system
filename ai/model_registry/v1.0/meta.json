@@ -1,0 +1,22 @@
+{
+  "version": "v1.0",
+  "label": "최초 운용 모델",
+  "kind": "common",
+  "trained_at": "2026-05-27 14:48",
+  "registered_at": "2026-06-06 01:58",
+  "device_count": 55,
+  "mean_threshold": 0.00010435,
+  "time_steps": 24,
+  "base_features": [
+    "방식전위",
+    "AC유입",
+    "온도",
+    "습도"
+  ],
+  "feature_count": 12,
+  "keras_bytes": 3113533,
+  "keras_sha256": "aa60e7406cf0",
+  "note": "최초 운영 모델",
+  "edited_at": "2026-06-05 17:50",
+  "edited_by": "admin.pjh"
+}

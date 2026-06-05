@@ -110,7 +110,7 @@ export async function guestLogin() {
     cacheSession(res.user);
     return { ok: true, user: res.user };
   }
-  return { ok: false, error: res.error || "1회용 로그인에 실패했습니다." };
+  return { ok: false, error: res.error || "게스트 로그인에 실패했습니다." };
 }
 
 /** 로그아웃 — 서버 쿠키 무효화 + 캐시 제거. */
@@ -157,6 +157,30 @@ export async function getAnnouncement() {
 export async function saveAnnouncement({ message, level, active }) {
   const res = await jpost("/api/announcement", { message, level, active });
   return res.ok ? { ok: true } : { ok: false, error: res.error || "공지 저장에 실패했습니다." };
+}
+
+// ── 로그인 배경 영상 (관리자 설정) ──────────────────────────
+/** 현재 로그인 배경 선택 조회(공개). @returns {{ok, bg}} bg: "light"(빛퍼짐) | "flower"(꽃) */
+export async function getLoginBg() {
+  const res = await jget("/api/login-bg");
+  return { ok: !!res.ok, bg: res.bg === "flower" ? "flower" : "light" };
+}
+/** 로그인 배경 선택 저장(관리자 전용). @param {"light"|"flower"} bg */
+export async function saveLoginBg(bg) {
+  const res = await jpost("/api/login-bg", { bg });
+  return res.ok ? { ok: true, bg: res.bg } : { ok: false, error: res.error || "배경 저장에 실패했습니다." };
+}
+
+// ── 챗봇 모델 잠금(관리자 설정) ──────────────────────────────
+/** 허용된 챗봇 모델 목록 조회(공개). @returns {{ok, enabled:string[], all:string[]}} */
+export async function getChatModels() {
+  const res = await jget("/api/chat/models");
+  return { ok: !!res.ok, enabled: Array.isArray(res.enabled) ? res.enabled : null, all: res.all || [] };
+}
+/** 허용 모델 저장(관리자 전용). @param {string[]} enabled */
+export async function saveChatModels(enabled) {
+  const res = await jpost("/api/admin/chat-models", { enabled });
+  return res.ok ? { ok: true, enabled: res.enabled } : { ok: false, error: res.error || "모델 잠금 저장에 실패했습니다." };
 }
 
 export async function adminCreateUser(_actor, { id, pw, name, role, memo }) {

@@ -56,7 +56,7 @@ const iconBtn = {
   color: "var(--ink-3)",
 };
 
-export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, setMapStyle, demoMode = false, onToggleDemo }) {
+export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, setMapStyle }) {
   const now = useClock();
   const [open, setOpen] = useState(false);          // 사용자 카드 드롭다운
   const [settingsOpen, setSettingsOpen] = useState(false); // 설정 드롭다운
@@ -245,30 +245,6 @@ export function Header({ onLogout, user, setUser, theme, setTheme, mapStyle, set
                   onClick={toggleBeep}
                 />
               </div>
-
-              {/* 데모 모드 (옴니 5/22 피드백 — SubNav 토글 → 설정창 이동) */}
-              {onToggleDemo && (
-                <>
-                  <div style={{
-                    padding: "10px 14px 8px",
-                    fontSize: 11, fontWeight: 700, letterSpacing: "0.04em",
-                    color: "var(--ink-3)", textTransform: "uppercase",
-                    borderTop: "1px solid var(--line)",
-                    borderBottom: "1px solid var(--line)",
-                  }}>
-                    데모 모드
-                  </div>
-                  <div style={{ padding: 6 }}>
-                    <ToggleRow
-                      icon={<span style={{ fontSize: 12 }}>🧪</span>}
-                      label="가상 장비 추가"
-                      hint={demoMode ? "켜짐 · 10대 추가 표시" : "꺼짐 · 실데이터만"}
-                      on={demoMode}
-                      onClick={onToggleDemo}
-                    />
-                  </div>
-                </>
-              )}
 
             </div>
           )}
@@ -537,7 +513,7 @@ const API_STATUS_STYLE = {
   error:   { dot: "var(--err)",  text: "오프라인",   textColor: "var(--err)"   },
 };
 
-export function SubNav({ tab, setTab, apiStatus = "mock", dbStatus = null, dbInfo = null, user, pendingCount = 0, demoMode = false, onToggleDemo }) {
+export function SubNav({ tab, setTab, apiStatus = "mock", dbStatus = null, dbInfo = null, user, pendingCount = 0 }) {
   const weather = useWeather();
   const baseTabs = [
     { k: "dashboard", ko: "대시보드" },
@@ -584,21 +560,6 @@ export function SubNav({ tab, setTab, apiStatus = "mock", dbStatus = null, dbInf
         );
       })}
       <div style={{ flex: 1 }} />
-      {/* 데모 모드 배지 (ON 일 때만) */}
-      {demoMode && (
-        <span style={{
-          display: "inline-flex", alignItems: "center", gap: 5,
-          padding: "0 10px", height: 22, marginRight: 12, alignSelf: "center",
-          borderRadius: 11, fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5,
-          background: "linear-gradient(135deg, #ef4444, #dc2626)", color: "#fff",
-          boxShadow: "0 2px 6px rgba(239,68,68,0.45)",
-          animation: "pulse-dot 1.6s infinite",
-        }}>
-          🧪 DEMO MODE
-        </span>
-      )}
-      {/* 데모 모드 토글은 헤더 설정 드롭다운(⚙️) 으로 이동 — 옴니 5/22 피드백 반영
-          이전 SubNav 토글은 제거. ON 상태는 위 'DEMO MODE' 배지로 명시. */}
       {/* 'AI 연동됨' 배지 제거 (사용자 요청) — DB 연동과 사실상 중복이라 DB 배지만 유지 */}
       {/* DB 연결 상태 — 문구는 'DB'만, 상태는 점 색(초록=OK/빨강=끊김/노랑=확인중)·툴팁으로 표시 */}
       {(() => {

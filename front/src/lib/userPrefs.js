@@ -8,8 +8,9 @@
  *  키: localStorage["siwon.prefs.<항목>"]
  */
 
-const KEY_BEEP   = "siwon.prefs.beep";
-const KEY_VOLUME = "siwon.prefs.beepVol";
+const KEY_BEEP    = "siwon.prefs.beep";
+const KEY_VOLUME  = "siwon.prefs.beepVol";
+const KEY_BOOTBAR = "siwon.prefs.bootBar";
 
 // ── 비프음 ─────────────────────────────────────────────
 export function getBeep() {
@@ -25,6 +26,15 @@ export function getBeepVolume() {
 }
 export function setBeepVolume(v) {
   localStorage.setItem(KEY_VOLUME, String(Math.max(0, Math.min(1, v))));
+}
+
+// ── 부팅 로딩바 (시작 화면 시퀀스) ─────────────────────────
+//   기본 OFF (저장값 없으면 꺼짐). 설정에서 켜면 다음 접속부터 BootScreen 표시.
+export function getBootBar() {
+  return localStorage.getItem(KEY_BOOTBAR) === "on";
+}
+export function setBootBar(on) {
+  localStorage.setItem(KEY_BOOTBAR, on ? "on" : "off");
 }
 
 /**

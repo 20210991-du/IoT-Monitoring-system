@@ -132,7 +132,7 @@ ai/models/
 
 > ⚠️ AI 파트는 **이두현 담당 영역**. 다른 팀원이 폴더 구조 / 코드 임의 변경 X.
 >
-> ⚠️ **2026-04-19 에 test_api.py + dashboard.py 삭제됨** — FastAPI 추론 서버는 향후 `backend/` 에 통합 예정.
+> ⚠️ 초기 추론 서버 스크립트(test_api.py·dashboard.py)는 정리됨 — 모델 추론/메타는 이후 백엔드(front/server.js)로 통합 완료.
 
 ### 아티팩트 저장 위치
 
@@ -268,7 +268,7 @@ v2026.04.19 개선으로 **대부분 해결됨**.
 | 🟡 | `model_config.json` | `base_features` 6센서 | ✅ **4센서로 축소** |
 
 남은 항목:
-- FastAPI 추론 서버가 삭제되었으므로, **`backend/`** 에서 모델 로딩 + 예측 엔드포인트 새로 구현 필요
+- 모델 설정/메타(ai/config/*.json)는 front/server.js 가 부팅 시 로드 + `get_ai_model_info` 도구로 노출(통합 완료). 실시간 예측 INSERT는 LSTM 백엔드 연동 진행.
 
 → 통합 추적: [[프로젝트/_템플릿/README]]
 

@@ -17,13 +17,14 @@ import express from "express";
 import helmet from "helmet";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import path from "path";
-import { readFileSync, existsSync, readdirSync, createWriteStream } from "fs";
+import { readFileSync, existsSync, readdirSync, createWriteStream, writeFileSync, copyFileSync, statSync, mkdirSync, rmSync, renameSync } from "fs";
 import { fileURLToPath } from "url";
 import mysql from "mysql2/promise";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { randomBytes, randomInt, createHash } from "crypto";
 import { WebSocketServer } from "ws";
+import { spawn } from "child_process";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -35,11 +36,14 @@ const __dirname  = path.dirname(__filename);
 let DEVICE_THRESHOLDS = {};   // { "TB24-250401": 0.00106..., ... }
 let MODEL_CONFIG = null;
 let EVAL_METRICS = null;
-{
-  const aiDir = path.join(__dirname, "..", "ai", "config");
+const AI_ROOT_DIR     = path.join(__dirname, "..", "ai");
+const AI_CONFIG_DIR   = path.join(AI_ROOT_DIR, "config");
+const AI_MODELS_DIR   = path.join(AI_ROOT_DIR, "models");
+const AI_REGISTRY_DIR = path.join(AI_ROOT_DIR, "model_registry");
+function reloadAiConfig() {
   const load = (file, fallback) => {
     try {
-      const fp = path.join(aiDir, file);
+      const fp = path.join(AI_CONFIG_DIR, file);
       if (existsSync(fp)) return JSON.parse(readFileSync(fp, "utf8"));
     } catch (e) { console.warn(`[AI config ${file}]`, e.message); }
     return fallback;
@@ -49,17 +53,53 @@ let EVAL_METRICS = null;
   EVAL_METRICS      = load("eval_metrics.json", null);
   console.log(`▶ AI cfg  thresholds=${Object.keys(DEVICE_THRESHOLDS).length}대 · model_config=${MODEL_CONFIG ? "OK" : "X"} · eval_metrics=${EVAL_METRICS ? "OK" : "X"}`);
 }
+reloadAiConfig();
+
+// AI 모델 레지스트리 (버전 모듈화 + 핫스왑) — model_registry/<version>/{keras,pkl,2×json,meta} + ACTIVE.json.
+// 활성 모델 = registry 버전 파일을 활성 작업경로(models/+config/)로 복사한 사본. predict 스크립트는 그 경로를 그대로 읽음.
+const REGISTRY_ARTIFACTS = ["common_lstm_autoencoder.keras", "group_scalers.pkl", "device_thresholds.json", "model_config.json"];
+const registryActive = () => {
+  try { return JSON.parse(readFileSync(path.join(AI_REGISTRY_DIR, "ACTIVE.json"), "utf8")).active; } catch { return null; }
+};
+function listRegistry() {
+  const active = registryActive();
+  let names = [];
+  try { names = readdirSync(AI_REGISTRY_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch {}
+  const versions = names.map((name) => {
+    let meta = {};
+    try { meta = JSON.parse(readFileSync(path.join(AI_REGISTRY_DIR, name, "meta.json"), "utf8")); } catch {}
+    const complete = REGISTRY_ARTIFACTS.every((f) => existsSync(path.join(AI_REGISTRY_DIR, name, f)));
+    return { ...meta, version: meta.version || name, dir: name, active: name === active, complete };
+  }).sort((a, b) => (a.version < b.version ? 1 : -1));
+  return { active, versions };
+}
+
+// 재백필(과거 예측 재생성) 상태 — server.js 가 run-rebackfill.sh 를 spawn 해서 관리. 진행률은 shard 로그 INSERT 수로 추정.
+const REBACKFILL_LOG_DIR = path.join(process.env.HOME || "/Users/pjh", "PJHwork", "infra", "logs");
+let rebackfill = { running: false, startedAt: null, by: null, version: null, exitCode: null, finishedAt: null };
+function rebackfillStatus() {
+  let done = 0;
+  try {
+    for (const f of readdirSync(REBACKFILL_LOG_DIR)) {
+      if (/^rebackfill-shard-\d+\.log$/.test(f)) {
+        const txt = readFileSync(path.join(REBACKFILL_LOG_DIR, f), "utf8");
+        done += (txt.match(/INSERT/g) || []).length;
+      }
+    }
+  } catch {}
+  return { ...rebackfill, done, total: 55 };
+}
 
 // 단말 위험도 판정 (이두현 명세 — threshold 의 70%/100% 분기)
 //   정상  : mse < threshold × 0.70
-//   관찰  : threshold × 0.70 ≤ mse ≤ threshold × 1.00
-//   이상  : mse > threshold × 1.00
+//   관찰  : threshold × 0.70 ≤ mse < threshold × 1.00
+//   이상  : mse ≥ threshold × 1.00   (python mse>=threshold·프론트 RatioGauge·AI모델.md 와 통일)
 function classifyMse(deviceId, mse) {
   const th = DEVICE_THRESHOLDS[deviceId];
   if (th == null || !Number.isFinite(Number(mse))) return null;
   const ratio = Number(mse) / th;
   let level = "정상";
-  if (ratio > 1.0) level = "이상";
+  if (ratio >= 1.0) level = "이상";
   else if (ratio >= 0.7) level = "관찰";
   return {
     deviceId,
@@ -79,7 +119,27 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL  || "qwen3.5:9b";
 const KEEP_ALIVE   = process.env.OLLAMA_KEEP_ALIVE || "30m";   // 모델 메모리 상주 시간 — 콜드스타트(매 요청 모델 로딩) 방지
 // UI 에서 선택 가능한 챗봇 모델 화이트리스트 (그 외 값은 기본 모델로 폴백 — 안전)
 const SELECTABLE_MODELS = ["qwen3.5:9b", "qwen3:14b", "qwen3.5:27b", "gpt-4o-mini", "gpt-5", "gpt-5.5"];
-const pickModel = (m) => (SELECTABLE_MODELS.includes(m) ? m : OLLAMA_MODEL);
+// 관리자 '모델 잠금' — 허용된 모델만 실제로 사용 가능. app_settings.chat_models_enabled(JSON 배열)에 저장.
+// 공개 사이트라 백엔드에서 강제(차단 모델을 직접 POST 해도 여기서 폴백) — 프론트 숨김은 보조일 뿐. 기본=전체 허용.
+let ENABLED_MODELS = new Set(SELECTABLE_MODELS);
+function defaultEnabledModel() {
+  if (ENABLED_MODELS.has(OLLAMA_MODEL)) return OLLAMA_MODEL;       // 기본(9b)이 허용되면 그걸로
+  for (const m of SELECTABLE_MODELS) if (ENABLED_MODELS.has(m)) return m;   // 아니면 허용된 첫 모델
+  return OLLAMA_MODEL;                                              // (전부 차단 방지 로직이 있어 도달 안 함)
+}
+// 선택값이 화이트리스트 + 허용목록에 모두 있을 때만 사용, 아니면 허용된 기본 모델로 폴백
+const pickModel = (m) => (SELECTABLE_MODELS.includes(m) && ENABLED_MODELS.has(m) ? m : defaultEnabledModel());
+async function loadEnabledModels() {
+  try {
+    const [rows] = await pool.query("SELECT svalue FROM app_settings WHERE skey = 'chat_models_enabled' LIMIT 1");
+    if (rows[0]?.svalue) {
+      const arr = JSON.parse(rows[0].svalue);
+      const valid = Array.isArray(arr) ? arr.filter((m) => SELECTABLE_MODELS.includes(m)) : [];
+      if (valid.length) { ENABLED_MODELS = new Set(valid); console.log(`▶ 모델잠금  허용 ${valid.length}/${SELECTABLE_MODELS.length}: ${valid.join(", ")}`); return; }
+    }
+    console.log("▶ 모델잠금  설정 없음 → 전체 허용");
+  } catch (e) { console.warn("[모델잠금] 로드 실패(전체 허용 유지):", e.message); }
+}
 // OpenAI(GPT) 프로바이더 — 외부 전송. 키는 secrets/local/openai.env → process.env.OPENAI_API_KEY.
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
@@ -91,124 +151,6 @@ const SIWON_DB_USER = process.env.SIWON_DB_USER || "siwon_app";
 const SIWON_DB_PASS = process.env.SIWON_DB_PASS || "";
 const SIWON_DB_NAME = process.env.SIWON_DB_NAME || "siwon";
 const SITE_ID       = parseInt(process.env.SITE_ID || "2", 10);  // 군산도시가스
-
-// ─────────────────────────────────────────────────────
-// 데모 모드 — 발표/시연용 가상 장비 10대 (메모리 only, DB INSERT 안 함)
-//   토글 OFF 시 흔적 제로 / ON 시 KPI·지도·표·챗봇 모두에 추가 표시.
-//   클라이언트: GET ?demo=1 또는 POST body { demo: true }
-// ─────────────────────────────────────────────────────
-function isDemoMode(_req) {
-  return false;   // 데모 모드 제거(2026-06-02) — 항상 false. 모든 데모 분기 비활성(재현 불가). 죽은 DEMO_* 데이터는 추후 청소.
-}
-
-// 시간 마커 — lastMeasured 가 호출 시점 기준 N시간 전 timestamp 가 되도록
-function nowMinusH(h) { return new Date(Date.now() - h * 3600_000).toISOString().slice(0, 19).replace("T", " "); }
-
-// 가상 장비 10대 (DB 충돌 회피용 음수 TRANSMITTER_ID).
-//   이상 3 + 관찰 4 + 통신장애 3.
-//   좌표·시설번호·POSITION 모두 군산 자연스러운 위치로.
-function getDemoDevices() {
-  return [
-    // ── 이상 3대 (critical: 최근 알람 발생) ──
-    { deviceId: "DEMO-001", txid: -1, facility: "1-DEMO01", location: "시청 사거리 (데모)",
-      lat: 35.9676, lng: 126.7369, hoursSilent: 2, recentAlarms: 3, status: "critical",
-      sensors: { volt: -540, sacrificial: 0.6, ac: 312, battery: 3580, temp: 28.4, hum: 71, shock: 0, commDbm: -88 },
-      lastMeasured: nowMinusH(2),
-      mse: 0.0042, threshold: 0.0011, riskLevel: "이상", aiReliability: "신뢰" },
-    { deviceId: "DEMO-002", txid: -2, facility: "2-DEMO02", location: "대야 사거리 (데모)",
-      lat: 35.962, lng: 126.745, hoursSilent: 1, recentAlarms: 5, status: "critical",
-      sensors: { volt: -480, sacrificial: 0.3, ac: 540, battery: 3520, temp: 30.1, hum: 68, shock: 1, commDbm: -82 },
-      lastMeasured: nowMinusH(1),
-      mse: 0.0061, threshold: 0.0013, riskLevel: "이상", aiReliability: "신뢰" },
-    { deviceId: "DEMO-003", txid: -3, facility: "8-DEMO03", location: "소룡동 공단 입구 (데모)",
-      lat: 35.985, lng: 126.700, hoursSilent: 1, recentAlarms: 2, status: "critical",
-      sensors: { volt: -620, sacrificial: 0.8, ac: 280, battery: 3610, temp: 27.8, hum: 70, shock: 0, commDbm: -85 },
-      lastMeasured: nowMinusH(1),
-      mse: 0.0038, threshold: 0.0011, riskLevel: "이상", aiReliability: "신뢰" },
-    // ── 관찰 4대 (warn) ──
-    { deviceId: "DEMO-101", txid: -101, facility: "4-DEMO11", location: "미룡동 교차로 (데모)",
-      lat: 35.937, lng: 126.696, hoursSilent: 1, recentAlarms: 0, status: "warn",
-      sensors: { volt: -780, sacrificial: 0.9, ac: 195, battery: 3700, temp: 26.5, hum: 65, shock: 0, commDbm: -78 },
-      lastMeasured: nowMinusH(1),
-      mse: 0.0019, threshold: 0.0011, riskLevel: "관찰", aiReliability: "주의" },
-    { deviceId: "DEMO-102", txid: -102, facility: "9-DEMO12", location: "해망동 박물관 앞 (데모)",
-      lat: 35.990, lng: 126.704, hoursSilent: 1, recentAlarms: 0, status: "warn",
-      sensors: { volt: -810, sacrificial: 1.1, ac: 175, battery: 3680, temp: 27.0, hum: 67, shock: 0, commDbm: -76 },
-      lastMeasured: nowMinusH(1),
-      mse: 0.0016, threshold: 0.0011, riskLevel: "관찰", aiReliability: "주의" },
-    { deviceId: "DEMO-103", txid: -103, facility: "3-DEMO13", location: "소룡동 현대자동차 옆 (데모)",
-      lat: 35.983, lng: 126.682, hoursSilent: 2, recentAlarms: 0, status: "warn",
-      sensors: { volt: -795, sacrificial: 1.0, ac: 188, battery: 3690, temp: 27.5, hum: 66, shock: 0, commDbm: -79 },
-      lastMeasured: nowMinusH(2),
-      mse: 0.0015, threshold: 0.0011, riskLevel: "관찰", aiReliability: "주의" },
-    { deviceId: "DEMO-104", txid: -104, facility: "8-DEMO14", location: "대야 버스터미널 옆 (데모)",
-      lat: 35.946, lng: 126.810, hoursSilent: 1, recentAlarms: 0, status: "warn",
-      sensors: { volt: -805, sacrificial: 1.2, ac: 180, battery: 3675, temp: 27.2, hum: 68, shock: 0, commDbm: -77 },
-      lastMeasured: nowMinusH(1),
-      mse: 0.0014, threshold: 0.0011, riskLevel: "관찰", aiReliability: "주의" },
-    // ── 통신장애 3대 (offline) ──
-    { deviceId: "DEMO-201", txid: -201, facility: "1-DEMO21", location: "새만금방조제 5공구 (데모)",
-      lat: 35.819, lng: 126.477, hoursSilent: 72, recentAlarms: 0, status: "offline",
-      sensors: { volt: -1850, sacrificial: 0.8, ac: 95, battery: 3450, temp: 26.0, hum: 72, shock: 0, commDbm: -118 },
-      lastMeasured: nowMinusH(72),
-      mse: null, threshold: 0.0011, riskLevel: "관찰", aiReliability: "신뢰불가" },
-    { deviceId: "DEMO-202", txid: -202, facility: "8-DEMO22", location: "조촌동 (데모)",
-      lat: 35.975, lng: 126.741, hoursSilent: 120, recentAlarms: 0, status: "offline",
-      sensors: { volt: -1920, sacrificial: 0.9, ac: 102, battery: 3480, temp: 26.5, hum: 70, shock: 0, commDbm: -120 },
-      lastMeasured: nowMinusH(120),
-      mse: null, threshold: 0.0011, riskLevel: "관찰", aiReliability: "신뢰불가" },
-    { deviceId: "DEMO-203", txid: -203, facility: "9-DEMO23", location: "해망동 굴 입구 (데모)",
-      lat: 35.991, lng: 126.703, hoursSilent: 200, recentAlarms: 0, status: "offline",
-      sensors: { volt: -1880, sacrificial: 0.7, ac: 88, battery: 3420, temp: 26.2, hum: 73, shock: 0, commDbm: -119 },
-      lastMeasured: nowMinusH(200),
-      mse: null, threshold: 0.0011, riskLevel: "관찰", aiReliability: "신뢰불가" },
-  ];
-}
-
-// 데모 알람 (위험 3대 + 충격 1건)
-function getDemoAlarms() {
-  return [
-    { occurredAt: nowMinusH(2),  grade: "위험", gradeId: 1, deviceId: "DEMO-001", facility: "1-DEMO01", value: 312, contents: "AC 유입 임계 초과 (200mV)" },
-    { occurredAt: nowMinusH(1),  grade: "위험", gradeId: 1, deviceId: "DEMO-002", facility: "2-DEMO02", value: 540, contents: "AC 유입 임계 초과 (500mV 즉각 점검)" },
-    { occurredAt: nowMinusH(3),  grade: "경고", gradeId: 2, deviceId: "DEMO-002", facility: "2-DEMO02", value: 1,   contents: "충격 센서 감지" },
-    { occurredAt: nowMinusH(1),  grade: "위험", gradeId: 1, deviceId: "DEMO-003", facility: "8-DEMO03", value: -620, contents: "방식전위 -850 mV 미달 (부식 진행 가능)" },
-  ];
-}
-
-// 데모 시계열 — deviceId + kind 의 해시 기반 시드된 가짜 데이터 (재현 가능)
-function generateDemoHistory(deviceId, kind, hours) {
-  // deviceId+kind 해시 → mulberry32 시드
-  let seed = 0;
-  for (const ch of deviceId + kind) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
-  let s = seed >>> 0;
-  const rng = () => {
-    s |= 0; s = (s + 0x6D2B79F5) | 0;
-    let t = Math.imul(s ^ (s >>> 15), 1 | s);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-  // 도구 종류별 기본값·변동폭
-  const base = { volt: -650, sacrificial: 0.6, ac: 350, battery: 3550, temp: 28, hum: 70, commDbm: -85 }[kind] || 0;
-  const swing = { volt: 80, sacrificial: 0.2, ac: 100, battery: 50, temp: 2, hum: 5, commDbm: 5 }[kind] || 1;
-  const points = [];
-  const now = Date.now();
-  const stepMs = (hours * 3600_000) / Math.min(hours, 100);
-  const count = Math.min(hours, 100);
-  for (let i = 0; i < count; i++) {
-    const t = new Date(now - (count - i) * stepMs).toISOString().slice(0, 19).replace("T", " ");
-    const v = base + (rng() - 0.5) * 2 * swing;
-    points.push({ t, v: Number(v.toFixed(2)) });
-  }
-  return points;
-}
-
-// 데모 단말 ID 빠른 룩업
-function findDemoDevice(deviceId) {
-  return getDemoDevices().find((d) => d.deviceId === deviceId) || null;
-}
-function findDemoDeviceByTxid(txid) {
-  return getDemoDevices().find((d) => d.txid === txid) || null;
-}
 
 const app = express();
 app.use(express.json({ limit: "8mb" }));   // base64 이미지 첨부(문의·최대 5장) 대비 상향
@@ -280,13 +222,20 @@ async function ensureGuestbookSchema() {
       INDEX idx_gb_created (created_at),
       INDEX idx_gb_active (deleted_at, id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+    // 앱 전역 설정 (key-value) — 로그인 배경 선택 등. 멱등.
+    await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (
+      skey VARCHAR(64) PRIMARY KEY,
+      svalue TEXT NULL,
+      updated_by VARCHAR(64) NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
     try { await pool.query("ALTER TABLE guestbook_messages ADD COLUMN bot_key VARCHAR(40) NULL"); } catch (e) { /* 이미 존재 */ }
     try { await pool.query("ALTER TABLE guestbook_messages MODIFY body MEDIUMTEXT NOT NULL"); } catch (e) { /* 봇 답변 길이 대응 */ }
     try { await pool.query("ALTER TABLE guestbook_messages ADD COLUMN image MEDIUMTEXT NULL"); } catch (e) { /* 이미 존재 — 사진 첨부 (data URL, 단일) */ }
     console.log("▶ 방명록  guestbook_messages 테이블 준비됨");
   } catch (e) { console.error("✗ 방명록 스키마 생성 실패:", e.message); }
 }
-ensureGuestbookSchema();
+ensureGuestbookSchema().then(loadEnabledModels);   // app_settings 준비 후 모델잠금 허용목록 메모리 로드
 
 // users 프로필 확장 컬럼(자기소개·직무·링크·커스텀 아바타) — users 테이블은 외부 생성이라 부팅 시 ALTER 로 보강(이미 있으면 무시)
 async function ensureUserProfileColumns() {
@@ -303,6 +252,14 @@ async function ensureUserProfileColumns() {
   console.log("▶ 사용자  프로필 컬럼(bio·title·github·avatar) 준비됨");
 }
 ensureUserProfileColumns();
+
+// inquiries 소프트 삭제용 컬럼 — 관리자가 문의를 숨김(행/내용은 DB 보존, 복구 가능)
+async function ensureInquiriesSchema() {
+  if (!pool) return;
+  try { await pool.query(`ALTER TABLE inquiries ADD COLUMN deleted_at DATETIME NULL`); } catch (e) { /* 이미 존재 */ }
+  console.log("▶ 문의함  소프트삭제 컬럼(deleted_at) 준비됨");
+}
+ensureInquiriesSchema();
 
 // ── 봇 페르소나(시원팀 공개문의 + 관제도우미·상담원) — 관리자 편집(DB). 부팅 시 테이블 보장 + 비어있으면 seed + 메모리 로드. ──
 // 시스템프롬프트는 페르소나-특화 부분만 저장(공통 grounding·규칙은 답변 시 주입). 이재헌·이두현은 본인 동의 전까지 enabled=0.
@@ -556,6 +513,203 @@ app.get("/api/auth/users", dbRequired, requireAdminView, async (_req, res) => {
   catch (e) { console.error("[/api/auth/users GET]", e.message); res.status(500).json({ ok: false, error: "목록 조회 오류" }); }
 });
 
+// ── AI 모델 레지스트리 API (버전 목록 / 활성화 핫스왑) ──────────────
+// GET 버전 목록 (관리자 읽기)
+app.get("/api/ai/models", requireAdminView, (req, res) => {
+  res.json({ ok: true, ...listRegistry() });
+});
+// POST 활성화 (총괄 관리자) — 버전 파일을 활성 작업경로(models/+config/)로 복사 + ACTIVE 갱신 + config 리로드.
+//   라이브 predict 는 매 실행 파일을 새로 읽으므로 다음 주기부터 새 모델 적용 (과거 재계산은 별도 재생성 API).
+app.post("/api/ai/models/:version/activate", requireAdmin, (req, res) => {
+  const ver = String(req.params.version || "");
+  if (!/^[A-Za-z0-9._-]+$/.test(ver)) return res.status(400).json({ ok: false, error: "잘못된 버전명" });
+  const vdir = path.join(AI_REGISTRY_DIR, ver);
+  if (!existsSync(vdir) || !statSync(vdir).isDirectory()) return res.status(404).json({ ok: false, error: "해당 버전 없음" });
+  const missing = REGISTRY_ARTIFACTS.filter((f) => !existsSync(path.join(vdir, f)));
+  if (missing.length) return res.status(400).json({ ok: false, error: "아티팩트 누락: " + missing.join(", ") });
+  try {
+    copyFileSync(path.join(vdir, "common_lstm_autoencoder.keras"), path.join(AI_MODELS_DIR, "common_lstm_autoencoder.keras"));
+    copyFileSync(path.join(vdir, "group_scalers.pkl"),             path.join(AI_MODELS_DIR, "group_scalers.pkl"));
+    copyFileSync(path.join(vdir, "device_thresholds.json"),        path.join(AI_CONFIG_DIR, "device_thresholds.json"));
+    copyFileSync(path.join(vdir, "model_config.json"),             path.join(AI_CONFIG_DIR, "model_config.json"));
+    writeFileSync(path.join(AI_REGISTRY_DIR, "ACTIVE.json"),
+      JSON.stringify({ active: ver, updated_at: new Date().toISOString(), by: req.auth?.lid || null }, null, 2));
+    reloadAiConfig();   // 챗봇용 메모리 config 즉시 갱신
+    console.log(`▶ AI 모델 활성화: ${ver} (by ${req.auth?.lid})`);
+    res.json({ ok: true, active: ver, ...listRegistry() });
+  } catch (e) {
+    console.error("[ai/models/activate]", e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+// POST 업로드 (총괄 관리자) — base64 keras+scalers + JSON thresholds+config → 새 registry 버전 등록 (활성화는 별도).
+//   ⚠️ scalers.pkl 은 예측 시 pickle 로드 → 신뢰된 총괄 관리자만. 업로드 자체는 실행 안 함(파일 저장만).
+app.post("/api/ai/models/upload", requireAdmin, (req, res) => {
+  try {
+    const b = req.body || {};
+    const ver = String(b.version || "").trim();
+    if (!/^[A-Za-z0-9._-]{3,40}$/.test(ver)) return res.status(400).json({ ok: false, error: "버전명은 영문/숫자/._- 3~40자" });
+    const vdir = path.join(AI_REGISTRY_DIR, ver);
+    if (existsSync(vdir)) return res.status(409).json({ ok: false, error: "이미 존재하는 버전명입니다." });
+
+    // keras 디코드 + 매직바이트 (Keras v3=zip 'PK', HDF5='\x89HDF')
+    const keras = Buffer.from(String(b.keras_b64 || ""), "base64");
+    if (keras.length < 1000) return res.status(400).json({ ok: false, error: ".keras 파일이 비었거나 손상" });
+    if (keras.length > 80 * 1048576) return res.status(400).json({ ok: false, error: ".keras 파일이 너무 큼(>80MB)" });
+    const m = keras.subarray(0, 4);
+    const isZip = m[0] === 0x50 && m[1] === 0x4b;
+    const isHdf5 = m[0] === 0x89 && m[1] === 0x48 && m[2] === 0x44 && m[3] === 0x46;
+    if (!isZip && !isHdf5) return res.status(400).json({ ok: false, error: ".keras 형식이 아닙니다(zip/HDF5 매직 불일치)" });
+
+    const scalers = Buffer.from(String(b.scalers_b64 || ""), "base64");
+    if (scalers.length < 10 || scalers.length > 20 * 1048576) return res.status(400).json({ ok: false, error: "scalers.pkl 크기 이상" });
+
+    const thr = typeof b.thresholds === "string" ? JSON.parse(b.thresholds) : b.thresholds;
+    const cfg = typeof b.config === "string" ? JSON.parse(b.config) : b.config;
+    if (!thr || typeof thr !== "object" || !Object.keys(thr).length) return res.status(400).json({ ok: false, error: "device_thresholds 가 비었거나 형식 오류" });
+    if (!cfg || typeof cfg !== "object" || !cfg.time_steps || !Array.isArray(cfg.feature_columns)) return res.status(400).json({ ok: false, error: "model_config 형식 오류(time_steps/feature_columns 필요)" });
+
+    mkdirSync(vdir, { recursive: true });
+    writeFileSync(path.join(vdir, "common_lstm_autoencoder.keras"), keras);
+    writeFileSync(path.join(vdir, "group_scalers.pkl"), scalers);
+    writeFileSync(path.join(vdir, "device_thresholds.json"), JSON.stringify(thr, null, 2));
+    writeFileSync(path.join(vdir, "model_config.json"), JSON.stringify(cfg, null, 2));
+    const tv = Object.values(thr).map(Number).filter((x) => isFinite(x));
+    const meta = {
+      version: ver, label: String(b.label || "").slice(0, 60) || "(라벨 없음)", kind: "uploaded",
+      trained_at: String(b.trained_at || "").slice(0, 20) || null,
+      registered_at: new Date().toISOString().slice(0, 16).replace("T", " "),
+      device_count: Object.keys(thr).length,
+      mean_threshold: tv.length ? tv.reduce((a, c) => a + c, 0) / tv.length : null,
+      time_steps: cfg.time_steps, base_features: cfg.base_features || null,
+      feature_count: cfg.feature_columns.length, keras_bytes: keras.length,
+      note: String(b.note || "").slice(0, 200) || "웹 업로드 등록.", uploaded_by: req.auth?.lid || null,
+    };
+    writeFileSync(path.join(vdir, "meta.json"), JSON.stringify(meta, null, 2));
+    console.log(`▶ AI 모델 업로드: ${ver} (by ${req.auth?.lid})`);
+    res.json({ ok: true, version: ver, ...listRegistry() });
+  } catch (e) {
+    console.error("[ai/models/upload]", e);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+// DELETE (총괄 관리자) — 비활성 버전만 삭제.
+app.delete("/api/ai/models/:version", requireAdmin, (req, res) => {
+  const ver = String(req.params.version || "");
+  if (!/^[A-Za-z0-9._-]+$/.test(ver)) return res.status(400).json({ ok: false, error: "잘못된 버전명" });
+  if (ver === registryActive()) return res.status(400).json({ ok: false, error: "활성 모델은 삭제할 수 없습니다." });
+  const vdir = path.join(AI_REGISTRY_DIR, ver);
+  if (!existsSync(vdir)) return res.status(404).json({ ok: false, error: "버전 없음" });
+  try { rmSync(vdir, { recursive: true, force: true }); res.json({ ok: true, ...listRegistry() }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+// PATCH (admin) — 버전 전체 편집: 버전명 변경 + 아티팩트 교체(선택) + 메타(label/note/trained_at).
+//   제공된 항목만 반영. 활성 버전 아티팩트 변경 시 활성 작업경로 재동기화 + config 리로드.
+app.patch("/api/ai/models/:version", requireAdmin, (req, res) => {
+  const ver = String(req.params.version || "");
+  if (!/^[A-Za-z0-9._-]+$/.test(ver)) return res.status(400).json({ ok: false, error: "잘못된 버전명" });
+  let vdir = path.join(AI_REGISTRY_DIR, ver);
+  if (!existsSync(vdir)) return res.status(404).json({ ok: false, error: "버전 없음" });
+  try {
+    const b = req.body || {};
+    const wasActive = (ver === registryActive());
+    let artifactsChanged = false;
+
+    // 1) 아티팩트 교체 (제공된 것만, upload 와 동일 검증)
+    if (b.keras_b64) {
+      const keras = Buffer.from(String(b.keras_b64), "base64");
+      if (keras.length < 1000 || keras.length > 80 * 1048576) return res.status(400).json({ ok: false, error: ".keras 크기 이상" });
+      const m = keras.subarray(0, 4);
+      if (!((m[0] === 0x50 && m[1] === 0x4b) || (m[0] === 0x89 && m[1] === 0x48 && m[2] === 0x44 && m[3] === 0x46)))
+        return res.status(400).json({ ok: false, error: ".keras 형식이 아닙니다(zip/HDF5)" });
+      writeFileSync(path.join(vdir, "common_lstm_autoencoder.keras"), keras); artifactsChanged = true;
+    }
+    if (b.scalers_b64) {
+      const sc = Buffer.from(String(b.scalers_b64), "base64");
+      if (sc.length < 10 || sc.length > 20 * 1048576) return res.status(400).json({ ok: false, error: "scalers.pkl 크기 이상" });
+      writeFileSync(path.join(vdir, "group_scalers.pkl"), sc); artifactsChanged = true;
+    }
+    if (b.thresholds != null) {
+      const thr = typeof b.thresholds === "string" ? JSON.parse(b.thresholds) : b.thresholds;
+      if (!thr || typeof thr !== "object" || !Object.keys(thr).length) return res.status(400).json({ ok: false, error: "thresholds 형식 오류" });
+      writeFileSync(path.join(vdir, "device_thresholds.json"), JSON.stringify(thr, null, 2)); artifactsChanged = true;
+    }
+    if (b.config != null) {
+      const cfg = typeof b.config === "string" ? JSON.parse(b.config) : b.config;
+      if (!cfg || typeof cfg !== "object" || !cfg.time_steps || !Array.isArray(cfg.feature_columns)) return res.status(400).json({ ok: false, error: "config 형식 오류(time_steps/feature_columns)" });
+      writeFileSync(path.join(vdir, "model_config.json"), JSON.stringify(cfg, null, 2)); artifactsChanged = true;
+    }
+
+    // 2) 메타 갱신 (+ 아티팩트 바뀌었으면 파생 메타 재계산)
+    const meta = JSON.parse(readFileSync(path.join(vdir, "meta.json"), "utf8"));
+    if (b.label != null) meta.label = String(b.label).slice(0, 60);
+    if (b.note != null) meta.note = String(b.note).slice(0, 200);
+    if (b.trained_at != null) meta.trained_at = String(b.trained_at).slice(0, 20);
+    if (artifactsChanged) {
+      try {
+        const thr = JSON.parse(readFileSync(path.join(vdir, "device_thresholds.json"), "utf8"));
+        const cfg = JSON.parse(readFileSync(path.join(vdir, "model_config.json"), "utf8"));
+        const tv = Object.values(thr).map(Number).filter((x) => isFinite(x));
+        meta.device_count = Object.keys(thr).length;
+        meta.mean_threshold = tv.length ? tv.reduce((a, c) => a + c, 0) / tv.length : null;
+        meta.time_steps = cfg.time_steps;
+        meta.base_features = cfg.base_features || meta.base_features;
+        meta.feature_count = Array.isArray(cfg.feature_columns) ? cfg.feature_columns.length : meta.feature_count;
+        meta.keras_bytes = statSync(path.join(vdir, "common_lstm_autoencoder.keras")).size;
+      } catch { /* 메타 재계산 실패 무시 */ }
+    }
+    meta.edited_at = new Date().toISOString().slice(0, 16).replace("T", " ");
+    meta.edited_by = req.auth?.lid || null;
+
+    // 3) 버전명 변경 (선택) — 폴더 rename + ACTIVE 갱신
+    let finalVer = ver;
+    const nv = b.newVersion != null ? String(b.newVersion).trim() : "";
+    if (nv && nv !== ver) {
+      if (!/^[A-Za-z0-9._-]{3,40}$/.test(nv)) return res.status(400).json({ ok: false, error: "버전명: 영문/숫자/._- 3~40자" });
+      const ndir = path.join(AI_REGISTRY_DIR, nv);
+      if (existsSync(ndir)) return res.status(409).json({ ok: false, error: "이미 존재하는 버전명" });
+      meta.version = nv;
+      writeFileSync(path.join(vdir, "meta.json"), JSON.stringify(meta, null, 2));
+      renameSync(vdir, ndir);
+      vdir = ndir; finalVer = nv;
+      if (wasActive) writeFileSync(path.join(AI_REGISTRY_DIR, "ACTIVE.json"),
+        JSON.stringify({ active: nv, updated_at: new Date().toISOString(), by: req.auth?.lid || null }, null, 2));
+    } else {
+      writeFileSync(path.join(vdir, "meta.json"), JSON.stringify(meta, null, 2));
+    }
+
+    // 4) 활성 버전의 아티팩트가 바뀌었으면 활성 작업경로 재동기화 + 챗봇 config 리로드
+    if (wasActive && artifactsChanged) {
+      copyFileSync(path.join(vdir, "common_lstm_autoencoder.keras"), path.join(AI_MODELS_DIR, "common_lstm_autoencoder.keras"));
+      copyFileSync(path.join(vdir, "group_scalers.pkl"),             path.join(AI_MODELS_DIR, "group_scalers.pkl"));
+      copyFileSync(path.join(vdir, "device_thresholds.json"),        path.join(AI_CONFIG_DIR, "device_thresholds.json"));
+      copyFileSync(path.join(vdir, "model_config.json"),             path.join(AI_CONFIG_DIR, "model_config.json"));
+      reloadAiConfig();
+    }
+    console.log(`▶ AI 모델 수정: ${ver}${finalVer !== ver ? ` → ${finalVer}` : ""} (artifacts=${artifactsChanged}, by ${req.auth?.lid})`);
+    res.json({ ok: true, version: finalVer, ...listRegistry() });
+  } catch (e) { console.error("[ai/models PATCH]", e); res.status(400).json({ ok: false, error: e.message }); }
+});
+// POST 재백필 (총괄 관리자) — 활성 모델로 과거 예측(source='backfill') 8샤드 병렬 재생성 (~25분, 백그라운드).
+app.post("/api/ai/models/rebackfill", requireAdmin, (req, res) => {
+  if (rebackfill.running) return res.status(409).json({ ok: false, error: "이미 재생성이 진행 중입니다." });
+  const script = path.join(AI_ROOT_DIR, "scripts", "run-rebackfill.sh");
+  if (!existsSync(script)) return res.status(500).json({ ok: false, error: "재생성 스크립트가 없습니다." });
+  try {
+    const child = spawn("/bin/bash", [script], { cwd: path.join(AI_ROOT_DIR, "scripts"), detached: true, stdio: "ignore", env: process.env });
+    child.on("error", (e) => { console.error("[rebackfill]", e.message); rebackfill.running = false; });
+    child.on("exit", (code) => { rebackfill.running = false; rebackfill.exitCode = code; rebackfill.finishedAt = new Date().toISOString(); console.log(`▶ 재백필 종료 code=${code}`); });
+    child.unref();
+    rebackfill = { running: true, startedAt: new Date().toISOString(), by: req.auth?.lid || null, version: registryActive(), exitCode: null, finishedAt: null };
+    console.log(`▶ 재백필 시작 — 모델 ${rebackfill.version} (by ${rebackfill.by})`);
+    res.json({ ok: true, ...rebackfillStatus() });
+  } catch (e) { console.error("[rebackfill]", e); res.status(500).json({ ok: false, error: e.message }); }
+});
+// GET 재백필 상태 (관리자 읽기)
+app.get("/api/ai/models/rebackfill/status", requireAdminView, (req, res) => {
+  res.json({ ok: true, ...rebackfillStatus() });
+});
+
 // POST /api/auth/users (admin) {id, pw, name, role}
 app.post("/api/auth/users", dbRequired, requireAdmin, async (req, res) => {
   const { id, pw, name, role } = req.body || {};
@@ -743,6 +897,52 @@ app.post("/api/announcement", dbRequired, requireAdmin, async (req, res) => {
     );
     res.json({ ok: true });
   } catch (e) { console.error("[/api/announcement POST]", e.message); res.status(500).json({ ok: false, error: "공지 저장 오류" }); }
+});
+
+// ── 로그인 배경 영상 선택 — GET 공개(로그인 페이지 사용), 저장은 관리자 전용 ──
+//   값: "light"(빛퍼짐=wallpaper-boomerang) · "flower"(꽃=video-boomerang). 기본 light.
+//   DB 오류여도 GET 은 기본값으로 200 (로그인 페이지가 절대 안 깨지게).
+app.get("/api/login-bg", dbRequired, async (_req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT svalue FROM app_settings WHERE skey = 'login_bg' LIMIT 1");
+    const bg = rows[0]?.svalue === "flower" ? "flower" : "light";
+    res.json({ ok: true, bg });
+  } catch (e) { console.error("[/api/login-bg GET]", e.message); res.json({ ok: true, bg: "light" }); }
+});
+
+app.post("/api/login-bg", dbRequired, requireAdmin, async (req, res) => {
+  try {
+    const bg = req.body?.bg === "flower" ? "flower" : "light";
+    const by = String(req.auth?.name || req.auth?.lid || "관리자").slice(0, 60);
+    await pool.query(
+      `INSERT INTO app_settings (skey, svalue, updated_by) VALUES ('login_bg', ?, ?)
+       ON DUPLICATE KEY UPDATE svalue = VALUES(svalue), updated_by = VALUES(updated_by)`,
+      [bg, by]
+    );
+    res.json({ ok: true, bg });
+  } catch (e) { console.error("[/api/login-bg POST]", e.message); res.status(500).json({ ok: false, error: "배경 저장 오류" }); }
+});
+
+// ── 챗봇 모델 잠금(관리자) ────────────────────────────────────
+// 허용된 챗봇 모델 목록 조회(공개) — 프론트가 모델 피커를 이 목록으로 필터.
+app.get("/api/chat/models", dbRequired, async (_req, res) => {
+  res.json({ ok: true, enabled: [...ENABLED_MODELS], all: SELECTABLE_MODELS });
+});
+// 허용 모델 저장(관리자 전용). body { enabled: [...] }. 화이트리스트 교집합 + 최소 1개 강제.
+app.post("/api/admin/chat-models", dbRequired, requireAdmin, async (req, res) => {
+  try {
+    const raw = Array.isArray(req.body?.enabled) ? req.body.enabled : [];
+    const enabled = [...new Set(raw.filter((m) => SELECTABLE_MODELS.includes(m)))];
+    if (!enabled.length) return res.status(400).json({ ok: false, error: "최소 1개 모델은 허용해야 합니다." });
+    const by = String(req.auth?.name || req.auth?.lid || "관리자").slice(0, 60);
+    await pool.query(
+      `INSERT INTO app_settings (skey, svalue, updated_by) VALUES ('chat_models_enabled', ?, ?)
+       ON DUPLICATE KEY UPDATE svalue = VALUES(svalue), updated_by = VALUES(updated_by)`,
+      [JSON.stringify(enabled), by]
+    );
+    ENABLED_MODELS = new Set(enabled);   // 메모리 즉시 반영(재시작 없이 적용)
+    res.json({ ok: true, enabled });
+  } catch (e) { console.error("[/api/admin/chat-models POST]", e.message); res.status(500).json({ ok: false, error: "모델 잠금 저장 오류" }); }
 });
 
 // ── /api/health ──────────────────────────────────────
@@ -1204,9 +1404,7 @@ async function getTransmitterIdByName(deviceId) {
 // ── tool dispatchers ────────────────────────────────
 // execTool: wrapper — 캐시 hit / 실행 / 캐시 store / audit_log INSERT.
 //   캐시 가능한 도구만 캐시 (CACHEABLE_TOOLS).
-//   audit_log 는 모든 도구 (best-effort).
-//   demoMode: 가상 장비 포함 여부. cache key 에 포함되어 demo/real 응답 분리.
-// 보안: 자유 SQL/스키마 노출 도구 비활성화 — URL 아는 누구나 DB 전체 SELECT 가능하던 노출 차단.
+//   audit_log 는 모든 도구 (best-effort).// 보안: 자유 SQL/스키마 노출 도구 비활성화 — URL 아는 누구나 DB 전체 SELECT 가능하던 노출 차단.
 //   재활성화: 환경변수 ENABLE_SELF_EXPAND_SQL=1 (기본 OFF).
 const DISABLED_TOOLS = process.env.ENABLE_SELF_EXPAND_SQL === "1" ? [] : ["execute_safe_sql", "describe_table"];
 for (const _n of DISABLED_TOOLS) {
@@ -1214,11 +1412,11 @@ for (const _n of DISABLED_TOOLS) {
   if (_i >= 0) TOOLS.splice(_i, 1);
 }
 
-async function execTool(name, args, demoMode = false) {
+async function execTool(name, args) {
   args = args || {};
   if (DISABLED_TOOLS.includes(name)) return { error: "이 도구는 보안상 비활성화되어 있습니다." };
   const cacheable = CACHEABLE_TOOLS.has(name);
-  const key = cacheable ? `${name}:${demoMode ? "D" : "R"}:${JSON.stringify(args)}` : null;
+  const key = cacheable ? `${name}:${JSON.stringify(args)}` : null;
   if (cacheable) {
     const cached = toolCacheGet(key);
     if (cached) {
@@ -1227,7 +1425,7 @@ async function execTool(name, args, demoMode = false) {
     }
   }
   const t0 = Date.now();
-  const result = await execToolInternal(name, args, demoMode);
+  const result = await execToolInternal(name, args);
   const dt = Date.now() - t0;
   if (cacheable && !result?.error) toolCacheSet(key, result);
   logToolCall(name, args, !result?.error, dt, false);
@@ -1235,7 +1433,7 @@ async function execTool(name, args, demoMode = false) {
 }
 
 // execToolInternal: 실제 도구 실행. switch dispatcher.
-async function execToolInternal(name, args, demoMode = false) {
+async function execToolInternal(name, args) {
   if (!pool) return { error: "DB pool 비활성" };
   try {
     switch (name) {
@@ -1244,12 +1442,6 @@ async function execToolInternal(name, args, demoMode = false) {
       //         그래서 SQL 단에서 LIMIT 걸면 안 됨 → 전체 가져온 뒤 filter → slice.
       case "list_devices": {
         const limit = Math.min(Number(args.limit) || 20, 60);
-        // 데모 모드 단말 — 실제와 동일 shape 로 prepend (위험·warn·offline 우선 노출 위해)
-        const demoRows = demoMode ? getDemoDevices().map((d) => ({
-          deviceId: d.deviceId, facility: d.facility, location: d.location,
-          deviceStatus: 1, lastSeen: d.lastMeasured, recentAlarms: d.recentAlarms,
-          hoursSilent: d.hoursSilent, status: d.status, demo: true,
-        })) : [];
         let sql = `
           SELECT t.TRANSMITTER_ID AS txid, t.NAME AS deviceId, f.NUMBER AS facility, f.POSITION AS location,
                  t.DEVICE_STATUS AS deviceStatus,
@@ -1285,14 +1477,11 @@ async function execToolInternal(name, args, demoMode = false) {
           return { ...r, hoursSilent, recentAlarms, status,
                    aiRisk: ai ? ai.risk : null, aiRatio: aiRatioOf(ai) };
         });
-        // 데모 단말은 status 가 이미 fixed → annotated 와 합쳐서 필터
-        const combined = [...demoRows, ...annotated];
-        const filtered = combined.filter((r) => !args.status || args.status === "all" || r.status === args.status);
+        const filtered = annotated.filter((r) => !args.status || args.status === "all" || r.status === args.status);
         return {
-          totalScanned: combined.length,
+          totalScanned: annotated.length,
           count: Math.min(filtered.length, limit),
           devices: filtered.slice(0, limit),
-          demoMode,
         };
       }
 
@@ -1300,25 +1489,6 @@ async function execToolInternal(name, args, demoMode = false) {
       case "get_device_detail": {
         const deviceId = args.deviceId;
         if (!deviceId) return { error: "deviceId 필수" };
-        // 데모 단말 우선 룩업
-        if (demoMode && deviceId.startsWith("DEMO-")) {
-          const d = findDemoDevice(deviceId);
-          if (!d) return { error: `데모 단말 없음: ${deviceId}` };
-          return {
-            deviceId: d.deviceId, serial: `DEMO-SER-${Math.abs(d.txid)}`, installDate: null,
-            deviceStatus: 1, periodSec: 3600,
-            facility: d.facility, location: d.location, lat: d.lat, lng: d.lng,
-            zone: zoneFromFacility(d.facility),
-            sensors: d.sensors,
-            sensorJudgement: buildSensorJudgement(d.sensors, MODEL_CONFIG?.sacrificial_devices?.includes(d.deviceId) || false),
-            lastMeasured: d.lastMeasured,
-            hoursSilent: d.hoursSilent,
-            status: d.status,
-            mse: d.mse, threshold: d.threshold, riskLevel: d.riskLevel, aiReliability: d.aiReliability,
-            aiJudgement: classifyAiPrediction({ mse: d.mse, threshold: d.threshold }),
-            demo: true,
-          };
-        }
         const txid = await getTransmitterIdByName(deviceId);
         if (!txid) return { error: `단말 없음: ${deviceId}` };
         const [meta] = await pool.query(`
@@ -1394,18 +1564,6 @@ async function execToolInternal(name, args, demoMode = false) {
         const range    = args.range || "24h";
         const seq      = SENSOR_SEQ_KIND.indexOf(kind) + 1;
         if (seq < 1) return { error: `unknown kind: ${kind}` };
-        // 데모 단말 — seeded mock 시계열
-        if (demoMode && deviceId.startsWith("DEMO-")) {
-          const hours = range === "1h" ? 1 : range === "7d" ? 168 : range === "30d" ? 720 : 24;
-          const points = generateDemoHistory(deviceId, kind, hours);
-          const latest = points[points.length - 1]?.v;
-          return {
-            deviceId, kind, range, count: points.length, sampled: points.length, points,
-            latestValue: latest ?? null,
-            latestJudgement: sensorJudgementForKind(kind, latest, false),
-            demo: true,
-          };
-        }
         const txid = await getTransmitterIdByName(deviceId);
         if (!txid) return { error: `단말 없음: ${deviceId}` };
         const sensorId = await findSensorId(txid, seq);
@@ -1450,12 +1608,7 @@ async function execToolInternal(name, args, demoMode = false) {
           WHERE ${where.join(" AND ")}
           ORDER BY a.GEN_DATE DESC LIMIT ${limit}
         `, params);
-        // 데모 알람 prepend (최근순)
-        const demoAlarms = demoMode
-          ? getDemoAlarms().filter((a) => !args.gradeId || a.gradeId === Number(args.gradeId)).slice(0, limit)
-          : [];
-        const merged = [...demoAlarms, ...rows].slice(0, limit);
-        return { count: merged.length, alarms: merged, demoMode };
+        return { count: rows.length, alarms: rows };
       }
 
       // KPI 카운트
@@ -1489,17 +1642,6 @@ async function execToolInternal(name, args, demoMode = false) {
           else if (st === "warn") warn++;
           else normal++;
         }
-        if (demoMode) {
-          const d = getDemoDevices();
-          const dC = d.filter((x) => x.status === "critical").length;
-          const dW = d.filter((x) => x.status === "warn").length;
-          const dO = d.filter((x) => x.status === "offline").length;
-          return {
-            total: all + d.length,
-            normal, critical: critical + dC, warn: warn + dW, offline: offline + dO,
-            demoMode: true,
-          };
-        }
         return { total: all, normal, critical, warn, offline };
       }
 
@@ -1522,17 +1664,6 @@ async function execToolInternal(name, args, demoMode = false) {
           ) = ?
         `, [SITE_ID, seq]);
         const v = rows[0].result;
-        // 데모: DEMO_DEVICES sensors[metric] 합쳐서 재계산
-        if (demoMode) {
-          const demoVals = getDemoDevices().map((d) => d.sensors[metric]).filter((x) => x != null && isFinite(x));
-          if (demoVals.length > 0) {
-            const allVals = v != null ? [Number(v)].concat(demoVals) : demoVals;
-            // op 별 재계산 (실 v 는 이미 op 적용된 값이지만, DEMO 합쳐서 단순 op)
-            const merged = { avg: allVals.reduce((a, b) => a + b, 0) / allVals.length,
-                             max: Math.max(...allVals), min: Math.min(...allVals) }[op];
-            return { metric, op, result: Number(merged.toFixed(2)), demoMode: true };
-          }
-        }
         return { metric, op, result: v != null ? Number(v.toFixed(2)) : null };
       }
 
@@ -1563,23 +1694,15 @@ async function execToolInternal(name, args, demoMode = false) {
           ORDER BY r.VALUE ${orderAsc}
           LIMIT ?
         `, [SITE_ID, seq, threshold, limit]);
-        // 데모 단말도 조건 매칭
-        const cmp = { gte: (a,b)=>a>=b, lte: (a,b)=>a<=b, eq: (a,b)=>a===b, gt: (a,b)=>a>b, lt: (a,b)=>a<b }[op] || ((a,b)=>a>=b);
-        const demoMatches = demoMode
-          ? getDemoDevices()
-              .filter((d) => d.sensors[metric] != null && cmp(d.sensors[metric], threshold))
-              .map((d) => ({ deviceId: d.deviceId, facility: d.facility, zone: zoneFromFacility(d.facility),
-                location: d.location, value: Number(Number(d.sensors[metric]).toFixed(2)), measuredAt: d.lastMeasured, demo: true }))
-          : [];
         const realMatches = rows.map((r) => ({
           deviceId: r.deviceId, facility: r.facility, zone: zoneFromFacility(r.facility),
           location: r.location, value: r.value != null ? Number(Number(r.value).toFixed(2)) : null,
           measuredAt: r.measuredAt,
         }));
-        const all = [...demoMatches, ...realMatches]
+        const all = realMatches
           .sort((a, b) => (op === "lte" || op === "lt") ? a.value - b.value : b.value - a.value)
           .slice(0, limit);
-        return { metric, op, threshold, count: all.length, devices: all, demoMode };
+        return { metric, op, threshold, count: all.length, devices: all };
       }
 
       // 구역 요약
@@ -1631,36 +1754,15 @@ async function execToolInternal(name, args, demoMode = false) {
             AND (SELECT COUNT(*) FROM kscg_sensor_info si2 WHERE si2.TRANSMITTER_ID = si.TRANSMITTER_ID AND si2.SENSOR_ID <= si.SENSOR_ID) = 8
         `, [txids]);
 
-        // 데모 단말 — facility prefix 의 첫 숫자가 zoneNum 와 일치하면 추가
-        let dNormal = 0, dWarn = 0, dCrit = 0, dOff = 0, dVolts = [], dRssi = [];
-        if (demoMode) {
-          for (const d of getDemoDevices()) {
-            const m2 = String(d.facility).match(/^(\d+)/);
-            if (!m2 || m2[1] !== zoneNum) continue;
-            if (d.status === "offline") dOff++;
-            else if (d.status === "critical") dCrit++;
-            else if (d.status === "warn") dWarn++;
-            else dNormal++;
-            if (d.sensors.volt    != null) dVolts.push(d.sensors.volt);
-            if (d.sensors.commDbm != null) dRssi.push(d.sensors.commDbm);
-          }
-        }
         const realVolt = volt.avg != null ? Number(volt.avg) : null;
         const realRssi = rssi.avg != null ? Number(rssi.avg) : null;
-        const avgVolt = dVolts.length || realVolt != null
-          ? Number(((realVolt != null ? realVolt * rows.length : 0) + dVolts.reduce((a,b)=>a+b,0)) / (rows.length + dVolts.length || 1)).toFixed(2)
-          : null;
-        const avgRssi = dRssi.length || realRssi != null
-          ? Number(((realRssi != null ? realRssi * rows.length : 0) + dRssi.reduce((a,b)=>a+b,0)) / (rows.length + dRssi.length || 1)).toFixed(2)
-          : null;
         return {
           zone: `제${zoneNum}구역`,
-          count: rows.length + dNormal + dWarn + dCrit + dOff,
-          normal: normal + dNormal, warn: warn + dWarn, critical: critical + dCrit, offline: offline + dOff,
-          avgVolt: avgVolt != null ? Number(avgVolt) : null,
-          avgRssi: avgRssi != null ? Number(avgRssi) : null,
+          count: rows.length,
+          normal, warn, critical, offline,
+          avgVolt: realVolt != null ? Number(realVolt.toFixed(2)) : null,
+          avgRssi: realRssi != null ? Number(realRssi.toFixed(2)) : null,
           devices: rows.slice(0, 10).map((r) => r.deviceId),    // 미리보기 10대만
-          demoMode,
         };
       }
 
@@ -1670,11 +1772,6 @@ async function execToolInternal(name, args, demoMode = false) {
         if (ids.length === 0) return { error: "deviceIds (배열) 필수" };
         const results = [];
         for (const id of ids) {
-          // 데모 단말 우선 룩업
-          if (demoMode && id.startsWith("DEMO-")) {
-            const d = findDemoDevice(id);
-            if (d) { results.push({ deviceId: id, sensors: d.sensors, lastMeasured: d.lastMeasured, demo: true }); continue; }
-          }
           const txid = await getTransmitterIdByName(id);
           if (!txid) { results.push({ deviceId: id, error: "단말 없음" }); continue; }
           const [sensors] = await pool.query(`
@@ -1694,7 +1791,7 @@ async function execToolInternal(name, args, demoMode = false) {
           }
           results.push({ deviceId: id, sensors: sensorVals, lastMeasured });
         }
-        return { count: results.length, devices: results, demoMode };
+        return { count: results.length, devices: results };
       }
 
       // 최근 N시간 변화 통계
@@ -1704,27 +1801,6 @@ async function execToolInternal(name, args, demoMode = false) {
         const hours = Math.min(Math.max(Number(args.hours) || 24, 1), 720);
         const seq = SENSOR_SEQ_KIND.indexOf(kind) + 1;
         if (seq < 1) return { error: `unknown kind: ${kind}` };
-        // 데모 단말 — seeded mock 시계열 통계
-        if (demoMode && deviceId.startsWith("DEMO-")) {
-          const points = generateDemoHistory(deviceId, kind, hours);
-          const vals = points.map((p) => p.v);
-          const first = vals[0], last = vals[vals.length - 1];
-          const mn = Math.min(...vals), mx = Math.max(...vals);
-          const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-          const std = Math.sqrt(vals.reduce((s, v) => s + (v - mean) ** 2, 0) / vals.length);
-          const delta = last - first, pct = first !== 0 ? (delta / Math.abs(first)) * 100 : 0;
-          return {
-            deviceId, kind, hours, count: vals.length,
-            start: Number(first.toFixed(2)), end: Number(last.toFixed(2)),
-            delta: Number(delta.toFixed(2)), percentChange: Number(pct.toFixed(1)),
-            min: Number(mn.toFixed(2)), max: Number(mx.toFixed(2)),
-            mean: Number(mean.toFixed(2)), std: Number(std.toFixed(2)),
-            direction: delta > 0.01 ? "상승" : delta < -0.01 ? "하락" : "평탄",
-            startJudgement: sensorJudgementForKind(kind, first, false),
-            endJudgement: sensorJudgementForKind(kind, last, false),
-            demo: true,
-          };
-        }
         const txid = await getTransmitterIdByName(deviceId);
         if (!txid) return { error: `단말 없음: ${deviceId}` };
         const sensorId = await findSensorId(txid, seq);
@@ -1820,7 +1896,7 @@ async function execToolInternal(name, args, demoMode = false) {
               threshold: th,
               threshold70: Number((th * 0.7).toFixed(6)),
               threshold100: Number(th.toFixed(6)),
-              message: `LSTM 실시간 예측 MSE 는 아직 INSERT 안 됨. 그러나 학습 시점 threshold 는 알려진 값: ${th.toExponential(3)} (정상 한계). 실측 MSE 가 ${(th*0.7).toExponential(2)} 미만이면 정상, ${(th*0.7).toExponential(2)}~${th.toExponential(2)} 이면 관찰, 초과면 이상.`,
+              message: `LSTM 실시간 예측 MSE 는 아직 INSERT 안 됨. 그러나 학습 시점 threshold 는 알려진 값: ${th.toExponential(3)} (정상 한계). 실측 MSE 가 ${(th*0.7).toExponential(2)} 미만이면 정상, ${(th*0.7).toExponential(2)}~${th.toExponential(2)} 이면 관찰, ${th.toExponential(2)} 이상이면 '이상'.`,
             };
           }
           return {
@@ -1830,27 +1906,30 @@ async function execToolInternal(name, args, demoMode = false) {
             thresholdsAvailable: Object.keys(DEVICE_THRESHOLDS).length,
           };
         }
-        // 실데이터 있을 때 — classifyMse 자동 적용해서 level 추가
-        const enriched = rows.map((r) => ({
-          ...r,
-          classification: r.mse != null && r.deviceId ? classifyMse(r.deviceId, r.mse) : null,
-          aiJudgement: classifyAiPrediction(r),
-        }));
-        // 데모 단말 예측 합치기
-        if (demoMode) {
-          const demoPreds = getDemoDevices()
-            .filter((d) => !args.deviceId || d.deviceId === args.deviceId)
-            .map((d) => ({
-              txid: d.txid, deviceId: d.deviceId, predictedAt: d.lastMeasured,
-              mse: d.mse, threshold: d.threshold,
-              riskLevel: d.riskLevel, commStatus: d.status === "offline" ? "통신고장" : "정상통신",
-              aiReliability: d.aiReliability, isSacrificial: 0,
-              classification: { level: d.riskLevel, ratio: d.mse != null ? Number((d.mse / d.threshold).toFixed(3)) : null },
-              aiJudgement: classifyAiPrediction({ mse: d.mse, threshold: d.threshold }),
-              demo: true,
-            }));
-          return { count: enriched.length + demoPreds.length, predictions: [...demoPreds, ...enriched], demoMode };
+        // 통신 두절(24h+ 무측정) 단말 식별 — 그 단말의 예측은 끊기기 전 값이라 stale 표시 (대시보드 mapStatus offline 과 일관)
+        const _txids = [...new Set(rows.map((r) => r.txid).filter(Boolean))];
+        const _silent = new Map();
+        if (_txids.length) {
+          const [_sr] = await pool.query(
+            `SELECT si.TRANSMITTER_ID AS txid, TIMESTAMPDIFF(HOUR, MAX(r.DATE), NOW()) AS hoursSilent
+             FROM kscg_sensor_info si LEFT JOIN kscg_recent_data r ON r.SENSOR_ID = si.SENSOR_ID
+             WHERE si.TRANSMITTER_ID IN (?) GROUP BY si.TRANSMITTER_ID`, [_txids]);
+          for (const x of _sr) _silent.set(x.txid, x.hoursSilent == null ? null : Number(x.hoursSilent));
         }
+        // 실데이터 있을 때 — classifyMse 자동 적용해서 level 추가 + 통신두절이면 stale 표식
+        const enriched = rows.map((r) => {
+          const hoursSilent = _silent.has(r.txid) ? _silent.get(r.txid) : null;
+          const offline = hoursSilent != null && hoursSilent >= 24;
+          return {
+            ...r,
+            hoursSilent,
+            stale: offline,                            // 24h+ 무측정 → 아래 예측은 끊기기 전 값(신뢰 불가)
+            status: offline ? "offline" : undefined,   // 통신두절이면 상태는 offline (mapStatus 와 일관, risk_level 보다 우선)
+            classification: r.mse != null && r.deviceId ? classifyMse(r.deviceId, r.mse) : null,
+            aiJudgement: classifyAiPrediction(r),
+            ...(offline ? { staleNote: `${fmtHours(hoursSilent)} 무측정(통신장애) — 이 예측은 끊기기 전 값이라 현재 상태로 신뢰 불가. 상태는 '통신 장애'로 답하세요.` } : {}),
+          };
+        });
         return { count: enriched.length, predictions: enriched };
       }
 
@@ -1880,18 +1959,8 @@ async function execToolInternal(name, args, demoMode = false) {
           deviceId: r.deviceId, facility: r.facility, zone: zoneFromFacility(r.facility),
           location: r.location, lat: r.lat, lng: r.lng, lastSeen: r.lastSeen,
         }));
-        // 데모: location/facility/deviceId LIKE 매칭
-        const demoMatches = demoMode
-          ? getDemoDevices()
-              .filter((d) => tokens.every((tk) =>
-                String(d.location).includes(tk) || String(d.facility).includes(tk) || d.deviceId.includes(tk)))
-              .map((d) => ({
-                deviceId: d.deviceId, facility: d.facility, zone: zoneFromFacility(d.facility),
-                location: d.location, lat: d.lat, lng: d.lng, lastSeen: d.lastMeasured, demo: true,
-              }))
-          : [];
-        const out = [...demoMatches, ...realDevs].slice(0, limit);
-        return { query, count: out.length, devices: out, demoMode };
+        const out = realDevs.slice(0, limit);
+        return { query, count: out.length, devices: out };
       }
 
       // 지명 → 좌표 (Nominatim, free OpenStreetMap)
@@ -2059,7 +2128,7 @@ async function execToolInternal(name, args, demoMode = false) {
             threshold70: Number((th * 0.7).toFixed(6)),
             threshold100: Number(th.toFixed(6)),
             isSacrificial,
-            note: `정상=MSE<${(th*0.7).toExponential(2)}, 관찰=${(th*0.7).toExponential(2)}~${th.toExponential(2)}, 이상=>${th.toExponential(2)}. MSE 는 LSTM AE 복원 오차.`,
+            note: `정상=MSE<${(th*0.7).toExponential(2)}, 관찰=${(th*0.7).toExponential(2)}~${th.toExponential(2)}, 이상≥${th.toExponential(2)}. MSE 는 LSTM AE 복원 오차.`,
             modelConfig: MODEL_CONFIG ? {
               timeSteps: MODEL_CONFIG.time_steps,
               baseFeatures: MODEL_CONFIG.base_features,
@@ -2084,8 +2153,8 @@ async function execToolInternal(name, args, demoMode = false) {
           evalMetrics: EVAL_METRICS,
           classification: {
             정상: "MSE < threshold × 0.70",
-            관찰: "threshold × 0.70 ≤ MSE ≤ threshold × 1.00",
-            이상: "MSE > threshold × 1.00",
+            관찰: "threshold × 0.70 ≤ MSE < threshold × 1.00",
+            이상: "MSE ≥ threshold × 1.00",
           },
           training: {
             time_steps: MODEL_CONFIG?.time_steps,
@@ -2117,19 +2186,11 @@ async function execToolInternal(name, args, demoMode = false) {
           location: r.location, lat: r.lat, lng: r.lng, lastSeen: r.lastSeen,
           distanceKm: Number(haversineKm(lat, lng, r.lat, r.lng).toFixed(3)),
         }));
-        const demoDist = demoMode
-          ? getDemoDevices().map((d) => ({
-              deviceId: d.deviceId, facility: d.facility, zone: zoneFromFacility(d.facility),
-              location: d.location, lat: d.lat, lng: d.lng, lastSeen: d.lastMeasured,
-              distanceKm: Number(haversineKm(lat, lng, d.lat, d.lng).toFixed(3)),
-              demo: true,
-            }))
-          : [];
-        const withDist = [...realDist, ...demoDist]
+        const withDist = realDist
           .filter((r) => r.distanceKm <= radiusKm)
           .sort((a, b) => a.distanceKm - b.distanceKm)
           .slice(0, limit);
-        return { center: { lat, lng }, radiusKm, count: withDist.length, devices: withDist, demoMode };
+        return { center: { lat, lng }, radiusKm, count: withDist.length, devices: withDist };
       }
 
       // ─── 자가확장 챗봇 (Self-Extending Chatbot) ───
@@ -2245,7 +2306,7 @@ async function execToolInternal(name, args, demoMode = false) {
 //   - toolTrace 로 어떤 도구가 호출됐는지 추적 (디버깅용)
 // OpenAI(GPT) 라운드 루프 — 비스트리밍. 도구호출 시 send('tool') + 결과 append 후 다음 라운드.
 //   tool 메시지는 OpenAI 형식(tool_call_id) 사용. TOOLS/execTool/시스템프롬프트는 Ollama 와 공유.
-async function runOpenAIRounds({ send, working, model, demoMode, signal, maxRounds, toolTrace, webSearch = false }) {
+async function runOpenAIRounds({ send, working, model, signal, maxRounds, toolTrace, webSearch = false }) {
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY 미설정 (secrets/local/openai.env)");
   let usage = {};
   for (let round = 0; round < maxRounds; round++) {
@@ -2273,7 +2334,7 @@ async function runOpenAIRounds({ send, working, model, demoMode, signal, maxRoun
       let args = {};
       try { args = JSON.parse((tc.function && tc.function.arguments) || "{}"); } catch { args = {}; }
       send("tool", { round: round + 1, name, args });
-      const result = await execTool(name, args, demoMode);
+      const result = await execTool(name, args);
       toolTrace.push({ round: round + 1, name, args, ok: !(result && result.error) });
       working.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
     }
@@ -2282,7 +2343,44 @@ async function runOpenAIRounds({ send, working, model, demoMode, signal, maxRoun
            tokens: { prompt: usage.prompt_tokens || 0, completion: usage.completion_tokens || 0 } };
 }
 
-async function runChatWithTools(messages, signal, demoMode = false, model = OLLAMA_MODEL, webSearch = false) {
+// ── 웹검색 강제(토글 ON) — 백엔드 선검색 + 영어 핵심어 쿼리 ───────────────
+// DuckDuckGo Instant Answer 는 영어 개념어/엔티티에 강함 → 사용자 질문을 영어 검색어로 변환 후
+// 서버가 직접 1회 검색해 결과를 컨텍스트로 주입한다(모델이 검색을 건너뛰지 못하게 '강제').
+async function deriveSearchQuery(message, signal) {
+  const raw = String(message || "").trim();
+  try {
+    const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,   // 항상 로컬 9b — 빠르고 무료(선택 모델이 GPT여도 변환은 로컬)
+        messages: [
+          { role: "system", content: "Extract the SINGLE core concept of the user's question as a short English encyclopedia-style term (1-3 words). Output ONLY that term — no quotes, no punctuation, no explanation, no extra words. It must read like a Wikipedia article title (e.g. 'cathodic protection', 'corrosion', 'LSTM autoencoder'), NOT a long descriptive phrase.\nDomain glossary (map Korean→English): 방식전위/방식=cathodic protection, AC유입=stray current corrosion, 희생전류/희생양극=sacrificial anode, 매설배관/매설 가스배관=pipeline transport, 부식=corrosion, 이상탐지=anomaly detection, 오토인코더=autoencoder, 정류기=rectifier, 도복장=coating." },
+          { role: "user", content: raw.slice(0, 500) },
+        ],
+        stream: false, think: false,
+        options: { temperature: 0, num_predict: 32 },
+      }),
+      signal,
+    });
+    if (res.ok) {
+      const d = await res.json();
+      const q = String(d.message?.content || "").trim().split("\n")[0].replace(/^["'`]+|["'`]+$/g, "").trim();
+      if (q && q.length <= 120) return q;
+    }
+  } catch { /* 변환 실패 시 원문으로 폴백 */ }
+  return raw.slice(0, 120);
+}
+async function forcedWebSearch(message, signal) {
+  const query = await deriveSearchQuery(message, signal);
+  const result = await execTool("web_search", { query });
+  return { query, result };
+}
+function webSearchBlock(query, result) {
+  return `[웹검색 결과 — 사용자가 '검색'을 켰습니다. 아래는 검색어 "${query}"(영어 변환)로 조회한 DuckDuckGo 결과(JSON)입니다. 이 정보를 우선 활용해 답하고, url 이 있으면 출처로 언급하세요. 결과가 비었으면 가진 지식으로 답하되 '웹에서 추가 정보를 찾지 못했다'고 밝히세요. 추가 검색이 꼭 필요할 때만 영어 핵심어로 web_search 를 호출하세요.]\n${JSON.stringify(result)}`;
+}
+
+async function runChatWithTools(messages, signal, model = OLLAMA_MODEL, webSearch = false) {
   const MAX_ROUNDS = 5;
   const working = [...messages];
   const toolTrace = [];
@@ -2317,8 +2415,8 @@ async function runChatWithTools(messages, signal, demoMode = false, model = OLLA
     for (const tc of toolCalls) {
       const name = tc.function?.name;
       const args = tc.function?.arguments || {};
-      console.log(`[tool${demoMode ? " DEMO" : ""}] round ${round + 1} → ${name}(${JSON.stringify(args)})`);
-      const result = await execTool(name, args, demoMode);
+      console.log(`[tool] round ${round + 1} → ${name}(${JSON.stringify(args)})`);
+      const result = await execTool(name, args);
       const ok = !result?.error;
       toolTrace.push({ round: round + 1, name, args, ok });
       working.push({
@@ -2366,17 +2464,24 @@ app.post("/api/chat", async (req, res) => {
   const ownerUid = chatOwner(req);
   const clientId = req.body?.clientId || null;
   const sid = await ensureChatSession(sessionId, message, ownerUid);
-  const demoMode = isDemoMode(req);
-
   try {
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), 120_000); // 120s (최대 5 tool 라운드 여유)
-    const result = await runChatWithTools(messages, ctrl.signal, demoMode, useModel, webSearch);
+    // 검색 토글 ON → 답변 전에 서버가 강제로 1회 웹검색(영어 변환) 후 결과 주입
+    if (webSearch) {
+      try {
+        const ws = await forcedWebSearch(message, ctrl.signal);
+        messages.push({ role: "system", content: webSearchBlock(ws.query, ws.result) });
+        console.log(`[forced web_search] /api/chat q="${ws.query}" → ${ws.result?.count ?? (ws.result?.error ? "err" : "0")}`);
+      } catch (e) { console.warn("[forced web_search] 실패:", e.message); }
+    }
+    const result = await runChatWithTools(messages, ctrl.signal, useModel, webSearch);
     clearTimeout(timeout);
 
-    const reply = (result.content || "(빈 응답)").trim();
+    const { reply: parsedReply, nextActions, nextTitle } = splitNextActions(result.content || "");
+    const reply = parsedReply || "(빈 응답)";
 
-    // chat_messages 영구화 (background, best-effort)
+    // chat_messages 영구화 (background, best-effort) — 본문만(마커 제거본)
     if (sid) {
       persistMessage(sid, "user", message, context, null, null, reqIp(req))
         .then(() => persistMessage(sid, "ai", reply, { rounds: result.rounds, toolCalls: result.toolTrace }, result.tokens, useModel, reqIp(req)));
@@ -2386,6 +2491,8 @@ app.post("/api/chat", async (req, res) => {
       ok:        true,
       sessionId: sid,
       reply,
+      nextActions,
+      nextTitle,
       model:     useModel,
       rounds:    result.rounds,
       toolCalls: result.toolTrace || [],
@@ -2451,8 +2558,6 @@ app.post("/api/chat/stream", async (req, res) => {
   if (sid) send("session", { sessionId: sid });
   // 다른 화면에 사용자 메시지 즉시 반영 (발신 화면 제외)
   if (sid && ownerUid != null) broadcastToOwner(ownerUid, { type: "chat:user", sessionId: sid, text: message, ts: Date.now() }, clientId);
-  const demoMode = isDemoMode(req);
-
   const MAX_ROUNDS = 5;
   const toolTrace = [];
   let finalAccum = "";
@@ -2475,16 +2580,28 @@ app.post("/api/chat/stream", async (req, res) => {
     console.log("[chat/stream] client disconnected → 생성 계속(중단 안 함), 완료 후 저장");
   });
 
+  // 검색 토글 ON → 답변 전에 서버가 강제로 1회 웹검색(영어 변환) 후 결과 주입. 양쪽 프로바이더 공통.
+  if (webSearch) {
+    try {
+      const ws = await forcedWebSearch(message, ctrl.signal);
+      working.push({ role: "system", content: webSearchBlock(ws.query, ws.result) });
+      toolTrace.push({ round: 0, name: "web_search", args: { query: ws.query }, ok: !ws.result?.error });
+      send("tool", { round: 0, name: "web_search", args: { query: ws.query } });   // UI '검색 중…' 표시
+      console.log(`[forced web_search] /stream q="${ws.query}" → ${ws.result?.count ?? (ws.result?.error ? "err" : "0")}`);
+    } catch (e) { console.warn("[forced web_search] 실패:", e.message); }
+  }
+
   // ── OpenAI(GPT) 분기 — 비스트리밍 라운드 루프(도구호출 + 최종 done). 외부 전송. ──
   if (isOpenAI(useModel)) {
     try {
-      const r = await runOpenAIRounds({ send, working, model: useModel, demoMode, signal: ctrl.signal, maxRounds: MAX_ROUNDS, toolTrace, webSearch });
-      send("done", { reply: r.reply, sessionId: sid, model: useModel, rounds: r.rounds, toolCalls: toolTrace, tokens: r.tokens });
+      const r = await runOpenAIRounds({ send, working, model: useModel, signal: ctrl.signal, maxRounds: MAX_ROUNDS, toolTrace, webSearch });
+      const { reply: gReply, nextActions, nextTitle } = splitNextActions(r.reply);
+      send("done", { reply: gReply, nextActions, nextTitle, sessionId: sid, model: useModel, rounds: r.rounds, toolCalls: toolTrace, tokens: r.tokens });
       if (sid) {
         persistMessage(sid, "user", message, context, null, null, reqIp(req))
-          .then(() => persistMessage(sid, "ai", r.reply, { rounds: r.rounds, toolCalls: toolTrace }, r.tokens, useModel, reqIp(req)));
+          .then(() => persistMessage(sid, "ai", gReply, { rounds: r.rounds, toolCalls: toolTrace }, r.tokens, useModel, reqIp(req)));
       }
-      if (sid && ownerUid != null) broadcastToOwner(ownerUid, { type: "chat:ai", sessionId: sid, text: r.reply, model: useModel, ts: Date.now() }, clientId);
+      if (sid && ownerUid != null) broadcastToOwner(ownerUid, { type: "chat:ai", sessionId: sid, text: gReply, model: useModel, ts: Date.now() }, clientId);
     } catch (err) {
       console.error("[chat/stream openai]", err.message);
       send("error", { message: err.message });
@@ -2522,6 +2639,8 @@ app.post("/api/chat/stream", async (req, res) => {
       let roundContent = "";
       let toolCalls = [];
       let roundDone = false;
+      let cutoff = false;   // ⟦NEXT⟧ 마커 만나면 이후 delta forward 중단 (본문만 화면에)
+      let sentLen = 0;      // 화면에 흘려보낸 roundContent 길이 (부분 마커 홀드백용)
 
       while (!roundDone) {
         const { value, done } = await reader.read();
@@ -2543,7 +2662,22 @@ app.post("/api/chat/stream", async (req, res) => {
           const piece = msg.content;
           if (piece) {
             roundContent += piece;
-            send("delta", { text: piece });
+            if (!cutoff) {
+              const mi = roundContent.indexOf(NEXT_MARK);
+              if (mi >= 0) {
+                // 마커 발견 → 마커 직전까지(아직 안 보낸 부분)만 흘리고 이후 차단 (done 에서 칩 분리)
+                if (mi > sentLen) send("delta", { text: roundContent.slice(sentLen, mi) });
+                sentLen = mi; cutoff = true;
+              } else {
+                // 끝부분이 ⟦NEXT⟧ 의 부분(분할 토큰)이면 그만큼 홀드백 — 마커가 화면에 깜빡이지 않게
+                let hold = 0;
+                for (let p = Math.min(NEXT_MARK.length - 1, roundContent.length); p > 0; p--) {
+                  if (roundContent.endsWith(NEXT_MARK.slice(0, p))) { hold = p; break; }
+                }
+                const upto = roundContent.length - hold;
+                if (upto > sentLen) { send("delta", { text: roundContent.slice(sentLen, upto) }); sentLen = upto; }
+              }
+            }
           }
           if (obj.done) {
             roundDone = true;
@@ -2558,9 +2692,11 @@ app.post("/api/chat/stream", async (req, res) => {
       // tool_calls 가 없으면 최종 답변
       if (toolCalls.length === 0) {
         finalAccum += roundContent;
-        const finalReply = finalAccum.trim();
+        const { reply: finalReply, nextActions, nextTitle } = splitNextActions(finalAccum);
         send("done", {
           reply:     finalReply,
+          nextActions,
+          nextTitle,
           sessionId: sid,
           model:     useModel,
           rounds:    round + 1,
@@ -2582,9 +2718,9 @@ app.post("/api/chat/stream", async (req, res) => {
       for (const tc of toolCalls) {
         const name = tc.function?.name;
         const args = tc.function?.arguments || {};
-        console.log(`[stream tool${demoMode ? " DEMO" : ""}] round ${round + 1} → ${name}(${JSON.stringify(args)})`);
+        console.log(`[stream tool] round ${round + 1} → ${name}(${JSON.stringify(args)})`);
         send("tool", { round: round + 1, name, args });
-        const result = await execTool(name, args, demoMode);
+        const result = await execTool(name, args);
         const ok = !result?.error;
         toolTrace.push({ round: round + 1, name, args, ok });
         working.push({
@@ -2805,7 +2941,7 @@ function classifyAiPrediction(ai) {
   const ratioText = ratio >= 10 ? `x${Math.round(ratio)}` : `x${Number(ratio.toFixed(2))}`;
   const percentText = `${Number((ratio * 100).toFixed(1))}%`;
   let level = "정상";
-  if (ratio > 1) level = "이상";
+  if (ratio >= 1) level = "이상";
   else if (ratio >= 0.7) level = "관찰";
   return {
     level,
@@ -2823,13 +2959,13 @@ function classifyAiPrediction(ai) {
 
 // 단말 status 판정 — 이두현 LSTM 모델 출력(risk_level + comm_status) 그대로 매핑 (캡스톤: AI 작성자 기준 충실).
 //   - offline(통신장애) : comm_status '통신고장' (이두현 연속3회 단절 = AI 신뢰불가). + AI 데이터 자체 없음(24h) fallback
-//   - critical(화면 '이상') : risk_level '이상' (MSE ≥ threshold, 100% 초과)
+//   - critical(화면 '이상') : risk_level '이상' (MSE ≥ threshold, 100% 이상)
 //   - warn(화면 '관찰')     : risk_level '관찰' (threshold 70~100%)
 //   - normal           : risk_level '정상' (<70%)
 //   ※ KSCG 알람·우리 500% 휴리스틱은 status 에 미반영 (알람은 별도 알림/로그로만).
 function mapStatus(_deviceStatus, hoursSilent, activeAlarmCount, ai) {
   if (ai && ai.commStatus === "통신고장") return "offline";               // 이두현 통신 판정
-  if (!ai && hoursSilent != null && hoursSilent >= 24) return "offline";  // AI 판정할 데이터 없음
+  if (hoursSilent != null && hoursSilent >= 24) return "offline";         // 24h+ 무측정 = 통신장애. 낡은 AI 예측(이상/관찰)이 남아있어도 데이터가 끊겼으면 신뢰 불가 → offline 우선 (이전 `!ai` 게이트는 stale 예측 보유 단말을 놓쳐 카드가 0 표기되는 버그)
   if (ai && ai.risk === "이상") return "critical";                        // 모델 '이상' → 화면 '이상'
   if (ai && ai.risk === "관찰") return "warn";                            // 모델 '관찰' → 화면 '관찰'
   return "normal";
@@ -2848,7 +2984,6 @@ function fmtHours(h) {
 // ── GET /api/summary — KPI 카운트 ─────────────────────
 app.get("/api/summary", dbRequired, async (req, res) => {
   try {
-    const demoMode = isDemoMode(req);
     // 단말별 (통신두절시간 · 7일 알람수 · 최신 AI) → mapStatus 로 /api/devices 와 동일 집계
     // (이전엔 offline/critical 을 독립 SQL 로 세어 중복카운트 + warn=0 버그가 있었음)
     const [silentRows] = await pool.query(`
@@ -2881,23 +3016,6 @@ app.get("/api/summary", dbRequired, async (req, res) => {
       else normal++;
     }
 
-    // 데모 모드: 가상 장비 카운트 추가
-    let allCount = total;
-    if (demoMode) {
-      const demo = getDemoDevices();
-      const dCrit = demo.filter((d) => d.status === "critical").length;
-      const dWarn = demo.filter((d) => d.status === "warn").length;
-      const dOff  = demo.filter((d) => d.status === "offline").length;
-      allCount += demo.length;
-      return res.json({
-        ok: true, demoMode: true,
-        site_id: SITE_ID,
-        counts: {
-          all: allCount, normal, critical: critical + dCrit, warn: warn + dWarn, offline: offline + dOff,
-        },
-      });
-    }
-
     res.json({
       ok: true,
       site_id: SITE_ID,
@@ -2912,7 +3030,6 @@ app.get("/api/summary", dbRequired, async (req, res) => {
 // ── GET /api/devices — 단말 55대 + 시설 + 최신 8 센서 ──
 app.get("/api/devices", dbRequired, async (req, res) => {
   try {
-    const demoMode = isDemoMode(req);
     // 1. 단말 + 시설 메타
     const [devices] = await pool.query(`
       SELECT
@@ -3015,39 +3132,7 @@ app.get("/api/devices", dbRequired, async (req, res) => {
       };
     });
 
-    // 데모 모드: 가상 장비 10대 append
-    let finalOut = out;
-    if (demoMode) {
-      const demo = getDemoDevices().map((d) => ({
-        id:           d.txid,
-        deviceId:     d.deviceId,
-        facilityId:   d.facility,
-        zone:         zoneFromFacility(d.facility),
-        location:     d.location,
-        lat:          d.lat,
-        lng:          d.lng,
-        installDate:  null,
-        periodSec:    3600,
-        deviceStatus: 1,
-        status:       d.status,
-        volt:         d.sensors.volt,
-        sacrificial:  d.sensors.sacrificial,
-        ac:           d.sensors.ac,
-        battery:      d.sensors.battery,
-        temp:         d.sensors.temp,
-        hum:          d.sensors.hum,
-        shock:        d.sensors.shock,
-        commDbm:      d.sensors.commDbm,
-        commOk:       d.sensors.commDbm != null && d.sensors.commDbm > -115,
-        updatedAt:    d.lastMeasured,
-        hoursSilent:  d.hoursSilent,
-        recentAlarms: d.recentAlarms,
-        demo:         true,
-      }));
-      finalOut = [...out, ...demo];
-    }
-
-    res.json({ ok: true, demoMode, site_id: SITE_ID, count: finalOut.length, devices: finalOut });
+    res.json({ ok: true, site_id: SITE_ID, count: out.length, devices: out });
   } catch (err) {
     console.error("[/api/devices]", err);
     res.status(500).json({ ok: false, error: err.message });
@@ -3058,7 +3143,6 @@ app.get("/api/devices", dbRequired, async (req, res) => {
 //   query: range=1h|24h|7d  (default 24h)  kind=volt|ac|temp|hum|... (default volt)
 app.get("/api/devices/:id/history", dbRequired, async (req, res) => {
   try {
-    const demoMode = isDemoMode(req);
     const idRaw   = req.params.id;
     const id      = parseInt(idRaw, 10);
     const range   = req.query.range || "24h";
@@ -3066,18 +3150,7 @@ app.get("/api/devices/:id/history", dbRequired, async (req, res) => {
     const seq     = SENSOR_SEQ_KIND.indexOf(kind) + 1;
     if (seq < 1) return res.status(400).json({ ok: false, error: `unknown kind: ${kind}` });
 
-    const hours   = range === "1h" ? 1 : range === "7d" ? 168 : 24;
-
-    // 데모 단말 (id 가 음수 또는 DEMO-* deviceId 면)
-    if (demoMode && (id < 0 || String(idRaw).startsWith("DEMO-"))) {
-      const demoDev = id < 0 ? findDemoDeviceByTxid(id) : findDemoDevice(idRaw);
-      if (!demoDev) return res.status(404).json({ ok: false, error: "데모 단말 없음" });
-      const points = generateDemoHistory(demoDev.deviceId, kind, hours);
-      return res.json({
-        ok: true, demo: true, device_id: id, deviceId: demoDev.deviceId,
-        kind, unit: "", range, count: points.length, points,
-      });
-    }
+    const hours   = ({ "1h": 1, "6h": 6, "12h": 12, "24h": 24, "7d": 168, "30d": 720, "365d": 8760 })[range] || 24;
 
     // 단말의 해당 seq SENSOR_ID 찾기 (단말당 SENSOR_ID 정렬 후 seq 번째)
     const [sensorRows] = await pool.query(`
@@ -3088,13 +3161,17 @@ app.get("/api/devices/:id/history", dbRequired, async (req, res) => {
     const sensor = sensorRows.find((s) => Number(s.seq) === seq);
     if (!sensor) return res.status(404).json({ ok: false, error: "센서 없음" });
 
+    // 기준: NOW 가 아니라 '최신 데이터 시점'. (미러가 stale 해도 최근 N시간치가 항상 나옴 / 실시간이면 NOW 와 동일)
+    // 긴 범위는 버킷 평균으로 다운샘플(포인트 폭주 방지): ≤7일=원시(시간단위), 1달=4h, 1년=24h(일별)
+    const bucketH = hours <= 200 ? 1 : hours <= 1000 ? 4 : 24;
     const [rows] = await pool.query(`
-      SELECT WRITE_DATE AS t, VALUE AS v
+      SELECT MIN(WRITE_DATE) AS t, ROUND(AVG(VALUE)) AS v
       FROM kscg_sensor_data
       WHERE SENSOR_ID = ?
-        AND WRITE_DATE > DATE_SUB(NOW(), INTERVAL ? HOUR)
-      ORDER BY WRITE_DATE
-    `, [sensor.SENSOR_ID, hours]);
+        AND WRITE_DATE > DATE_SUB((SELECT MAX(WRITE_DATE) FROM kscg_sensor_data WHERE SENSOR_ID = ?), INTERVAL ? HOUR)
+      GROUP BY FLOOR(UNIX_TIMESTAMP(WRITE_DATE) / ?)
+      ORDER BY t
+    `, [sensor.SENSOR_ID, sensor.SENSOR_ID, hours, bucketH * 3600]);
 
     res.json({
       ok: true,
@@ -3108,11 +3185,38 @@ app.get("/api/devices/:id/history", dbRequired, async (req, res) => {
   }
 });
 
+// ── GET /api/devices/:id/ai-history — 단말 AI(LSTM-AE) 이상도 추이 ───
+//   ai_predictions 시계열 → v = mse/threshold × 100 (%). 70%=관찰 / 100%=이상 기준선.
+//   query: range=1h|6h|12h|24h|7d|30d|365d (default 24h)
+app.get("/api/devices/:id/ai-history", dbRequired, async (req, res) => {
+  try {
+    const id    = parseInt(req.params.id, 10);
+    const range = req.query.range || "24h";
+    const hours = ({ "1h": 1, "6h": 6, "12h": 12, "24h": 24, "7d": 168, "30d": 720, "365d": 8760 })[range] || 24;
+    // 기준: NOW 가 아니라 '최신 예측 시점'(미러 stale 대비). 긴 범위는 버킷 평균 다운샘플.
+    const bucketH = hours <= 200 ? 1 : hours <= 1000 ? 4 : 24;
+    const [rows] = await pool.query(`
+      SELECT MIN(predicted_at) AS t,
+             LEAST(ROUND(AVG(mse / NULLIF(threshold, 0)) * 100), 250) AS v,
+             ROUND(AVG(mse), 4) AS mse, ROUND(AVG(threshold), 4) AS threshold
+      FROM ai_predictions
+      WHERE transmitter_id = ? AND mse IS NOT NULL AND threshold > 0
+        AND predicted_at > DATE_SUB((SELECT MAX(predicted_at) FROM ai_predictions WHERE transmitter_id = ?), INTERVAL ? HOUR)
+      GROUP BY FLOOR(UNIX_TIMESTAMP(predicted_at) / ?)
+      ORDER BY t
+    `, [id, id, hours, bucketH * 3600]);
+    const points = rows.filter((r) => r.v != null).map((r) => ({ t: r.t, v: Number(r.v) }));
+    res.json({ ok: true, device_id: id, kind: "ai", unit: "%", range, count: points.length, points });
+  } catch (err) {
+    console.error("[/api/devices/:id/ai-history]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── GET /api/alarms — 최근 알람 ───────────────────────
 //   query: limit=20 (default), days=7 (default)
 app.get("/api/alarms", dbRequired, async (req, res) => {
   try {
-    const demoMode = isDemoMode(req);
     const limit = Math.min(parseInt(req.query.limit || "20", 10), 100);
     const days  = parseInt(req.query.days  || "7", 10);
     const [rows] = await pool.query(`
@@ -3139,19 +3243,7 @@ app.get("/api/alarms", dbRequired, async (req, res) => {
       ORDER BY a.GEN_DATE DESC
       LIMIT ?
     `, [days, limit]);
-    // 데모 알람 prepend
-    let merged = rows;
-    if (demoMode) {
-      const demoAl = getDemoAlarms().map((a, i) => ({
-        id: -100 - i, occurredAt: a.occurredAt, sentAt: a.occurredAt,
-        gradeId: a.gradeId, gradeText: a.grade, sensorId: null,
-        deviceId: a.deviceId, facilityNum: a.facility,
-        value: a.value, contents: a.contents, status: 0, notifyType: "DEMO",
-        demo: true,
-      }));
-      merged = [...demoAl, ...rows].slice(0, limit);
-    }
-    res.json({ ok: true, count: merged.length, alarms: merged, demoMode });
+    res.json({ ok: true, count: rows.length, alarms: rows });
   } catch (err) {
     console.error("[/api/alarms]", err);
     res.status(500).json({ ok: false, error: err.message });
@@ -3162,7 +3254,6 @@ app.get("/api/alarms", dbRequired, async (req, res) => {
 //   anomalies = 심각 AI 이상, watch = 경계 이상/관찰, commOutage = 24h+ 무측정
 app.get("/api/anomalies", dbRequired, async (req, res) => {
   try {
-    const demoMode = isDemoMode(req);
     // AI 예측(ai_predictions) 최신 1건/단말 + 단말명/시설 → 이상/관찰 목록
     const [aiRows] = await pool.query(`
       SELECT t.NAME AS node, f.NUMBER AS facility,
@@ -3198,13 +3289,7 @@ app.get("/api/anomalies", dbRequired, async (req, res) => {
         ts: r.predictedAt,
       };
     };
-    // 이두현 모델 등급 그대로: '이상'(≥100%) → anomalies, '관찰'(70~100%) → watch
-    const aiAnoms = aiRows.filter((r) => r.riskLevel === "이상").map(mkAi)
-                          .sort((a, b) => (b.aiRatio || 0) - (a.aiRatio || 0));
-    const aiWatch = aiRows.filter((r) => r.riskLevel === "관찰").map(mkAi)
-                          .sort((a, b) => (b.aiRatio || 0) - (a.aiRatio || 0));
-
-    // 통신 24h 두절 — 별도 배열(commOutage). AI mse/threshold 와 섞지 않음.
+    // 통신 24h 두절 — 별도 배열(commOutage). AI mse/threshold 와 섞지 않음. (먼저 계산해 이상/관찰에서 제외)
     const [outageRows] = await pool.query(`
       SELECT t.NAME AS node, f.NUMBER AS facility,
              MAX(r.DATE) AS lastSeen,
@@ -3224,36 +3309,21 @@ app.get("/api/anomalies", dbRequired, async (req, res) => {
       hoursSilent: Number(r.hoursSilent), lastSeen: r.lastSeen,
       label: `통신 두절 ${fmtHours(r.hoursSilent)}`,
     }));
+    // 24h+ 무측정 단말 = 통신장애. 낡은 AI 예측이 '이상/관찰'이어도 데이터가 끊겼으면 신뢰 불가 →
+    // 이상/관찰 목록에서 제외하고 commOutage 로만 표기 (mapStatus offline 판정과 일관).
+    const silentNodes = new Set(outageRows.map((r) => r.node));
 
-    // 데모 가산 (critical→anomalies, warn→watch — AI 값 사용)
-    let demoAnomalies = [], demoWatch = [], demoOutage = [];
-    if (demoMode) {
-      const dd = getDemoDevices();
-      const mkDemo = (d, rl) => ({
-        node: d.deviceId, zone: zoneFromFacility(d.facility),
-        label: rl, mse: d.mse, threshold: d.threshold, riskLevel: rl,
-        aiReliability: d.aiReliability,
-        aiRatio: d.threshold ? Number((d.mse / d.threshold).toFixed(2)) : null,
-        contribution: [], ts: d.lastMeasured, demo: true,
-      });
-      demoAnomalies = dd.filter((d) => d.status === "critical").map((d) => mkDemo(d, "이상"));
-      demoWatch     = dd.filter((d) => d.status === "warn").map((d) => mkDemo(d, "관찰"));
-      demoOutage    = dd.filter((d) => d.status === "offline").map((d) => ({
-        node: d.deviceId,
-        zone: zoneFromFacility(d.facility),
-        hoursSilent: d.hoursSilent,
-        lastSeen: d.lastMeasured,
-        label: `통신 두절 ${fmtHours(d.hoursSilent)}`,
-        demo: true,
-      }));
-    }
+    // 이두현 모델 등급 그대로: '이상'(≥100%) → anomalies, '관찰'(70~100%) → watch (통신두절 단말 제외)
+    const aiAnoms = aiRows.filter((r) => r.riskLevel === "이상" && !silentNodes.has(r.node)).map(mkAi)
+                          .sort((a, b) => (b.aiRatio || 0) - (a.aiRatio || 0));
+    const aiWatch = aiRows.filter((r) => r.riskLevel === "관찰" && !silentNodes.has(r.node)).map(mkAi)
+                          .sort((a, b) => (b.aiRatio || 0) - (a.aiRatio || 0));
 
     res.json({
       ok: true,
-      demoMode,
-      anomalies: [...demoAnomalies, ...aiAnoms],
-      watch: [...demoWatch, ...aiWatch],
-      commOutage: [...demoOutage, ...commOutage],
+      anomalies: aiAnoms,
+      watch: aiWatch,
+      commOutage,
     });
   } catch (err) {
     console.error("[/api/anomalies]", err);
@@ -3304,6 +3374,10 @@ app.get("/api/log-events", dbRequired, async (req, res) => {
     const after = req.query.after;
     const q     = (req.query.q || "").trim().toLowerCase();
     const limit = Math.min(parseInt(req.query.limit || "100", 10), 300);
+    // 🔒 감사(audit) 이벤트 = 로그인 기록(실명·역할·실패ID)·도구호출. 비로그인 노출 시 PII + 계정 탐색 신호가 됨
+    //    → 로그인한 관람계층(VIEW_TIER: 관리자/뷰어/게스트)에게만. 비로그인은 알람·AI분석·미러링만 본다.
+    const _claims = authClaims(req);
+    const canAudit = !!(_claims && VIEW_TIER(_claims.role));
 
     // ── 소스별 "보장 쿼리" ───────────────────────────────────────
     // 문제: audit_log(매분 누적) 가 alarm(드물지만 중요) 을 시간순 정렬에서 가림.
@@ -3359,7 +3433,7 @@ app.get("/api/log-events", dbRequired, async (req, res) => {
                COUNT(*) AS device_cnt
         FROM kscg_sensor_data sd
         JOIN kscg_sensor_info si ON si.SENSOR_ID = sd.SENSOR_ID
-        ${after ? "WHERE sd.WRITE_DATE > ?" : ""}
+        WHERE sd.WRITE_DATE > ${after ? "?" : "DATE_SUB(NOW(), INTERVAL 7 DAY)"}
         GROUP BY sd.WRITE_DATE, si.TRANSMITTER_ID
         ORDER BY sd.WRITE_DATE DESC
         LIMIT ${PER.sync}
@@ -3372,25 +3446,31 @@ app.get("/api/log-events", dbRequired, async (req, res) => {
       LIMIT ${PER.sync}
     `, after ? [after] : []);
 
-    // tool — audit_log AI 도구호출 (최근 7일, after 증분). action='tool_call' 한정.
-    const [audits] = await pool.query(`
-      SELECT id, created_at, action, target_id, metadata_json
-      FROM audit_log
-      WHERE action = 'tool_call'
-        AND created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
-        ${after ? "AND created_at > ?" : ""}
-      ORDER BY created_at DESC LIMIT ${PER.tool}
-    `, after ? [after] : []);
+    // tool — audit_log AI 도구호출 (최근 7일, after 증분). action='tool_call' 한정. 🔒 비로그인 차단.
+    let audits = [];
+    if (canAudit) {
+      [audits] = await pool.query(`
+        SELECT id, created_at, action, target_id, metadata_json
+        FROM audit_log
+        WHERE action = 'tool_call'
+          AND created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
+          ${after ? "AND created_at > ?" : ""}
+        ORDER BY created_at DESC LIMIT ${PER.tool}
+      `, after ? [after] : []);
+    }
 
-    // auth — audit_log 로그인/실패 (최근 30일, after 증분)
-    const [auths] = await pool.query(`
-      SELECT id, created_at, action, target_id, metadata_json
-      FROM audit_log
-      WHERE action IN ('login', 'login_fail')
-        AND created_at > DATE_SUB(NOW(), INTERVAL 30 DAY)
-        ${after ? "AND created_at > ?" : ""}
-      ORDER BY created_at DESC LIMIT ${PER.auth}
-    `, after ? [after] : []);
+    // auth — audit_log 로그인/실패 (최근 30일, after 증분). 🔒 실명·역할·실패ID 노출 방지 → 비로그인 차단.
+    let auths = [];
+    if (canAudit) {
+      [auths] = await pool.query(`
+        SELECT id, created_at, action, target_id, metadata_json
+        FROM audit_log
+        WHERE action IN ('login', 'login_fail')
+          AND created_at > DATE_SUB(NOW(), INTERVAL 30 DAY)
+          ${after ? "AND created_at > ?" : ""}
+        ORDER BY created_at DESC LIMIT ${PER.auth}
+      `, after ? [after] : []);
+    }
 
     const fmtTime = (d) => {
       const dt = new Date(d);
@@ -4075,7 +4155,7 @@ const GB_BOT_MODELS = new Set(["gpt-4o-mini", "gpt-5", "gpt-5.5"]);   // 라운�
 async function runPersonaReply(personaKey, message, modelOverride) {
   const p = BOT_PERSONAS.find((x) => x.persona_key === personaKey && x.enabled);
   if (!p) return null;
-  const hits = await retrieveChunks(message, personaKey, 4);
+  const hits = await retrieveChunks(message, personaKey, 6);   // 4→6: 점수 분포가 평평해 4에서 자르면 정작 핵심 청크(예: "RAG 구현됨")가 5~6위로 밀려 빠짐 → 주입량 상향으로 근거 누락 방지
   const grounding = hits.length
     ? hits.map((h) => `[${h.section}]\n${h.text}`).join("\n\n")
     : "(관련 근거 없음 — 근거 없는 내용은 추측하지 말 것)";
@@ -4255,7 +4335,7 @@ app.get("/api/inquiries/mine", requireAuth, dbRequired, async (req, res) => {
     const target = (req.query.target === "developer" || req.query.target === "admin") ? req.query.target : null;
     const [rows] = await pool.query(
       `SELECT id, target, kind, message, reply_quote AS replyQuote, image, bot_reply AS botReply, status, admin_reply AS adminReply, created_at AS createdAt
-       FROM inquiries WHERE user_id = ? ${target ? "AND target = ?" : ""} ORDER BY created_at, id LIMIT 200`,
+       FROM inquiries WHERE deleted_at IS NULL AND user_id = ? ${target ? "AND target = ?" : ""} ORDER BY created_at, id LIMIT 200`,
       target ? [req.auth.uid, target] : [req.auth.uid]);
     res.json({ ok: true, count: rows.length, inquiries: rows.map(({ image, ...rest }) => ({ ...rest, images: parseInquiryImages(image) })) });
   } catch (err) {
@@ -4269,14 +4349,14 @@ app.get("/api/inquiries", requireAdminView, dbRequired, async (req, res) => {
   try {
     const status = (req.query.status === "open" || req.query.status === "done") ? req.query.status : null;
     const target = (req.query.target === "developer" || req.query.target === "admin") ? req.query.target : null;
-    const where = [], params = [];
+    const where = ["deleted_at IS NULL"], params = [];   // 소프트 삭제된 문의 제외
     if (status) { where.push("status = ?"); params.push(status); }
     if (target) { where.push("target = ?"); params.push(target); }
     const [rows] = await pool.query(
       `SELECT id, target, user_id AS userId, login_id AS loginId, display_name AS displayName,
               kind, message, image, bot_reply AS botReply, status, admin_reply AS adminReply,
               created_at AS createdAt, updated_at AS updatedAt
-       FROM inquiries ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY (status='done'), created_at DESC LIMIT 500`,
+       FROM inquiries WHERE ${where.join(" AND ")} ORDER BY (status='done'), created_at DESC LIMIT 500`,
       params);
     res.json({ ok: true, count: rows.length, inquiries: rows.map(({ image, ...rest }) => ({ ...rest, images: parseInquiryImages(image) })) });
   } catch (err) {
@@ -4313,31 +4393,29 @@ app.patch("/api/inquiries/:id", requireAdmin, dbRequired, async (req, res) => {
   }
 });
 
+// DELETE /api/inquiries/:id (admin) — 소프트 삭제(deleted_at 만 찍어 목록에서 숨김, DB 보존·복구 가능)
+app.delete("/api/inquiries/:id", requireAdmin, dbRequired, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ ok: false, error: "잘못된 id" });
+    const [r] = await pool.query(`UPDATE inquiries SET deleted_at = NOW() WHERE id = ? AND deleted_at IS NULL`, [id]);
+    if (!r.affectedRows) return res.status(404).json({ ok: false, error: "문의 없음" });
+    res.json({ ok: true, id });
+  } catch (err) {
+    console.error("[DELETE /api/inquiries/:id]", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── POST /api/predict/:id — LSTM 예측 (ai_predictions 조회) ──
 //   현재 LSTM 백엔드(이두현) INSERT 대기 중. 데이터 없으면 stub 응답.
 //   id 파라미터는 TRANSMITTER_ID 숫자.
 app.post("/api/predict/:id", dbRequired, async (req, res) => {
   try {
-    const demoMode = isDemoMode(req);
     const idRaw = req.params.id;
     const txid = parseInt(idRaw, 10);
     if (!Number.isFinite(txid)) {
       return res.status(400).json({ ok: false, error: "id 는 숫자(TRANSMITTER_ID) 여야 합니다" });
-    }
-    // 데모 단말 (음수 txid)
-    if (demoMode && txid < 0) {
-      const d = findDemoDeviceByTxid(txid);
-      if (!d) return res.status(404).json({ ok: false, error: "데모 단말 없음" });
-      return res.json({
-        ok: true,
-        prediction: {
-          id: txid, predicted_at: d.lastMeasured, mse: d.mse, threshold: d.threshold,
-          risk_level: d.riskLevel, comm_status: d.status === "offline" ? "통신고장" : "정상통신",
-          ai_reliability: d.aiReliability, feature_contributions: null,
-          is_sacrificial_device: 0, deviceId: d.deviceId,
-        },
-        demo: true,
-      });
     }
     const [rows] = await pool.query(`
       SELECT p.id, p.predicted_at, p.mse, p.threshold,
@@ -4450,7 +4528,7 @@ app.post("/api/guestbook", guestbookPostLimiter, dbRequired, async (req, res) =>
 });
 
 // 삭제(모더레이션) — 관리자급만. 소프트 삭제.
-app.delete("/api/guestbook/:id", dbRequired, requireAdmin, async (req, res) => {
+app.delete("/api/guestbook/:id", dbRequired, requireSuperAdmin, async (req, res) => {   // 댓글 삭제(모더레이션)는 총괄 관리자(superadmin) 전용
   const id = parseInt(req.params.id, 10) || 0;
   if (!id) return res.status(400).json({ ok: false, error: "잘못된 요청입니다." });
   try {
@@ -4510,7 +4588,7 @@ app.get("/api/rag/test", localOnly, async (req, res) => {
   const q = String(req.query.q || "").slice(0, 500);
   const persona = String(req.query.persona || "park");
   if (!q) return res.json({ ok: false, error: "q 파라미터 필요" });
-  const hits = await retrieveChunks(q, persona, 4);
+  const hits = await retrieveChunks(q, persona, 6);   // 디버그도 production(runPersonaReply)과 동일 k
   res.json({ ok: true, kbChunks: KB_CHUNKS.length, persona, hits: hits.map((h) => ({ section: h.section, score: h.score })) });
 });
 
@@ -4617,6 +4695,38 @@ const wsHeartbeat = setInterval(() => {
 wss.on("close", () => clearInterval(wsHeartbeat));
 
 // ─────────────────────────────────────────────────────
+// Next Action(다음 행동 제안) — LLM 답변 끝의 ⟦NEXT⟧질문1│질문2 마커를 본문과 분리.
+//   마커 없음/파싱 실패 → nextActions [] (칩 안 뜸, graceful).
+const NEXT_MARK = "⟦NEXT⟧";
+// 모델이 ⟦NEXT⟧ 외에 본문에도 선택지를 줄글로 나열한 경우, 그 '선택지 제시' 블록만 본문에서 제거.
+//   (단 "이상 단말들이 확인되었습니다: 1…2…" 같은 분석용 목록은 보존 — 선택지-제시 언어가 있을 때만 작동)
+function stripInlineChoices(body) {
+  let s = String(body || "").replace(/[ \t\n]+$/u, "");
+  if (!s) return "";
+  const tail = s.split("\n").slice(-8).join("\n");
+  if (!/(선택해|선택하실|선택하세요|골라|고르|다음 중|어떤[^\n]*(할지|작업))/u.test(tail)) return s.trim();
+  s = s.replace(/\n+[^\n]*(선택해|선택하|골라|고르|진행할지)[^\n]*$/u, "");   // 끝 마무리 안내문장
+  s = s.replace(/(?:\n\s*\d+[.)][^\n]*)+\s*$/u, "");                          // 끝 번호목록 블록
+  s = s.replace(/\n[^\n]*(다음 중|아래|선택)[^\n]*:?\s*$/u, "");              // 그 앞 안내 인트로
+  return s.trim();
+}
+function splitNextActions(text) {
+  const clean = (x) => String(x || "").trim().replace(/^["'·\-\s]+|["'\s]+$/g, "");
+  const s = String(text || "");
+  const mi = s.indexOf(NEXT_MARK);
+  if (mi < 0) return { reply: s.trim(), nextActions: [], nextTitle: "" };
+  const reply = s.slice(0, mi).trim();
+  const firstLine = s.slice(mi + NEXT_MARK.length).split("\n")[0];
+  // 형식: 제목§옵션1│옵션2│옵션3  (§ 없으면 제목 없이 옵션만)
+  let title = "", optStr = firstLine;
+  const si = firstLine.indexOf("§");
+  if (si >= 0) { title = clean(firstLine.slice(0, si)); optStr = firstLine.slice(si + 1); }
+  const nextActions = optStr.split(/[│|]/).map(clean).filter(Boolean).slice(0, 5);
+  // 선택지가 있으면 본문에 중복 나열된 선택지 블록 제거 (팝업이 버튼으로 보여주므로)
+  const cleanReply = nextActions.length ? stripInlineChoices(reply) : reply;
+  return { reply: cleanReply, nextActions, nextTitle: title };
+}
+
 // 시스템 프롬프트 (도메인 지식 + 실시간 시스템 상태 주입)
 // ─────────────────────────────────────────────────────
 function buildSystemPrompt(ctx) {
@@ -4706,16 +4816,16 @@ function buildSystemPrompt(ctx) {
 - 단말마다 **threshold** 가 다름 (학습 시점 정상 MSE 분포의 99 percentile). 자세한 값은 **get_ai_model_info(deviceId)** 도구로 조회
 - **3단계 분류 (비율 기준)**:
   - **정상** — 현재 MSE < threshold × 0.70
-  - **관찰** — threshold × 0.70 ≤ 현재 MSE ≤ threshold × 1.00
-  - **이상** — 현재 MSE > threshold × 1.00
+  - **관찰** — threshold × 0.70 ≤ 현재 MSE < threshold × 1.00
+  - **이상** — 현재 MSE ≥ threshold × 1.00
 - 답변 시 가능하면 "현재 MSE 가 threshold 의 N% 도달" 같이 비율로 설명 (절대값 단독은 의미 약함)
 - "정상 패턴의 N% 상승" 같은 표현 금지. 정확히는 "AI 임계값(threshold)의 N% 수준/도달"입니다.
 - **중요 구분**: 측정 센서 8 종(방식전위/희생전류/AC유입/배터리/온도/습도/충격/통신) ≠ AI 학습 입력 피처. AI 학습 입력 피처·시퀀스 길이·epoch 등 모델 세부 명세는 절대 추측 금지, 반드시 **get_ai_model_info** 도구 호출해서 확인하세요. (예: 학습 base_features 는 4개, 파생 포함 12개 컬럼 — 도구 응답으로 확정)
 
 # 상태 단계 (4단계) — 화면 라벨 = 이두현 AI 모델 등급(정상/관찰/이상) 그대로 (KSCG 알람은 상태와 무관)
 - **정상** — AI '정상' (현재 MSE < threshold × 0.70)
-- **관찰** — AI '관찰' (threshold × 0.70 ≤ MSE ≤ threshold × 1.00) · 모니터링 강화
-- **이상** — AI '이상' (MSE > threshold × 1.00) · 즉각 현장 점검 (가장 심각, 빨강)
+- **관찰** — AI '관찰' (threshold × 0.70 ≤ MSE < threshold × 1.00) · 모니터링 강화
+- **이상** — AI '이상' (MSE ≥ threshold × 1.00) · 즉각 현장 점검 (가장 심각, 빨강)
 - **통신 장애** — comm_status = '통신고장' (연속 두절 + 신호품질 기준, 이두현 통신 판정)
 - 화면 라벨은 이두현 코드(RISK_LABELS: 정상/관찰/이상)와 동일. KSCG 알람은 상태 판정에 사용하지 않음(별도 알림/로그). 사용자가 "위험" 이라 물으면 AI '이상' 등급을 가리킵니다.
 
@@ -4802,7 +4912,7 @@ ${trendBlock}
 7. **포맷** — 마크다운 헤더(##) X. **굵게**(**TB24-250429**) 정도만.
 8. **원인 피처 라벨** — 도구가 주는 원인 피처는 이미 사람이 읽는 라벨입니다(예: "습도 편차", "방식전위 변화"). "습도_dev24", "방식전위_diff1" 같은 원시 컬럼명을 답변에 그대로 쓰지 마세요.
 9. **AI 위험도 표현** — MSE/threshold 같은 작은 절대값보다 "AI 기준 대비 x{배수}" 로 설명(예: AI 기준 대비 x484). "threshold 의 N% 수준" 도 가능.
-10. **상태 = AI 등급 그대로 (알람 분리)** — 화면 '이상' 단말 = AI risk_level '이상'(MSE > threshold)인 단말입니다. KSCG 알람은 상태 판정과 무관(별도 알림/로그). "최근 알람 없음" 을 "이상 단말 없음" 으로 답하지 마세요. 이상/관찰 단말 수는 위 "현재 시스템 상태" 의 카운트(컨텍스트 없으면 get_summary)를 기준으로 답하세요. 사용자가 "위험" 이라 하면 AI '이상' 등급을 뜻합니다.
+10. **상태 = AI 등급 그대로 (알람 분리)** — 화면 '이상' 단말 = AI risk_level '이상'(MSE ≥ threshold)인 단말입니다. KSCG 알람은 상태 판정과 무관(별도 알림/로그). "최근 알람 없음" 을 "이상 단말 없음" 으로 답하지 마세요. 이상/관찰 단말 수는 위 "현재 시스템 상태" 의 카운트(컨텍스트 없으면 get_summary)를 기준으로 답하세요. 사용자가 "위험" 이라 하면 AI '이상' 등급을 뜻합니다.
 
 # 응답 예시 (형식 참고 — 실제 수치는 도구로 확인)
 
@@ -4822,5 +4932,17 @@ ${trendBlock}
 > 방식전위는 매설배관 부식 보호 지표로 -850mV 이하가 양호 기준입니다. 초과 시 부식 진행 가능성이 있어 정류기 출력 점검이 필요합니다.
 
 금지 (낡은 예시): "MSE 0.42 → 0.85, 임계 0.85" 같은 큰 스케일 가짜 수치나 "TB24-5JN###" 형식 ID. 실제 단말 ID 는 TB24-250xxx, threshold 는 0.0003 수준의 작은 값이며, 위험도는 "AI 기준 대비 x배수" 로 설명합니다.
+
+# 다음 행동 제안 (필수 · 항상 답변 맨 마지막 줄)
+답변을 모두 마친 뒤, 줄바꿈 후 맨 마지막에 아래 형식으로만 출력하세요:
+⟦NEXT⟧<안내 제목>§<선택1>│<선택2>│…
+- **제목**: 방금 답변 맥락에 어울리는 1줄 안내/질문(12~20자). 예: "이상 단말, 어디부터 볼까요?", "제3구역 더 살펴볼까요?"
+- **선택 2~5개 (개수 가변)**: 사용자가 이어서 누를 만한 다음 질문/명령. **진짜 관련 있는 만큼만 — 매번 개수가 달라도 좋고, 억지로 채우거나 중복하지 말 것.** 갈래가 적으면 2개, 많으면 5개까지. 각 12자 내외, 네 도구로 답할 수 있는 것만.
+- 제목과 선택은 **§** 로, 선택끼리는 **│(U+2502)** 로 구분. 이 줄엔 그 외 텍스트·번호·설명 금지.
+- 🚫 **본문(답변)에는 선택지를 절대 나열하지 마세요.** "다음 중에서 선택하세요", "1. … 2. … 3. …", "어떤 작업을 할지 선택" 같은 선택지 나열·안내를 본문에 쓰면 안 됩니다. 선택지는 **오직 ⟦NEXT⟧ 줄에만** 존재합니다(UI가 버튼으로 렌더). 본문에 또 쓰면 중복으로 깨집니다.
+- 만약 답이 사실상 "선택지 제시"가 전부인 질문(예: "무슨 작업 할까?")이면 → **본문은 비우거나 한 줄 요약만** 쓰고 선택지는 전부 ⟦NEXT⟧ 로 내보내세요.
+- 예(5개): ⟦NEXT⟧어디부터 볼까요?§TB24-250429 상세│제3구역 단말│통신장애 단말은?│전체 상태 요약│최근 12시간 추이
+- 예(2개): ⟦NEXT⟧더 도와드릴까요?§정상 단말 목록│구역별 현황
+- 🚫 잘못된 예(본문 나열 금지): "다음 중 선택하세요: 1. TB24-250429 상세 2. 제3구역 …" ← 이렇게 쓰지 말 것. 대신 위 ⟦NEXT⟧ 형식으로.
 `;
 }

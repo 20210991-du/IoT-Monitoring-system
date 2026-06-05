@@ -177,11 +177,16 @@ function Avatar({ src, name, size = 34 }) {
   return <div style={{ width: size, height: size, borderRadius: "50%", flexShrink: 0, marginTop: 1, background: `hsl(${h},52%,54%)`, color: "#fff", display: "grid", placeItems: "center", fontSize: size * 0.42, fontWeight: 700 }}>{s.trim().charAt(0).toUpperCase() || "?"}</div>;
 }
 
-export function GuestbookList({ gb, isGuest = false, isAdmin = false, me = null, ChatMessage, DayDivider = null }) {
+export function GuestbookList({ gb, isGuest = false, isSuper = false, me = null, ChatMessage, DayDivider = null, bottomSpace = 120 }) {
   const listRef = useRef(null);
   const stickRef = useRef(true);
-  useEffect(() => { const el = listRef.current; if (el && stickRef.current) el.scrollTop = el.scrollHeight; }, [gb.messages, gb.pendingBot]);
-  const onScroll = (e) => { const c = e.currentTarget; stickRef.current = c.scrollHeight - c.scrollTop - c.clientHeight < 60; };
+  // 핀(맨아래)일 때만 자동 스크롤 — 새 메시지/봇응답/여백변화 시. rAF 로 레이아웃 정착 후 (관제 도우미와 동일 방식)
+  useEffect(() => {
+    if (!stickRef.current) return;
+    const el = listRef.current; if (!el) return;
+    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+  }, [gb.messages, gb.pendingBot, bottomSpace]);
+  const onScroll = (e) => { const c = e.currentTarget; stickRef.current = c.scrollHeight - c.scrollTop - c.clientHeight < 48; };
 
   const [cardUid, setCardUid] = useState(null);   // 열려있는 프로필 카드의 uid (로그인 작성자)
   const fetchProfile = gb.fetchProfile;
@@ -198,7 +203,7 @@ export function GuestbookList({ gb, isGuest = false, isAdmin = false, me = null,
 
   return (
     <div ref={listRef} className="scroll" onScroll={onScroll}
-      style={{ flex: 1, overflowY: "auto", padding: "3px 12px clamp(150px, 30vh, 380px)", minHeight: 0, background: "var(--bg-sunk)" }}>
+      style={{ flex: 1, overflowY: "auto", padding: "3px 12px 0", paddingBottom: bottomSpace, minHeight: 0, background: "var(--bg-sunk)" }}>
       {/* 헤더(시원팀 공개문의 · 접속수) 제거 — 탭 이름과 중복, 사용자 요청 */}
       {team.length > 0 && (
         <div style={{ position: "sticky", top: 0, zIndex: 3, display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", marginBottom: 12, borderRadius: 12, background: "var(--brand-wash-solid)", border: "1px solid var(--line)", boxShadow: "0 6px 16px -8px rgba(15,23,42,0.22)" }}>
@@ -241,7 +246,7 @@ export function GuestbookList({ gb, isGuest = false, isAdmin = false, me = null,
               <div style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", alignItems: "center", gap: 6, padding: "2px 2px 0", marginLeft: mine ? 0 : 42 }}>
                 {bot && <span style={{ fontSize: 9, fontWeight: 800, padding: "1px 5px", borderRadius: 999, color: "#fff", background: "var(--brand)" }}>AI</span>}
                 <span style={{ fontSize: 10, color: "var(--ink-4)" }}>{fmtTime(m.createdAt)}</span>
-                {isAdmin && <button onClick={() => gb.del(m.id)} title="삭제(모더레이션)" style={{ border: "none", background: "transparent", color: "var(--ink-4)", cursor: "pointer", fontSize: 10.5, padding: 0 }}>삭제</button>}
+                {isSuper && <button onClick={() => gb.del(m.id)} title="삭제(모더레이션)" style={{ border: "none", background: "transparent", color: "var(--ink-4)", cursor: "pointer", fontSize: 10.5, padding: 0 }}>삭제</button>}
               </div>
             </div>
           );
