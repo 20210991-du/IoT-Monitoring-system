@@ -28,12 +28,13 @@ from pathlib import Path
 import pandas as pd
 import pymysql
 
-# 이 스크립트의 폴더 = ai/scripts/. 다른 모듈 (predict.py) 도 같은 폴더.
-SCRIPT_DIR = Path(__file__).resolve().parent
+# 이 스크립트의 폴더 = models/scripts/. 추론 모듈은 이두현·이재헌의 ai/scripts/ 에서 import만(읽기 전용).
+SCRIPT_DIR = Path(__file__).resolve().parent          # models/scripts
+REPO       = SCRIPT_DIR.parent.parent                 # 리포 루트
 
-# gas_common_model_predict 모듈 동적 import — 파일명에 공백/괄호 있어서 importlib 필요
+# gas_common_model_predict 모듈 동적 import (ai/scripts/ 의 이재헌 코드 — 건드리지 않고 import만)
 import importlib.util
-PREDICT_PY = SCRIPT_DIR / 'gas_common_model_predict.py'
+PREDICT_PY = REPO / 'ai' / 'scripts' / 'gas_common_model_predict.py'
 spec = importlib.util.spec_from_file_location('predict_mod', PREDICT_PY)
 predict_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(predict_mod)
@@ -42,9 +43,10 @@ load_artifacts        = predict_mod.load_artifacts
 predict_device_window = predict_mod.predict_device_window
 BASE_FEATURES         = predict_mod.BASE_FEATURES
 
-AI_ROOT     = SCRIPT_DIR.parent
-MODELS_DIR  = AI_ROOT / 'models'
-CONFIG_DIR  = AI_ROOT / 'config'
+# 활성 모델 = models/active (레지스트리 활성 버전의 사본). 이두현 ai/models·ai/config 는 안 건드림.
+ACTIVE_DIR  = REPO / 'models' / 'active'
+MODELS_DIR  = ACTIVE_DIR
+CONFIG_DIR  = ACTIVE_DIR
 
 # seq → kind (server.js 와 동일 매핑)
 SENSOR_SEQ_KIND = ['volt', 'sacrificial', 'ac', 'battery', 'temp', 'hum', 'shock', 'commDbm']

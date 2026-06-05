@@ -8,4 +8,4 @@ set -a
 set +a
 REPO="$HOME/PJHwork/projects/team/IoT-Monitoring-system"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] ai.predict 시작"
-exec "$REPO/ai/venv/bin/python" "$REPO/ai/scripts/predict_to_mysql.py" "$@"
+exec "$REPO/ai/venv/bin/python" "$REPO/models/scripts/predict_to_mysql.py" "$@"

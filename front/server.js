@@ -36,10 +36,13 @@ const __dirname  = path.dirname(__filename);
 let DEVICE_THRESHOLDS = {};   // { "TB24-250401": 0.00106..., ... }
 let MODEL_CONFIG = null;
 let EVAL_METRICS = null;
-const AI_ROOT_DIR     = path.join(__dirname, "..", "ai");
-const AI_CONFIG_DIR   = path.join(AI_ROOT_DIR, "config");
-const AI_MODELS_DIR   = path.join(AI_ROOT_DIR, "models");
-const AI_REGISTRY_DIR = path.join(AI_ROOT_DIR, "model_registry");
+const AI_ROOT_DIR       = path.join(__dirname, "..", "ai");          // 이두현·이재헌 영역 (불가침 — predict 모듈만 import)
+const MODELS_ROOT_DIR   = path.join(__dirname, "..", "models");      // 우리(박지훈) 모델 workspace
+const AI_ACTIVE_DIR     = path.join(MODELS_ROOT_DIR, "active");      // 활성 모델 작업 사본 (predict 가 읽음, ai/ 안 건드림)
+const AI_CONFIG_DIR     = AI_ACTIVE_DIR;                             // device_thresholds·model_config 도 여기
+const AI_MODELS_DIR     = AI_ACTIVE_DIR;                             // keras·pkl 도 여기
+const AI_REGISTRY_DIR   = path.join(MODELS_ROOT_DIR, "registry");
+const MODELS_SCRIPTS_DIR = path.join(MODELS_ROOT_DIR, "scripts");
 function reloadAiConfig() {
   const load = (file, fallback) => {
     try {
@@ -693,10 +696,10 @@ app.patch("/api/ai/models/:version", requireAdmin, (req, res) => {
 // POST 재백필 (총괄 관리자) — 활성 모델로 과거 예측(source='backfill') 8샤드 병렬 재생성 (~25분, 백그라운드).
 app.post("/api/ai/models/rebackfill", requireAdmin, (req, res) => {
   if (rebackfill.running) return res.status(409).json({ ok: false, error: "이미 재생성이 진행 중입니다." });
-  const script = path.join(AI_ROOT_DIR, "scripts", "run-rebackfill.sh");
+  const script = path.join(MODELS_SCRIPTS_DIR, "run-rebackfill.sh");
   if (!existsSync(script)) return res.status(500).json({ ok: false, error: "재생성 스크립트가 없습니다." });
   try {
-    const child = spawn("/bin/bash", [script], { cwd: path.join(AI_ROOT_DIR, "scripts"), detached: true, stdio: "ignore", env: process.env });
+    const child = spawn("/bin/bash", [script], { cwd: MODELS_SCRIPTS_DIR, detached: true, stdio: "ignore", env: process.env });
     child.on("error", (e) => { console.error("[rebackfill]", e.message); rebackfill.running = false; });
     child.on("exit", (code) => { rebackfill.running = false; rebackfill.exitCode = code; rebackfill.finishedAt = new Date().toISOString(); console.log(`▶ 재백필 종료 code=${code}`); });
     child.unref();
@@ -4001,7 +4004,7 @@ const SUPPORT_SYSTEM = `당신은 '군산도시가스 매설배관 AI 통합관�
 
 // 개발자 문의(포폴) — 프로젝트 지식베이스(옵시디언 노트 정리본)를 주입
 let PROJECT_KNOWLEDGE = "";
-try { PROJECT_KNOWLEDGE = readFileSync(path.join(__dirname, "project-knowledge.md"), "utf8"); }
+try { PROJECT_KNOWLEDGE = readFileSync(path.join(__dirname, "..", "chatbot", "project-knowledge.md"), "utf8"); }
 catch (e) { console.warn("[project-knowledge] 로드 실패:", e.message); }
 // (DEV_SYSTEM·INQUIRY_DEV_MODEL 제거됨 — 개발자 문의 GPT Q&A는 '시원팀 공개문의'로 통합)
 // ── 로컬 RAG — project-knowledge.md를 섹션 청킹·임베딩(nomic-embed-text)해 kb_chunks 저장. 질문 임베딩 코사인 top-k(페르소나 도메인 필터). 전부 로컬·무료. ──
@@ -4041,7 +4044,7 @@ function gatherKbSources() {
   const out = chunkKnowledge(PROJECT_KNOWLEDGE || "");
   // 추가 지식: ai/kb/*.md (옵시디언에서 안전 큐레이션·스크럽한 ADR·자문·요구사항) — 공통(헤딩 키워드로 도메인 분류)
   try {
-    const kbDir = path.join(__dirname, "ai", "kb");
+    const kbDir = path.join(__dirname, "..", "chatbot", "kb");
     for (const fn of readdirSync(kbDir)) {
       if (!fn.endsWith(".md")) continue;
       let md = ""; try { md = readFileSync(path.join(kbDir, fn), "utf8"); } catch { continue; }
@@ -4050,7 +4053,7 @@ function gatherKbSources() {
     }
   } catch { /* ai/kb 폴더 없음 — 무시 */ }
   const PF = [["lee_duhyeon", "ai"], ["lee_jaeheon", "db"], ["park", "dashboard"]];
-  const dir = path.join(__dirname, "ai", "persona-knowledge");
+  const dir = path.join(__dirname, "..", "chatbot", "persona-knowledge");
   for (const [key, domain] of PF) {
     const fp = path.join(dir, `${key}.md`);
     if (!existsSync(fp)) continue;
