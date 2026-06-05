@@ -25,6 +25,7 @@ import jwt from "jsonwebtoken";
 import { randomBytes, randomInt, createHash } from "crypto";
 import { WebSocketServer } from "ws";
 import { spawn } from "child_process";
+import { createRag } from "../chatbot/rag.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -4002,141 +4003,9 @@ const SUPPORT_SYSTEM = `당신은 '군산도시가스 매설배관 AI 통합관�
 - 센서·단말 데이터 분석 요청이면 메인 AI 챗봇(일반 대화)에서 도와준다고 안내.
 - 모르면 모른다고 하고 관리자 확인이 필요하다고 안내. 추측·과장 금지.`;
 
-// 개발자 문의(포폴) — 프로젝트 지식베이스(옵시디언 노트 정리본)를 주입
-let PROJECT_KNOWLEDGE = "";
-try { PROJECT_KNOWLEDGE = readFileSync(path.join(__dirname, "..", "chatbot", "project-knowledge.md"), "utf8"); }
-catch (e) { console.warn("[project-knowledge] 로드 실패:", e.message); }
-// (DEV_SYSTEM·INQUIRY_DEV_MODEL 제거됨 — 개발자 문의 GPT Q&A는 '시원팀 공개문의'로 통합)
-// ── 로컬 RAG — project-knowledge.md를 섹션 청킹·임베딩(nomic-embed-text)해 kb_chunks 저장. 질문 임베딩 코사인 top-k(페르소나 도메인 필터). 전부 로컬·무료. ──
-const EMBED_MODEL = process.env.EMBED_MODEL || "nomic-embed-text";
-let KB_CHUNKS = [];   // [{ id, domain, section, text, vec:[...] }]
-async function embedText(text, kind = "document") {
-  // nomic-embed-text는 task prefix 필요(검색 품질 핵심): 문서=search_document, 질문=search_query
-  const prefixed = (kind === "query" ? "search_query: " : "search_document: ") + String(text || "").slice(0, 6000);
-  try {
-    const res = await fetch(`${OLLAMA_URL}/api/embed`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: EMBED_MODEL, input: prefixed, keep_alive: KEEP_ALIVE }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!res.ok) return null;
-    const j = await res.json();
-    const v = (j.embeddings && j.embeddings[0]) || j.embedding || null;
-    return Array.isArray(v) ? v : null;
-  } catch { return null; }
-}
-// 섹션(## ) 단위 청킹 + 도메인 태그(헤딩 키워드)
-function chunkKnowledge(md) {
-  const RULES = [
-    [/이상탐지|LSTM|모델|threshold|MSE|학습|피처|AI 이상/i, "ai"],
-    [/\bDB\b|데이터베이스|테이블|스키마|동기화|MySQL|미러/i, "db"],
-    [/챗봇|대시보드|프론트|UI|화면|지도|시각화|기능/i, "dashboard"],
-  ];
-  return md.split(/\n(?=## )/).map((p) => p.trim()).filter((t) => t.length >= 20 && !/응대\s*지침/.test(t.slice(0, 40))).map((text) => {
-    const heading = (text.match(/^#{1,3}\s+(.+)/) || [, "intro"])[1].trim();
-    let domain = "general";
-    for (const [re, d] of RULES) if (re.test(heading)) { domain = d; break; }
-    return { domain, section: heading, text };
-  });
-}
-// project-knowledge.md(공통, 헤딩 키워드로 도메인) + ai/persona-knowledge/*.md(멤버 자필, 도메인 고정) → 청크 소스
-function gatherKbSources() {
-  const out = chunkKnowledge(PROJECT_KNOWLEDGE || "");
-  // 추가 지식: ai/kb/*.md (옵시디언에서 안전 큐레이션·스크럽한 ADR·자문·요구사항) — 공통(헤딩 키워드로 도메인 분류)
-  try {
-    const kbDir = path.join(__dirname, "..", "chatbot", "kb");
-    for (const fn of readdirSync(kbDir)) {
-      if (!fn.endsWith(".md")) continue;
-      let md = ""; try { md = readFileSync(path.join(kbDir, fn), "utf8"); } catch { continue; }
-      md = md.replace(/<!--[\s\S]*?-->/g, "").replace(/^---[\s\S]*?---\s*/, "");   // 주석·frontmatter 제거
-      for (const c of chunkKnowledge(md)) out.push({ domain: c.domain, section: `kb · ${c.section}`, text: c.text });
-    }
-  } catch { /* ai/kb 폴더 없음 — 무시 */ }
-  const PF = [["lee_duhyeon", "ai"], ["lee_jaeheon", "db"], ["park", "dashboard"]];
-  const dir = path.join(__dirname, "..", "chatbot", "persona-knowledge");
-  for (const [key, domain] of PF) {
-    const fp = path.join(dir, `${key}.md`);
-    if (!existsSync(fp)) continue;
-    let md = ""; try { md = readFileSync(fp, "utf8"); } catch { continue; }
-    md = md.replace(/<!--[\s\S]*?-->/g, "");   // 주석 제거
-    for (const seg of md.split(/\n(?=## )/).map((s) => s.trim()).filter((s) => s.length >= 30)) {
-      const heading = (seg.match(/^#{1,3}\s+(.+)/) || [, "intro"])[1].trim().slice(0, 80);
-      out.push({ domain, section: `${key} · ${heading}`, text: seg });
-    }
-  }
-  return out;
-}
-async function loadKbChunks() {
-  if (!pool) return;
-  try {
-    const [rows] = await pool.query("SELECT id, domain, section, text, embedding FROM kb_chunks");
-    KB_CHUNKS = rows.map((r) => ({ id: r.id, domain: r.domain, section: r.section, text: r.text, vec: JSON.parse(r.embedding) }));
-    console.log(`▶ RAG  kb_chunks ${KB_CHUNKS.length}개 메모리 로드`);
-  } catch (e) { console.error("✗ kb_chunks 로드 실패:", e.message); }
-}
-async function ensureKbChunks() {
-  if (!pool) return;
-  try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS kb_chunks (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      domain VARCHAR(20) NOT NULL,
-      section VARCHAR(200) NULL,
-      text MEDIUMTEXT NOT NULL,
-      embedding MEDIUMTEXT NOT NULL,
-      doc_hash VARCHAR(40) NOT NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
-    const sources = gatherKbSources();
-    const hash = createHash("sha1").update("v4-persona:" + sources.map((s) => s.domain + "|" + s.text).join("")).digest("hex");
-    const [[{ n }]] = await pool.query("SELECT COUNT(*) AS n FROM kb_chunks WHERE doc_hash = ?", [hash]);
-    if (n === 0 && sources.length) {
-      const rows = [];
-      for (const c of sources) {
-        const vec = await embedText(c.text, "document");
-        if (vec) rows.push([c.domain, c.section, c.text, JSON.stringify(vec), hash]);
-        else console.warn("[kb] 임베딩 실패:", c.section);
-      }
-      if (rows.length) {
-        await pool.query("DELETE FROM kb_chunks");
-        await pool.query("INSERT INTO kb_chunks (domain, section, text, embedding, doc_hash) VALUES ?", [rows]);
-        console.log(`▶ RAG  kb_chunks ${rows.length}개 인제스트 (hash ${hash.slice(0, 8)})`);
-      }
-    }
-    await loadKbChunks();
-  } catch (e) { console.error("✗ kb_chunks 인제스트 실패:", e.message); }
-}
-ensureKbChunks();
-function cosineSim(a, b) {
-  let dot = 0, na = 0, nb = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-8);
-}
-// 페르소나 → 허용 청크 도메인. park(fallback/메인)=전체, 나머지=자기+general
-const PERSONA_RAG_DOMAIN = { lee_duhyeon: "ai", lee_jaeheon: "db", control_assistant: "dashboard", agent: "general", park: "dashboard" };
-async function retrieveChunks(query, personaKey, k = 6) {
-  if (!KB_CHUNKS.length) return [];
-  const qv = await embedText(query, "query");
-  if (!qv) return [];
-  const dom = PERSONA_RAG_DOMAIN[personaKey] || "*";
-  const qWords = String(query).toLowerCase().match(/[가-힣a-z0-9]{2,}/g) || [];
-  // 하이브리드: 코사인 + 도메인 부스트 + 키워드(헤딩>본문 가중) + 타 페르소나 자필 누출 패널티
-  const PFX = ["park · ", "lee_jaeheon · ", "lee_duhyeon · "];
-  return KB_CHUNKS
-    .map((c) => {
-      let score = cosineSim(qv, c.vec);
-      if (dom !== "*" && c.domain === dom) score += 0.08;
-      const sec = c.section || "", secLo = sec.toLowerCase(), txtLo = String(c.text).toLowerCase();
-      let secKw = 0, txtKw = 0;
-      for (const w of qWords) { if (secLo.includes(w)) secKw++; else if (txtLo.includes(w)) txtKw++; }
-      score += Math.min(secKw, 4) * 0.05 + Math.min(txtKw, 6) * 0.02;
-      if (PFX.some((p) => sec.startsWith(p)) && !sec.startsWith(personaKey + " · ")) score -= 0.15;
-      return { c, score };
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k)
-    .map((x) => ({ section: x.c.section, text: x.c.text, score: +x.score.toFixed(3) }));
-}
+// 로컬 RAG — chatbot/rag.js 모듈로 추출 (project-knowledge·kb·persona-knowledge → kb_chunks 코사인 검색)
+const rag = createRag({ pool, ollamaUrl: OLLAMA_URL, keepAlive: KEEP_ALIVE, chatbotDir: path.join(__dirname, "..", "chatbot") });
+rag.ensureKbChunks();
 
 // ── 페르소나 답변 엔진 — 공통 base(가드레일·grounding·디스클로저) + RAG 검색조각 + 페르소나 프롬프트 → LLM(기본 로컬 qwen). ──
 const PERSONA_BASE = `너는 '매설 가스배관 AI 통합관제 시스템'(호서대 시원팀 · 군산도시가스 실데이터) 공개 단톡방의 AI 페르소나다.
@@ -4158,7 +4027,7 @@ const GB_BOT_MODELS = new Set(["gpt-4o-mini", "gpt-5", "gpt-5.5"]);   // 라운�
 async function runPersonaReply(personaKey, message, modelOverride) {
   const p = BOT_PERSONAS.find((x) => x.persona_key === personaKey && x.enabled);
   if (!p) return null;
-  const hits = await retrieveChunks(message, personaKey, 6);   // 4→6: 점수 분포가 평평해 4에서 자르면 정작 핵심 청크(예: "RAG 구현됨")가 5~6위로 밀려 빠짐 → 주입량 상향으로 근거 누락 방지
+  const hits = await rag.retrieveChunks(message, personaKey, 6);   // 4→6: 점수 분포가 평평해 4에서 자르면 정작 핵심 청크(예: "RAG 구현됨")가 5~6위로 밀려 빠짐 → 주입량 상향으로 근거 누락 방지
   const grounding = hits.length
     ? hits.map((h) => `[${h.section}]\n${h.text}`).join("\n\n")
     : "(관련 근거 없음 — 근거 없는 내용은 추측하지 말 것)";
@@ -4591,8 +4460,8 @@ app.get("/api/rag/test", localOnly, async (req, res) => {
   const q = String(req.query.q || "").slice(0, 500);
   const persona = String(req.query.persona || "park");
   if (!q) return res.json({ ok: false, error: "q 파라미터 필요" });
-  const hits = await retrieveChunks(q, persona, 6);   // 디버그도 production(runPersonaReply)과 동일 k
-  res.json({ ok: true, kbChunks: KB_CHUNKS.length, persona, hits: hits.map((h) => ({ section: h.section, score: h.score })) });
+  const hits = await rag.retrieveChunks(q, persona, 6);   // 디버그도 production(runPersonaReply)과 동일 k
+  res.json({ ok: true, kbChunks: rag.kbCount(), persona, hits: hits.map((h) => ({ section: h.section, score: h.score })) });
 });
 
 // 디버그 — 페르소나 답변 엔진 확인(grounding 주입 + LLM 생성).
@@ -4624,7 +4493,7 @@ const httpServer = app.listen(PORT, () => {
   (async () => {
     try {
       await fetch(`${OLLAMA_URL}/api/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: OLLAMA_MODEL, messages: [{ role: "user", content: "안녕" }], stream: false, think: false, keep_alive: KEEP_ALIVE, options: { num_predict: 1 } }) });
-      await embedText("warmup", "query").catch(() => {});
+      await rag.embedText("warmup", "query").catch(() => {});
       console.log(`▶ 예열   Ollama 모델 로드 완료 (keep_alive ${KEEP_ALIVE})`);
     } catch (e) { console.warn("[warmup]", e.message); }
   })();
