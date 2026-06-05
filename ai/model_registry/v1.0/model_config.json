@@ -1,0 +1,27 @@
+{
+  "time_steps": 24,
+  "base_features": [
+    "방식전위",
+    "AC유입",
+    "온도",
+    "습도"
+  ],
+  "feature_columns": [
+    "방식전위",
+    "방식전위_diff1",
+    "방식전위_dev24",
+    "AC유입",
+    "AC유입_diff1",
+    "AC유입_dev24",
+    "온도",
+    "온도_diff1",
+    "온도_dev24",
+    "습도",
+    "습도_diff1",
+    "습도_dev24"
+  ],
+  "comm_quality_col": "통신품질",
+  "comm_quality_threshold_dbm": -115,
+  "comm_outage_consecutive_threshold": 3,
+  "best_tuned_threshold": 0.00026290700770914555
+}

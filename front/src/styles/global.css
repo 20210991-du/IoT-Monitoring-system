@@ -217,6 +217,11 @@ body {
   100% { transform: translateX(100%); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* 차트가 x축(아래)에서 위로 차오르듯 등장 */
+@keyframes _voltRise {
+  from { clip-path: inset(100% 0 0 0); opacity: 0.5; }
+  to   { clip-path: inset(0 0 0 0);   opacity: 1; }
+}
 @keyframes shimmer {
   0%   { background-position: -400px 0; }
   100% { background-position: 400px 0; }
@@ -348,4 +353,22 @@ input {
   position: absolute;
   inset: 0;
   background: var(--bg);
+}
+
+/* 지도 클릭 시 남는 브라우저 기본 focus 테두리 제거.
+   Leaflet 마커/컨테이너는 keyboard:true 라 클릭하면 포커스 아웃라인이 생기는데,
+   선택 강조는 커스텀 핀(makeIcon)으로 하므로 마우스 클릭 아웃라인은 끔
+   → 사이드바를 닫아도 클릭한 단말에 남던 '클릭 테두리'가 사라짐.
+   단, 키보드 탐색(:focus-visible)은 접근성을 위해 브랜드색 아웃라인 유지. */
+.leaflet-container:focus,
+.leaflet-container a:focus,
+.leaflet-marker-icon:focus,
+.leaflet-interactive:focus {
+  outline: none;
+}
+.leaflet-container:focus-visible,
+.leaflet-marker-icon:focus-visible,
+.leaflet-interactive:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
 }

@@ -9,10 +9,15 @@ import {
   adminUpdateUser,
   getAnnouncement,
   saveAnnouncement,
+  getLoginBg,
+  saveLoginBg,
+  getChatModels,
+  saveChatModels,
   ROLE_LABEL,
   ROLE_AVATAR,
   STATUS_LABEL,
 } from "../lib/authMock.js";
+import { getBootBar, setBootBar } from "../lib/userPrefs.js";
 
 /* ── 관리자 페이지 (admin 전용 통합 대시보드) ─────────────────
  *  sub-tabs:
@@ -52,12 +57,10 @@ function fmtDateSec(iso) {
 // 관리자 sub-tab 정의 (드래그로 순서 변경 — 순서는 localStorage 저장)
 const TAB_DEFS = [
   { k: "operators", label: "사용자 관리" },
-  { k: "notice",    label: "공지사항" },
   { k: "chatbot",   label: "챗봇 통계" },
   { k: "inq_admin", label: "상담원 문의함" },
-  { k: "personas",  label: "봇 페르소나" },
-  { k: "tokens",    label: "토큰 사용량" },
-  { k: "loginlog",  label: "로그인 로그" },
+  { k: "personas",  label: "챗봇 설정" },
+  { k: "aimodels",  label: "AI 모델" },
   { k: "settings",  label: "시스템 설정" },
 ];
 const TAB_ORDER_KEY = "siwon.admin.tabOrder";
@@ -65,6 +68,9 @@ const TAB_ORDER_KEY = "siwon.admin.tabOrder";
 // ── 메인 ─────────────────────────────────────────────────
 export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiStatus }) {
   const [section, setSection] = useState("operators");
+  const [userTab, setUserTab] = useState("list");   // 사용자 관리 내부 서브탭: list(사용자 목록) | log(로그인 기록)
+  const [settingsTab, setSettingsTab] = useState("settings");   // 시스템 설정 내부 서브탭: settings(설정) | notice(공지사항)
+  const [chatbotTab, setChatbotTab] = useState("personas");   // 챗봇 설정 내부 서브탭: personas(봇 페르소나) | tokens(토큰 사용량)
   // 탭 순서 (드래그 변경 + localStorage 유지). 저장에 없는 새 탭은 뒤에 붙이고, 사라진 탭은 제거.
   const [tabOrder, setTabOrder] = useState(() => {
     try {
@@ -176,16 +182,57 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
             👁️ 읽기 전용(뷰어) — 모든 내용을 볼 수 있지만 편집·삭제·전송은 할 수 없습니다.
           </div>
         )}
+        {/* 사용자 관리 + 로그인 기록 통합 서브탭 — fieldset 밖(읽기전용에도 탭 전환 가능). loginlog 옛 링크는 '로그인 기록'으로 */}
+        {(section === "operators" || section === "loginlog") && (
+          <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+            {[["list", "사용자 목록"], ["log", "로그인 기록"]].map(([k, lbl]) => {
+              const active = (section === "loginlog" ? "log" : userTab) === k;
+              return (
+                <button key={k} onClick={() => { if (section === "loginlog") setSection("operators"); setUserTab(k); }} style={{
+                  padding: "6px 14px", borderRadius: 999, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                  border: "1px solid " + (active ? "var(--brand)" : "var(--line)"),
+                  background: active ? "var(--brand)" : "var(--bg-elev)", color: active ? "#fff" : "var(--ink-3)",
+                }}>{lbl}</button>
+              );
+            })}
+          </div>
+        )}
+        {/* 시스템 설정 + 공지사항 통합 서브탭 — fieldset 밖(읽기전용에도 탭 전환 가능). notice 옛 링크는 '공지사항'으로 */}
+        {(section === "settings" || section === "notice") && (
+          <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+            {[["settings", "시스템 설정"], ["notice", "공지사항"]].map(([k, lbl]) => {
+              const active = (section === "notice" ? "notice" : settingsTab) === k;
+              return (
+                <button key={k} onClick={() => { if (section === "notice") setSection("settings"); setSettingsTab(k); }} style={{
+                  padding: "6px 14px", borderRadius: 999, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                  border: "1px solid " + (active ? "var(--brand)" : "var(--line)"),
+                  background: active ? "var(--brand)" : "var(--bg-elev)", color: active ? "#fff" : "var(--ink-3)",
+                }}>{lbl}</button>
+              );
+            })}
+          </div>
+        )}
+        {/* 챗봇 설정 = 봇 페르소나 + 토큰 사용량 통합 서브탭 — fieldset 밖(읽기전용에도 탭 전환 가능). tokens 옛 링크는 '토큰 사용량'으로 */}
+        {(section === "personas" || section === "tokens") && (
+          <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+            {[["personas", "봇 페르소나"], ["tokens", "토큰 사용량"]].map(([k, lbl]) => {
+              const active = (section === "tokens" ? "tokens" : chatbotTab) === k;
+              return (
+                <button key={k} onClick={() => { if (section === "tokens") setSection("personas"); setChatbotTab(k); }} style={{
+                  padding: "6px 14px", borderRadius: 999, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                  border: "1px solid " + (active ? "var(--brand)" : "var(--line)"),
+                  background: active ? "var(--brand)" : "var(--bg-elev)", color: active ? "#fff" : "var(--ink-3)",
+                }}>{lbl}</button>
+              );
+            })}
+          </div>
+        )}
         {/* 뷰어면 fieldset disabled 로 내부 모든 폼 컨트롤(버튼·입력·선택) 비활성. 백엔드도 쓰기 차단(이중 안전). 탭 네비는 헤더에 있어 영향 없음. */}
         <fieldset disabled={readOnly} style={{ border: "none", margin: 0, padding: 0, minInlineSize: 0 }}>
-        {section === "operators" && (
-          <OperatorsSection
-            user={user} users={users} counts={counts}
-            reload={reload} setToast={setToast}
-          />
-        )}
-        {section === "notice" && (
-          <NoticeSection setToast={setToast} />
+        {(section === "operators" || section === "loginlog") && (
+          (section === "loginlog" ? "log" : userTab) === "list"
+            ? <OperatorsSection user={user} users={users} counts={counts} reload={reload} setToast={setToast} />
+            : <LoginLogSection />
         )}
         {section === "chatbot" && (
           <ChatbotStatsSection setToast={setToast} />
@@ -193,17 +240,18 @@ export function Admin({ user, equipment, anomalies, watch, commOutage = [], apiS
         {section === "inq_admin" && (
           <InquiriesSection channel="admin" setToast={setToast} />
         )}
-        {section === "personas" && (
-          <BotPersonasSection setToast={setToast} />
+        {(section === "personas" || section === "tokens") && (
+          (section === "tokens" ? "tokens" : chatbotTab) === "tokens"
+            ? <TokenUsageSection />
+            : <BotPersonasSection setToast={setToast} />
         )}
-        {section === "tokens" && (
-          <TokenUsageSection />
+        {(section === "settings" || section === "notice") && (
+          (section === "notice" ? "notice" : settingsTab) === "notice"
+            ? <NoticeSection setToast={setToast} />
+            : <SettingsSection apiStatus={apiStatus} setToast={setToast} />
         )}
-        {section === "loginlog" && (
-          <LoginLogSection />
-        )}
-        {section === "settings" && (
-          <SettingsSection apiStatus={apiStatus} setToast={setToast} />
+        {section === "aimodels" && (
+          <AiModelsSection user={user} setToast={setToast} />
         )}
         </fieldset>
       </div>
@@ -221,6 +269,300 @@ const PERSONA_MODEL_OPTS = [
   { v: "gpt-4o", label: "GPT-4o (외부 · 고비용)" },
 ];
 const PERSONA_LOUNGE_KEYS = ["park", "lee_jaeheon", "lee_duhyeon"];
+// ── AI 모델 레지스트리 — 버전 목록 + 활성화 핫스왑 (활성화는 총괄 관리자만) ──
+function AiModelsSection({ user, setToast }) {
+  const [data, setData] = useState({ active: null, versions: [] });
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState("");   // 활성화 중인 version
+  const [showUpload, setShowUpload] = useState(false);
+  const [form, setForm] = useState({ version: "", label: "", note: "" });
+  const [files, setFiles] = useState({ keras: null, scalers: null, thresholds: null, config: null });
+  const [uploading, setUploading] = useState(false);
+  const [rb, setRb] = useState({ running: false, done: 0, total: 55 });   // 재백필 상태
+  const [editing, setEditing] = useState(null);                            // 메타 수정 중인 version
+  const [editForm, setEditForm] = useState({ version: "", label: "", note: "", trained_at: "" });
+  const [editFiles, setEditFiles] = useState({ keras: null, scalers: null, thresholds: null, config: null });
+  const canEdit = user?.role === "admin" || user?.role === "superadmin";   // 편집 권한: 시원팀(admin) + 총괄(superadmin)
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch("/api/ai/models", { credentials: "same-origin" }).then((x) => x.json());
+      if (r.ok) setData({ active: r.active, versions: r.versions || [] });
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  // 재백필 상태 폴링 (4초)
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try { const r = await fetch("/api/ai/models/rebackfill/status", { credentials: "same-origin" }).then((x) => x.json()); if (alive && r.ok) setRb(r); } catch { /* ignore */ }
+    };
+    poll();
+    const id = setInterval(poll, 4000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const startRebackfill = async () => {
+    if (!canEdit || rb.running) return;
+    if (!window.confirm("활성 모델로 과거 1년 AI 이상도 그래프를 재생성할까요?\n~25분 소요 · 8코어 사용(라이브 사이트가 잠시 느려질 수 있음).")) return;
+    try {
+      const r = await fetch("/api/ai/models/rebackfill", { method: "POST", credentials: "same-origin" }).then((x) => x.json());
+      if (r.ok) { setRb(r); setToast && setToast({ kind: "ok", text: "과거 재생성 시작 — 약 25분" }); }
+      else setToast && setToast({ kind: "err", text: r.error || "재생성 시작 실패" });
+    } catch { setToast && setToast({ kind: "err", text: "재생성 오류" }); }
+  };
+
+  const activate = async (ver) => {
+    if (!canEdit || busy) return;
+    if (!window.confirm(`'${ver}' 모델을 활성화할까요?\n다음 예측 주기부터 이 모델이 적용됩니다. (과거 그래프 재생성은 별도 버튼)`)) return;
+    setBusy(ver);
+    try {
+      const r = await fetch(`/api/ai/models/${encodeURIComponent(ver)}/activate`, { method: "POST", credentials: "same-origin" }).then((x) => x.json());
+      if (r.ok) { setData({ active: r.active, versions: r.versions || [] }); setToast && setToast({ kind: "ok", text: `활성 모델 → ${ver}` }); }
+      else setToast && setToast({ kind: "err", text: r.error || "활성화 실패" });
+    } catch { setToast && setToast({ kind: "err", text: "활성화 오류" }); }
+    setBusy("");
+  };
+
+  const del = async (ver) => {
+    if (!canEdit || !window.confirm(`'${ver}' 버전을 삭제할까요? (되돌릴 수 없음)`)) return;
+    try {
+      const r = await fetch(`/api/ai/models/${encodeURIComponent(ver)}`, { method: "DELETE", credentials: "same-origin" }).then((x) => x.json());
+      if (r.ok) { setData({ active: r.active, versions: r.versions || [] }); setToast && setToast({ kind: "ok", text: `삭제됨 — ${ver}` }); }
+      else setToast && setToast({ kind: "err", text: r.error || "삭제 실패" });
+    } catch { setToast && setToast({ kind: "err", text: "삭제 오류" }); }
+  };
+  const startEdit = (v) => {
+    setEditing(v.version);
+    setEditForm({ version: v.version, label: v.label || "", note: v.note || "", trained_at: v.trained_at || "" });
+    setEditFiles({ keras: null, scalers: null, thresholds: null, config: null });
+  };
+  const saveEdit = async () => {
+    const ver = editing;
+    try {
+      const body = { label: editForm.label, note: editForm.note, trained_at: editForm.trained_at };
+      if (editForm.version && editForm.version.trim() !== ver) body.newVersion = editForm.version.trim();
+      if (editFiles.keras)      body.keras_b64   = await readB64(editFiles.keras);
+      if (editFiles.scalers)    body.scalers_b64 = await readB64(editFiles.scalers);
+      if (editFiles.thresholds) body.thresholds  = await readText(editFiles.thresholds);
+      if (editFiles.config)     body.config      = await readText(editFiles.config);
+      const r = await fetch(`/api/ai/models/${encodeURIComponent(ver)}`, {
+        method: "PATCH", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then((x) => x.json());
+      if (r.ok) { setData({ active: r.active, versions: r.versions || [] }); setEditing(null); setToast && setToast({ kind: "ok", text: `수정됨 — ${r.version || ver}` }); }
+      else setToast && setToast({ kind: "err", text: r.error || "수정 실패" });
+    } catch (e) { setToast && setToast({ kind: "err", text: "수정 오류: " + (e.message || "") }); }
+  };
+  const readB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(file); });
+  const readText = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = rej; r.readAsText(file); });
+  // 폴더 통째 선택 → 이름으로 4개 아티팩트 자동 매칭 (이두현 common_model_artifacts/ 그대로)
+  const onPickFolder = (e) => {
+    const fl = Array.from(e.target.files || []);
+    const find = (name) => fl.find((f) => f.name === name) || null;
+    const next = {
+      keras: find("common_lstm_autoencoder.keras"),
+      scalers: find("group_scalers.pkl"),
+      thresholds: find("device_thresholds.json"),
+      config: find("model_config.json"),
+    };
+    setFiles(next);
+    const miss = Object.entries(next).filter(([, v]) => !v).map(([k]) => k);
+    if (miss.length) setToast && setToast({ kind: "err", text: `폴더에서 못 찾음: ${miss.join(", ")}` });
+    else setToast && setToast({ kind: "ok", text: "폴더에서 4개 아티팩트 자동 매칭됨 ✓" });
+  };
+  const submitUpload = async () => {
+    if (uploading) return;
+    if (!/^[A-Za-z0-9._-]{3,40}$/.test(form.version.trim())) { setToast && setToast({ kind: "err", text: "버전명: 영문/숫자/._- 3~40자" }); return; }
+    if (!files.keras || !files.scalers || !files.thresholds || !files.config) { setToast && setToast({ kind: "err", text: "4개 파일 모두 선택하세요" }); return; }
+    setUploading(true);
+    try {
+      const [keras_b64, scalers_b64, thresholds, config] = await Promise.all([
+        readB64(files.keras), readB64(files.scalers), readText(files.thresholds), readText(files.config),
+      ]);
+      const r = await fetch("/api/ai/models/upload", {
+        method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version: form.version.trim(), label: form.label.trim(), note: form.note.trim(), keras_b64, scalers_b64, thresholds, config }),
+      }).then((x) => x.json());
+      if (r.ok) {
+        setData({ active: r.active, versions: r.versions || [] });
+        setForm({ version: "", label: "", note: "" }); setFiles({ keras: null, scalers: null, thresholds: null, config: null }); setShowUpload(false);
+        setToast && setToast({ kind: "ok", text: `업로드됨 — ${r.version}` });
+      } else setToast && setToast({ kind: "err", text: r.error || "업로드 실패" });
+    } catch (e) { setToast && setToast({ kind: "err", text: "업로드 오류: " + (e.message || "") }); }
+    setUploading(false);
+  };
+
+  const fmtBytes = (n) => (n ? (n / 1048576).toFixed(1) + "MB" : "-");
+  const lblS = { display: "flex", flexDirection: "column", gap: 2, fontSize: 11.5, fontWeight: 600, color: "var(--ink-3)" };
+  const inpS = { marginTop: 3, padding: "7px 10px", borderRadius: 8, border: "1px solid var(--line-soft)", background: "var(--bg)", color: "var(--ink)", fontSize: 13, fontFamily: "inherit", outline: "none" };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 800, color: "var(--ink)" }}>AI 모델 레지스트리</div>
+        <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 3 }}>
+          LSTM-AE 모델을 버전별로 관리하고 활성 모델을 교체합니다. 활성화는 다음 예측 주기부터 적용 · {canEdit ? "편집 가능(시원팀 관리자)" : "보기 전용 — 편집은 시원팀(관리자)만"}.
+        </div>
+      </div>
+      {canEdit && (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", border: "1px solid var(--line-soft)", borderRadius: 10, background: "var(--bg-sunk)", flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)" }}>과거 AI 이상도 그래프 재생성</div>
+            <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 2 }}>
+              {rb.running
+                ? `진행 중… ${rb.done}/${rb.total} 단말 (8코어 병렬, ~25분)`
+                : "활성 모델 기준으로 과거 1년 예측을 다시 계산합니다. (모델 교체 후 권장)"}
+            </div>
+            {rb.running && (
+              <div style={{ marginTop: 6, height: 5, borderRadius: 999, background: "var(--line-soft)", overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${Math.min(100, Math.round((rb.done / Math.max(1, rb.total)) * 100))}%`, background: "var(--brand)", transition: "width 600ms ease" }} />
+              </div>
+            )}
+          </div>
+          <button type="button" disabled={rb.running} onClick={startRebackfill} style={{
+            padding: "9px 16px", borderRadius: 9, border: "1px solid var(--brand)",
+            background: rb.running ? "var(--bg-elev)" : "transparent", color: rb.running ? "var(--ink-3)" : "var(--brand)",
+            fontSize: 12.5, fontWeight: 700, cursor: rb.running ? "default" : "pointer", whiteSpace: "nowrap",
+          }}>{rb.running ? "재생성 중…" : "과거 재생성"}</button>
+        </div>
+      )}
+      {loading ? (
+        <div style={{ fontSize: 13, color: "var(--ink-3)", padding: 16 }}>불러오는 중…</div>
+      ) : data.versions.length === 0 ? (
+        <div style={{ fontSize: 13, color: "var(--ink-3)", padding: 16 }}>등록된 모델 버전이 없습니다.</div>
+      ) : (
+        <div style={{ display: "grid", gap: 10 }}>
+          {data.versions.map((v) => (
+            <div key={v.version} style={{
+              border: `1px solid ${v.active ? "var(--brand)" : "var(--line-soft)"}`,
+              background: v.active ? "var(--brand-wash)" : "var(--bg-sunk)",
+              borderRadius: 12, padding: "14px 16px",
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, flexWrap: "wrap",
+            }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span className="mono" style={{ fontSize: 14, fontWeight: 800, color: "var(--ink)" }}>{v.version}</span>
+                  {v.active && <span style={{ fontSize: 10, fontWeight: 800, color: "#fff", background: "var(--brand)", padding: "2px 8px", borderRadius: 999 }}>활성</span>}
+                  {!v.complete && <span style={{ fontSize: 10, fontWeight: 700, color: "var(--err)", background: "rgba(239,68,68,0.12)", padding: "2px 8px", borderRadius: 999 }}>아티팩트 누락</span>}
+                  {v.label && <span style={{ fontSize: 11.5, color: "var(--ink-2)" }}>{v.label}</span>}
+                </div>
+                {editing === v.version ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8, maxWidth: 460 }}>
+                    <label style={lblS}>버전명<input value={editForm.version} onChange={(e) => setEditForm((f) => ({ ...f, version: e.target.value }))} placeholder="영문/숫자/._- 3~40자" style={inpS} /></label>
+                    <label style={lblS}>라벨<input value={editForm.label} onChange={(e) => setEditForm((f) => ({ ...f, label: e.target.value }))} placeholder="설명 라벨" style={inpS} /></label>
+                    <label style={lblS}>학습일<input value={editForm.trained_at} onChange={(e) => setEditForm((f) => ({ ...f, trained_at: e.target.value }))} placeholder="2026-05-27 14:48" style={inpS} /></label>
+                    <label style={lblS}>메모<input value={editForm.note} onChange={(e) => setEditForm((f) => ({ ...f, note: e.target.value }))} placeholder="변경점 등" style={inpS} /></label>
+                    <div style={{ fontSize: 10.5, color: "var(--ink-4)", marginTop: 2 }}>아티팩트 교체 (비워두면 기존 유지):</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                      {[["keras", ".keras", ".keras"], ["scalers", "scalers.pkl", ".pkl"], ["thresholds", "thresholds.json", ".json"], ["config", "config.json", ".json"]].map(([key, label, accept]) => (
+                        <label key={key} style={{ ...lblS, fontSize: 10.5 }}>{label}{editFiles[key] && <span style={{ color: "var(--ok)" }}> ✓</span>}
+                          <input type="file" accept={accept} onChange={(e) => setEditFiles((f) => ({ ...f, [key]: e.target.files?.[0] || null }))} style={{ fontSize: 11, marginTop: 2 }} />
+                        </label>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 10, color: "var(--ink-4)", lineHeight: 1.4 }}>⚠️ 활성 버전의 아티팩트를 바꾸면 다음 예측부터 즉시 반영 · pkl 은 신뢰된 파일만.</div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+                      <button type="button" onClick={saveEdit} style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "var(--brand)", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>저장</button>
+                      <button type="button" onClick={() => setEditing(null)} style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid var(--line)", background: "transparent", color: "var(--ink-3)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>취소</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 6, display: "flex", gap: 12, flexWrap: "wrap" }}>
+                      <span>학습 {v.trained_at || "-"}</span>
+                      <span>단말 {v.device_count ?? "-"}</span>
+                      <span>time_steps {v.time_steps ?? "-"}</span>
+                      <span>피처 {v.feature_count ?? "-"}</span>
+                      <span>임계평균 {v.mean_threshold != null ? Number(v.mean_threshold).toExponential(2) : "-"}</span>
+                      <span>{fmtBytes(v.keras_bytes)}</span>
+                    </div>
+                    {v.note && <div style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 4 }}>{v.note}</div>}
+                  </>
+                )}
+              </div>
+              <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                {v.active && <span style={{ fontSize: 12, fontWeight: 700, color: "var(--brand)" }}>● 사용 중</span>}
+                {canEdit && editing !== v.version && (
+                  <>
+                    {!v.active && v.complete && (
+                      <button type="button" disabled={!!busy} onClick={() => activate(v.version)} style={{
+                        padding: "8px 16px", borderRadius: 9, border: "1px solid var(--brand)",
+                        background: busy === v.version ? "var(--bg-elev)" : "var(--brand)", color: busy === v.version ? "var(--ink-3)" : "#fff",
+                        fontSize: 12.5, fontWeight: 700, cursor: busy ? "default" : "pointer", opacity: busy && busy !== v.version ? 0.5 : 1,
+                      }}>{busy === v.version ? "활성화 중…" : "활성화"}</button>
+                    )}
+                    <button type="button" onClick={() => startEdit(v)} title="수정 — 버전명·아티팩트·메타 전체" style={{
+                      padding: "8px 12px", borderRadius: 9, border: "1px solid var(--line)", background: "transparent",
+                      color: "var(--ink-2)", fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                    }}>수정</button>
+                    {!v.active && (
+                      <button type="button" onClick={() => del(v.version)} title="이 버전 삭제" style={{
+                        padding: "8px 12px", borderRadius: 9, border: "1px solid var(--line)", background: "transparent",
+                        color: "var(--ink-3)", fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                      }}>삭제</button>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 새 모델 버전 업로드 (총괄 관리자) */}
+      {canEdit && (
+        <div style={{ border: "1px dashed var(--line)", borderRadius: 12, padding: "12px 16px", background: "var(--bg-sunk)" }}>
+          <button type="button" onClick={() => setShowUpload((s) => !s)} style={{
+            border: "none", background: "transparent", color: "var(--ink-2)", fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 0,
+          }}>＋ 새 모델 버전 업로드 {showUpload ? "▲" : "▼"}</button>
+          {showUpload && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 12 }}>
+              <label style={{ ...lblS, padding: "9px 11px", border: "1px dashed var(--brand)", borderRadius: 8, background: "var(--brand-wash)", color: "var(--ink-2)" }}>
+                📁 이두현 산출물 폴더 통째 선택 → 4개 자동 매칭 (권장)
+                <input type="file" webkitdirectory="" directory="" multiple onChange={onPickFolder} style={{ fontSize: 11, marginTop: 5 }} />
+              </label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <label style={lblS}>버전명 (영문/숫자/._-)
+                  <input value={form.version} onChange={(e) => setForm((f) => ({ ...f, version: e.target.value }))} placeholder="예: v20260701-unified" style={inpS} />
+                </label>
+                <label style={lblS}>라벨 (설명)
+                  <input value={form.label} onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))} placeholder="예: 통합 모델 v2" style={inpS} />
+                </label>
+              </div>
+              <label style={lblS}>메모 (선택)
+                <input value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} placeholder="변경점 등" style={inpS} />
+              </label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {[["keras", "모델 (.keras)", ".keras"], ["scalers", "스케일러 (group_scalers.pkl)", ".pkl"], ["thresholds", "임계값 (device_thresholds.json)", ".json"], ["config", "설정 (model_config.json)", ".json"]].map(([key, label, accept]) => (
+                  <label key={key} style={lblS}>{label}
+                    <input type="file" accept={accept} onChange={(e) => setFiles((f) => ({ ...f, [key]: e.target.files?.[0] || null }))} style={{ fontSize: 12, marginTop: 4 }} />
+                    {files[key] && <span style={{ fontSize: 10.5, color: "var(--ok)", marginTop: 2 }}>✓ {files[key].name}</span>}
+                  </label>
+                ))}
+              </div>
+              <div style={{ fontSize: 10.5, color: "var(--ink-4)", lineHeight: 1.5 }}>
+                ⚠️ <b>group_scalers.pkl</b> 은 예측 시 pickle 로 로드됩니다 — <b>본인이 학습시킨 신뢰할 수 있는 파일만</b> 올리세요. 업로드는 활성화와 별개(등록 후 "활성화" 필요).
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" disabled={uploading} onClick={submitUpload} style={{
+                  padding: "9px 18px", borderRadius: 9, border: "none", background: uploading ? "var(--bg-elev)" : "var(--brand)",
+                  color: uploading ? "var(--ink-3)" : "#fff", fontSize: 13, fontWeight: 700, cursor: uploading ? "default" : "pointer",
+                }}>{uploading ? "업로드 중…" : "버전 등록"}</button>
+                <button type="button" onClick={() => { setShowUpload(false); setForm({ version: "", label: "", note: "" }); setFiles({ keras: null, scalers: null, thresholds: null, config: null }); }} style={{
+                  padding: "9px 14px", borderRadius: 9, border: "1px solid var(--line)", background: "transparent", color: "var(--ink-3)", fontSize: 13, fontWeight: 600, cursor: "pointer",
+                }}>취소</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BotPersonasSection({ setToast }) {
   const [items, setItems] = useState([]);
   const [drafts, setDrafts] = useState({});
@@ -383,6 +725,16 @@ function InquiriesSection({ setToast, channel = "admin" }) {
       setToast && setToast({ kind: "ok", text: okMsg });
     } catch { setToast && setToast({ kind: "err", text: "변경 실패" }); }
   };
+  // 문의 삭제 (소프트 삭제 — 백엔드 deleted_at, 복구 가능). 확인 후 목록에서 제거.
+  const del = async (id) => {
+    if (!window.confirm("이 문의를 삭제할까요? (목록에서 숨겨지며 DB에는 보존됩니다)")) return;
+    try {
+      const r = await fetch(`/api/inquiries/${id}`, { method: "DELETE" }).then((x) => x.json());
+      if (!r.ok) throw new Error(r.error || "");
+      setItems((arr) => arr.filter((q) => q.id !== id));
+      setToast && setToast({ kind: "ok", text: "문의 삭제됨" });
+    } catch { setToast && setToast({ kind: "err", text: "삭제 실패" }); }
+  };
   // 답변 저장 (alsoDone=true 면 완료 처리까지 한 번에)
   const saveReply = (id, alsoDone) => {
     const text = (drafts[id] || "").trim();
@@ -420,7 +772,7 @@ function InquiriesSection({ setToast, channel = "admin" }) {
   ));
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 920 }}>
       {/* 요약 KPI */}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         {[
@@ -443,14 +795,15 @@ function InquiriesSection({ setToast, channel = "admin" }) {
       </div>
       {loading && <div style={{ color: "var(--ink-3)", fontSize: 13 }}>불러오는 중…</div>}
       {!loading && view.length === 0 && <div style={{ color: "var(--ink-4)", fontSize: 13, padding: "24px 0", textAlign: "center" }}>해당 문의가 없습니다.</div>}
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         {view.map((q) => {
           const isDev = (q.target || "admin") === "developer";
           const st = statusOf(q); const s = STAT[st];
           return (
           <div key={q.id} style={{
-            border: "1px solid var(--line)", borderLeft: `3px solid ${s.fg}`, borderRadius: 10, padding: "12px 14px",
-            background: "var(--bg-elev)", opacity: st === "done" ? 0.68 : 1,
+            border: "1px solid var(--line)", borderLeft: `4px solid ${s.fg}`, borderRadius: 12, padding: "16px 18px",
+            background: "var(--bg-elev)", opacity: st === "done" ? 0.72 : 1,
+            boxShadow: st === "done" ? "none" : "0 1px 3px rgba(0,0,0,0.04)",
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 7, flexWrap: "wrap" }}>
               <span style={{
@@ -470,13 +823,18 @@ function InquiriesSection({ setToast, channel = "admin" }) {
               {q.loginId && <span style={{ fontSize: 11, color: "var(--ink-4)" }}>@{q.loginId}</span>}
               <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--ink-4)" }}>{fmt(q.createdAt)}</span>
               <button onClick={() => patch(q.id, { status: q.status === "done" ? "open" : "done" }, q.status === "done" ? "미처리로 되돌림" : "완료 처리")} style={{
-                padding: "3px 10px", borderRadius: 7, fontSize: 11, fontWeight: 700, cursor: "pointer",
+                padding: "4px 11px", borderRadius: 8, fontSize: 11.5, fontWeight: 700, cursor: "pointer",
                 border: "1px solid " + (q.status === "done" ? "var(--line)" : "var(--ok)"),
-                background: q.status === "done" ? "var(--bg-sunk)" : "var(--ok)",
-                color: q.status === "done" ? "var(--ink-3)" : "#fff",
-              }}>{q.status === "done" ? "↩ 되돌리기" : "✓ 완료"}</button>
+                background: "transparent",
+                color: q.status === "done" ? "var(--ink-3)" : "#047857",
+              }}>{q.status === "done" ? "↩ 되돌리기" : "✓ 완료 처리"}</button>
+              <button onClick={() => del(q.id)} title="문의 삭제" style={{
+                padding: "4px 9px", borderRadius: 8, fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                border: "1px solid rgba(239,68,68,0.4)", background: "transparent", color: "var(--err)",
+              }}>삭제</button>
             </div>
-            <div style={{ fontSize: 13, color: "var(--ink)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{q.message}</div>
+            <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ink-4)", letterSpacing: "0.04em", marginBottom: 3 }}>문의 내용</div>
+            <div style={{ fontSize: 14.5, fontWeight: 500, color: "var(--ink)", whiteSpace: "pre-wrap", lineHeight: 1.55 }}>{q.message}</div>
             {Array.isArray(q.images) && q.images.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
                 {q.images.map((src, i) => (
@@ -487,17 +845,19 @@ function InquiriesSection({ setToast, channel = "admin" }) {
               </div>
             )}
             {q.botReply && (
-              <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, background: "var(--bg-sunk)", borderLeft: "3px solid var(--brand)", fontSize: 12, color: "var(--ink-3)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
-                <span style={{ fontWeight: 700, color: "var(--brand)" }}>{isDev ? "AI 설명 · " : "봇 답변 · "}</span>{q.botReply}
+              <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8, background: "var(--bg-sunk)", borderLeft: "3px solid var(--brand)", fontSize: 12.5, color: "var(--ink-2)", whiteSpace: "pre-wrap", lineHeight: 1.55 }}>
+                <div style={{ fontWeight: 700, color: "var(--brand)", fontSize: 11, marginBottom: 3 }}>{isDev ? "AI 설명" : "봇 답변"}</div>
+                {q.botReply}
               </div>
             )}
             {q.adminReply && (
-              <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, background: "rgba(16,185,129,0.08)", borderLeft: "3px solid var(--ok)", fontSize: 12, color: "var(--ink)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
-                <span style={{ fontWeight: 700, color: "#047857" }}>{isDev ? "개발자 답변 · " : "관리자 답변 · "}</span>{q.adminReply}
+              <div style={{ marginTop: 8, padding: "9px 12px", borderRadius: 8, background: "rgba(16,185,129,0.08)", borderLeft: "3px solid var(--ok)", fontSize: 12.5, color: "var(--ink)", whiteSpace: "pre-wrap", lineHeight: 1.55 }}>
+                <div style={{ fontWeight: 700, color: "#047857", fontSize: 11, marginBottom: 3 }}>{isDev ? "개발자 답변" : "관리자 답변"}</div>
+                {q.adminReply}
               </div>
             )}
             {/* 직접 답변 작성 — 답변+완료(원클릭) / 저장(미완료 유지) */}
-            <div style={{ marginTop: 8, display: "flex", gap: 6, alignItems: "stretch" }}>
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--line)", display: "flex", gap: 6, alignItems: "stretch" }}>
               <textarea
                 value={drafts[q.id] ?? ""}
                 onChange={(e) => setDrafts((d) => ({ ...d, [q.id]: e.target.value }))}
@@ -753,7 +1113,8 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
   const [createdCred, setCreatedCred] = useState(null); // {id, pw, name} — 등록 직후 1회 표시
 
   const filtered = useMemo(() => {
-    let list = filter === "all" ? users : users.filter((u) => u.role === filter);   // 역할별 필터
+    // "전체"는 게스트(1회용) 제외 — 누적은 보존하되 목록이 게스트로 길어지지 않게. 게스트는 '게스트' 탭에서만.
+    let list = filter === "all" ? users.filter((u) => u.role !== "guest") : users.filter((u) => u.role === filter);   // 역할별 필터
     const q = search.trim().toLowerCase();
     if (q) {
       list = list.filter((u) =>
@@ -772,7 +1133,7 @@ function OperatorsSection({ user, users, counts, reload, setToast }) {
   const filterTags = useMemo(() => {
     const byRole = users.reduce((a, u) => { a[u.role] = (a[u.role] || 0) + 1; return a; }, {});
     return [
-      { k: "all", ko: "전체", cnt: users.length },
+      { k: "all", ko: "전체", cnt: users.length - (byRole.guest || 0) },   // 전체 = 게스트 제외(비게스트)
       ...["superadmin", "admin", "viewer", "guest"].filter((r) => byRole[r]).map((r) => ({ k: r, ko: ROLE_LABEL[r] || r, cnt: byRole[r] })),
     ];
   }, [users]);
@@ -1119,6 +1480,25 @@ const POLLING_OPTIONS = [
   { k: 300, ko: "5분"  },
 ];
 
+const LOGIN_BG_OPTIONS = [
+  { k: "light",  ko: "빛퍼짐", desc: "기본 · 빛이 퍼지는 영상" },
+  { k: "flower", ko: "꽃",     desc: "이전 배경 영상" },
+];
+
+// 챗봇 모델 잠금 카탈로그 — Dashboard CHAT_MODELS 와 동일(로컬 3 + GPT 3). value 가 백엔드 화이트리스트와 일치해야 함.
+const CHAT_MODEL_CATALOG = [
+  { group: "로컬 (Mac Studio · 무료)", items: [
+    { value: "qwen3.5:9b",  label: "Qwen 빠름",   hint: "속도 빠름" },
+    { value: "qwen3:14b",   label: "Qwen 균형",   hint: "속도 중간" },
+    { value: "qwen3.5:27b", label: "Qwen 고품질", hint: "매우 느림" },
+  ]},
+  { group: "GPT (외부 · OpenAI · 유료)", items: [
+    { value: "gpt-4o-mini", label: "GPT 빠름",     hint: "외부 · 빠름" },
+    { value: "gpt-5",       label: "GPT 고품질",   hint: "외부 · 고품질" },
+    { value: "gpt-5.5",     label: "GPT 최고품질", hint: "외부 · 최고품질" },
+  ]},
+];
+
 function SettingsSection({ apiStatus, setToast }) {
   const [polling, setPolling] = useState(() => {
     const v = parseInt(localStorage.getItem("siwon.settings.polling"), 10);
@@ -1131,12 +1511,43 @@ function SettingsSection({ apiStatus, setToast }) {
     setToast({ kind: "ok", text: `폴링 주기를 ${v}초로 저장했습니다. (적용은 다음 새로고침)` });
   };
 
-  const resetMock = () => {
-    if (!window.confirm("모든 mock 데이터(사용자·세션·코드 등) 를 초기화합니다. 계속하시겠습니까?")) return;
-    Object.keys(localStorage)
-      .filter((k) => k.startsWith("siwon.auth.") || k.startsWith("siwon.settings.") || k.startsWith("siwon.prefs."))
-      .forEach((k) => localStorage.removeItem(k));
-    setToast({ kind: "ok", text: "초기화 완료. 페이지를 새로고침하면 시드 admin 으로 복귀됩니다." });
+  // 로그인 배경화면 (서버 저장 — 전체 사용자 공통)
+  const [loginBg, setLoginBg] = useState("light");
+  useEffect(() => { getLoginBg().then((r) => { if (r.ok && r.bg) setLoginBg(r.bg); }); }, []);
+  const applyLoginBg = async (v) => {
+    setLoginBg(v);
+    const r = await saveLoginBg(v);
+    setToast(r.ok
+      ? { kind: "ok", text: `로그인 배경을 '${v === "flower" ? "꽃" : "빛퍼짐"}'(으)로 저장했습니다.` }
+      : { kind: "err", text: r.error || "배경 저장 실패" });
+  };
+
+  // 부팅 로딩바 (BootScreen on/off — 이 브라우저 localStorage, 다음 접속부터 적용)
+  const [bootBar, setBootBarState] = useState(() => getBootBar());
+  const saveBootBar = (v) => {
+    setBootBarState(v);
+    setBootBar(v);
+    setToast({ kind: "ok", text: `부팅 로딩바를 ${v ? "켜짐" : "꺼짐"}으로 저장했습니다. (다음 접속 시 적용)` });
+  };
+
+  // 챗봇 모델 잠금 (서버 저장 — 전체 사용자 공통, 즉시 적용). null=로딩중.
+  const [enabledModels, setEnabledModels] = useState(null);
+  useEffect(() => { getChatModels().then((r) => { if (r.ok && Array.isArray(r.enabled)) setEnabledModels(r.enabled); }); }, []);
+  const toggleModel = async (value) => {
+    if (!enabledModels) return;
+    const has = enabledModels.includes(value);
+    const next = has ? enabledModels.filter((v) => v !== value) : [...enabledModels, value];
+    if (!next.length) { setToast({ kind: "err", text: "최소 1개 모델은 허용해야 합니다." }); return; }
+    const prev = enabledModels;
+    setEnabledModels(next);   // 낙관적 반영
+    const r = await saveChatModels(next);
+    if (r.ok) {
+      setEnabledModels(r.enabled);
+      setToast({ kind: "ok", text: `모델 잠금을 저장했습니다. (허용 ${r.enabled.length}개 · 즉시 적용)` });
+    } else {
+      setEnabledModels(prev);   // 롤백
+      setToast({ kind: "err", text: r.error || "모델 잠금 저장 실패" });
+    }
   };
 
   return (
@@ -1172,6 +1583,102 @@ function SettingsSection({ apiStatus, setToast }) {
         </div>
       </SettingPanel>
 
+      {/* 로그인 배경화면 — 서버 저장(전체 사용자 공통) */}
+      <SettingPanel title="로그인 배경화면" desc="로그인 페이지 배경 영상 — 저장 시 모든 사용자에게 적용">
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {LOGIN_BG_OPTIONS.map((o) => {
+            const active = loginBg === o.k;
+            return (
+              <button
+                key={o.k}
+                onClick={() => applyLoginBg(o.k)}
+                style={{
+                  padding: "8px 14px", borderRadius: 999,
+                  fontSize: 13, fontWeight: 700,
+                  background: active ? "var(--brand)" : "transparent",
+                  color: active ? "#fff" : "var(--ink-2)",
+                  border: `1px solid ${active ? "var(--brand)" : "var(--line)"}`,
+                  cursor: "pointer",
+                }}
+              >
+                {o.ko}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ marginTop: 10, fontSize: 11, color: "var(--ink-3)" }}>
+          {LOGIN_BG_OPTIONS.find((o) => o.k === loginBg)?.desc} · 저장 즉시 반영(로그인 페이지 새로고침 시)
+        </div>
+      </SettingPanel>
+
+      {/* 챗봇 모델 잠금 — 서버 저장(전체 사용자 공통 · 즉시 적용) */}
+      <SettingPanel title="AI 챗봇 모델 잠금" desc="관제 도우미·라운지에서 사용 가능한 모델을 선택. 끄면 모든 사용자(관리자 포함)의 피커에서 숨겨지고 백엔드에서도 차단됩니다.">
+        {enabledModels == null ? (
+          <div style={{ fontSize: 12, color: "var(--ink-3)" }}>불러오는 중…</div>
+        ) : (
+          <div style={{ display: "grid", gap: 14 }}>
+            {CHAT_MODEL_CATALOG.map((grp) => (
+              <div key={grp.group}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-3)", marginBottom: 6, letterSpacing: 0.2 }}>{grp.group}</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {grp.items.map((m) => {
+                    const on = enabledModels.includes(m.value);
+                    return (
+                      <button
+                        key={m.value}
+                        onClick={() => toggleModel(m.value)}
+                        title={`${m.value} · ${m.hint}`}
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 6,
+                          padding: "8px 13px", borderRadius: 999, fontSize: 13, fontWeight: 700,
+                          background: on ? "var(--brand)" : "transparent",
+                          color: on ? "#fff" : "var(--ink-3)",
+                          border: `1px solid ${on ? "var(--brand)" : "var(--line)"}`,
+                          cursor: "pointer", transition: "all 140ms ease",
+                        }}
+                      >
+                        <span style={{ fontSize: 11 }}>{on ? "✓" : "🔒"}</span>{m.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            <div style={{ fontSize: 11, color: "var(--ink-3)" }}>
+              허용 {enabledModels.length}개 · 클릭 시 즉시 저장·적용(최소 1개 유지). GPT는 외부 전송·유료입니다.
+            </div>
+          </div>
+        )}
+      </SettingPanel>
+
+      {/* 부팅 로딩바 — 이 브라우저 localStorage(다음 접속 시 적용) */}
+      <SettingPanel title="부팅 로딩바" desc="앱 시작 시 로그인 전 로딩 진행바(BootScreen) 표시 — 이 브라우저에만 적용 · 다음 접속부터">
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {[{ k: true, ko: "켜짐" }, { k: false, ko: "꺼짐" }].map((o) => {
+            const active = bootBar === o.k;
+            return (
+              <button
+                key={String(o.k)}
+                onClick={() => saveBootBar(o.k)}
+                style={{
+                  padding: "8px 14px", borderRadius: 999,
+                  fontSize: 13, fontWeight: 700,
+                  background: active ? "var(--brand)" : "transparent",
+                  color: active ? "#fff" : "var(--ink-2)",
+                  border: `1px solid ${active ? "var(--brand)" : "var(--line)"}`,
+                  cursor: "pointer",
+                }}
+              >
+                {o.ko}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ marginTop: 10, fontSize: 11, color: "var(--ink-3)" }}>
+          {bootBar ? "다음 접속 시 부팅 시퀀스(진행바·로그) 표시" : "꺼짐 · 로그인 화면 바로 표시"}
+        </div>
+      </SettingPanel>
+
       {/* 알림 임계값 (read-only — 모델/백엔드 영역) */}
       <SettingPanel title="알림 임계값" desc="이상 탐지 MSE 임계 (모델 학습 시 결정)">
         <div style={{ display: "grid", gap: 6 }}>
@@ -1184,21 +1691,6 @@ function SettingsSection({ apiStatus, setToast }) {
         </div>
       </SettingPanel>
 
-      {/* 개발자 도구 */}
-      <SettingPanel title="개발자 도구" desc="mock 데이터 초기화 등 — 시연 후 정리용">
-        <button
-          onClick={resetMock}
-          style={{
-            padding: "10px 14px", borderRadius: 10,
-            background: "transparent",
-            border: "1px solid rgba(239,68,68,0.4)",
-            color: "#dc2626", fontSize: 13, fontWeight: 700,
-            cursor: "pointer",
-          }}
-        >
-          🔄  Mock 데이터 전체 초기화
-        </button>
-      </SettingPanel>
     </div>
   );
 }

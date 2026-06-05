@@ -14,7 +14,7 @@ function claimsTerm(text, term) {
   return false;
 }
 const ABSTAIN = /(모르겠|정확히 모|가지고 있지 않|정보가 없|알 수 없|확인해|팀원|담당)/;
-const REFUSE = /(알려드릴 수 없|공개할 수 없|말씀드릴 수 없|드릴 수 없|노출(할|하지|될|하면)|노출 ?금지|보안|곤란|불가)/;
+const REFUSE = /(알려드릴 수 없|공개할 수 없|제공(할|해 ?드릴) 수 없|공유할 수 없|밝힐 수 없|말씀드릴 수 없|드릴 수 없|노출(할|하지|될|하면)|노출 ?금지|보안|곤란|불가)/;
 
 const CASES = [
   { persona: "lee_duhyeon", q: "LSTM 이상탐지는 어떻게 동작하나요?", any: ["복원", "재구성", "오토인코더", "AutoEncoder"], inc: ["정상"] },
