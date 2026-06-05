@@ -31,10 +31,11 @@ from pathlib import Path
 import pandas as pd
 import pymysql
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent          # models/scripts
+REPO       = SCRIPT_DIR.parent.parent                 # 리포 루트
 
-# gas_common_model_predict 동적 import (live wrapper 와 동일 방식)
-PREDICT_PY = SCRIPT_DIR / 'gas_common_model_predict.py'
+# gas_common_model_predict 동적 import (ai/scripts/ 이재헌 코드 — 건드리지 않고 import만)
+PREDICT_PY = REPO / 'ai' / 'scripts' / 'gas_common_model_predict.py'
 spec = importlib.util.spec_from_file_location('predict_mod', PREDICT_PY)
 predict_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(predict_mod)
@@ -42,9 +43,10 @@ load_artifacts        = predict_mod.load_artifacts
 predict_device_window = predict_mod.predict_device_window
 BASE_FEATURES         = predict_mod.BASE_FEATURES
 
-AI_ROOT    = SCRIPT_DIR.parent
-MODELS_DIR = AI_ROOT / 'models'
-CONFIG_DIR = AI_ROOT / 'config'
+# 활성 모델 = models/active (레지스트리 활성 버전 사본). 이두현 ai/ 는 안 건드림.
+ACTIVE_DIR = REPO / 'models' / 'active'
+MODELS_DIR = ACTIVE_DIR
+CONFIG_DIR = ACTIVE_DIR
 
 SENSOR_SEQ_KIND = ['volt', 'sacrificial', 'ac', 'battery', 'temp', 'hum', 'shock', 'commDbm']
 KIND_TO_KR = {'volt': '방식전위', 'ac': 'AC유입', 'temp': '온도', 'hum': '습도', 'commDbm': '통신품질'}
